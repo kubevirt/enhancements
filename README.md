@@ -12,6 +12,19 @@ This repository is currently Work In Progress but will eventually be used to man
 
 The VEP owner is responsible to update it as its development progresses, until it is fully mature (or deprecated).
 
+**NOTE**
+Acceptance of enhancement doesn't guarantee that the feature will land in the current or later release. The process is collaborative effort between contributor/s and Approvers. Features not landing to release branch prior to FF will be reverted based on their state (GA/Beta/Alpha, Off/On by default) that reflects how harmful keeping the code is to the system.
+
+## Approvers responsibility
+
+1. After Feature Freeze, approvers needs to go over issue and perform the following checklist:
+   1. All PRs are merged into release branch
+   2. Docs PR is merged (plan review ahead of release if only placeholder is opened)
+   3. Verify that Enhancement was implemented and doesn't need any update
+   4. Track any bugs
+2. Weekly check-in on progress of Enhancement and its implementation
+3. Coordinate SIGs, reviewers and approvers in order to progress the Enhancement
+
 ## Implementation Phases
 
 1. **Alpha Rollout (v1.5 Cycle)**:
