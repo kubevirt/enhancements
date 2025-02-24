@@ -18,7 +18,7 @@ The VEP owner is responsible to update it as its development progresses, until i
 1. **Alpha Rollout (v1.5 Cycle)**:
    - [x] Create the `kubevirt/enhancements` repository.
    - [x] Introduce a template for VEP submissions.
-   - [ ] Migrate one or two active designs to test the process.
+   - [x] Migrate one or two active designs to test the process.
    - [ ] Refine the process based on feedback from initial VEPs.
 2. **Full Rollout (v1.6 Cycle)**:
    - [ ] Transition all enhancements to the new process.
