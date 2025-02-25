@@ -100,6 +100,7 @@ type VirtualMachineInstanceSpec struct {
 type GPU struct {
 	// Name of the GPU device as exposed by a device plugin
 	Name string                    `json:"name"`
+	// DeviceName string `json:"deviceName"`    <-- inlined into DeviceSource
 	DeviceSource DeviceSource      `json:",inline"`
 	VirtualGPUOptions *VGPUOptions `json:"virtualGPUOptions,omitempty"`
 	// If specified, the virtual network interface address and its tag will be provided to the guest via config drive
@@ -205,12 +206,12 @@ generate the domain xml.
 ### DRA API for reading device related information
 
 The examples below shows the APIs used to generate the vmi.status.deviceStatuses section:
-1. the pod status has reference to the resourceClaimName, pod.status.resourceClaimStatuses[*].resourceClaimName where
-   the name of the claim is same as vmi.spec.resourceClaims[*].Name
+1. the pod status has reference to the resourceClaimName, pod.status.resourceClaimStatuses[].resourceClaimName where
+   the name of the claim is same as vmi.spec.resourceClaims[].Name
 1. pod spec has node name, pod.spec.nodeName
 1. the resourceclaim status has device name and driver use for allocating the device,
-   resourceclaim.status.allocation.devices[*].deviceName and resourceclaim.status.allocation.devices[*].driver, where
-   resourceclaim.status.allocation.devices[*].request is same as vmi.spec.domain.devices[*].gpus[*].claim.request
+   resourceclaim.status.allocation.devices[].deviceName and resourceclaim.status.allocation.devices[].driver, where
+   resourceclaim.status.allocation.devices[].request is same as vmi.spec.domain.devices[].gpus[].claim.request
 1. Using node name and driver name, the resource slice for that node could be found. Using device name, the attributes
    of the device could be found
 
@@ -639,7 +640,7 @@ type MigrationState struct {
 
 ### Alternative 2
 
-In order to handle the live-migration usecase, the following changes are required to the API:
+In order to handle the live-migration usecase, the following changes are required to the VMI API:
 ```go
 // DeviceStatus has the information of all devices allocated spec.domain.devices
 type DeviceStatus struct {
@@ -737,12 +738,13 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 - Code changes behind feature gate
 - unit tests
+- mock e2e test
 
 ### Beta
-- 
+
 - evaluate user and driver authors experience
 - feature gate turned on by default
-- e2e tests
+- e2e tests with 1 real driver implementation
 - consider additional usecases if any
 
 ### GA
