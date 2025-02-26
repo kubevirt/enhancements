@@ -543,7 +543,7 @@ type HostDevice struct {
 	Tag string `json:"tag,omitempty"`
 	// If specified, the ResourceName of the host device will be provisioned using DRA driver . which will not require the deviceName field
 	//+optional
-	ResourceClaim *ResourceClaim `json:"resourceClaim,omitempty"`
+	ResourceClaim *k8sv1.ResourceClaim `json:"resourceClaim,omitempty"`
 }
 
 // ResourceClaim represents a resource claim to be used by the virtual machine
