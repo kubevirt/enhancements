@@ -26,6 +26,7 @@ control of their devices using Virtual Machines and Containers.
 
 - Replace device-plugin support in KubeVirt
 - Align on what drivers KubeVirt will support in tree
+- Address any complexity issues when DRA APIs in KubeVirt
 
 ## Definition of Users
 
@@ -99,9 +100,11 @@ type VirtualMachineInstanceSpec struct {
 
 type GPU struct {
 	// Name of the GPU device as exposed by a device plugin
-	Name string                    `json:"name"`
+	Name string `json:"name"`
+	// DeviceSource is the name of the device provisioned either by device plugins
+	// or by DRA enabled device
 	// DeviceName string `json:"deviceName"`    <-- inlined into DeviceSource
-	DeviceSource DeviceSource      `json:",inline"`
+	DeviceSource      DeviceSource `json:",inline"`
 	VirtualGPUOptions *VGPUOptions `json:"virtualGPUOptions,omitempty"`
 	// If specified, the virtual network interface address and its tag will be provided to the guest via config drive
 	// +optional
@@ -110,6 +113,9 @@ type GPU struct {
 
 type HostDevice struct {
 	Name string               `json:"name"`
+	// DeviceSource is the name of the device provisioned either by device plugins
+	// or by DRA enabled device
+	// DeviceName string `json:"deviceName"`    <-- inlined into DeviceSource
 	DeviceSource DeviceSource `json:",inline"`
 	// If specified, the virtual network interface address and its tag will be provided to the guest via config drive
 	// +optional
@@ -119,8 +125,19 @@ type HostDevice struct {
 type DeviceSource struct {
 	// DeviceName is the name of the device provisioned by device-plugins
 	DeviceName *string `json:"deviceName,omitempty"`
-	// Claim is the name of the resource claim that is going to provision the DRA device
-	Claim *k8sv1.ResourceClaim `json:"claim,omitempty"`
+	// ClaimRequest provides the ClaimName from vmi.spec.resourceClaims[].name and
+	// requestName from resourceClaim.spec.devices.requests[].name
+	// this fields requires DRA feature gate enabled
+	ClaimRequest *ClaimRequest `json:",inline,omitempty"`
+}
+
+type ClaimRequest struct {
+	// ClaimName needs to be provided from the list vmi.spec.resourceClaims[].name where this
+	// device is allocated
+	ClaimName string `json:"claimName"`
+	// RequestName needs to be provided from resourceClaim.spec.devices.requests[].name where this
+	// device is requested
+	RequestName string `json:"requestName"`
 }
 
 type VirtualMachineInstanceStatus struct {
@@ -182,7 +199,7 @@ DomainSpec API.
 In v1alpha3 version of [DRA API](https://pkg.go.dev/k8s.io/api@v0.31.0/resource/v1alpha3#DeviceClaim), multiple drivers
 could potentially provision devices that are part of a single claim. For this reason, a separate list of claims required
 for the VMI (section 1) is needed instead of mentioning the resource claim in devices section
-([see Alternate Designs](#Alternative 1))
+[see Alternate Designs](#alternative-1)
 
 The second sections allows for the resource claim to be used in the spec.domain.devices section. The two uses cases
 currently handled by the design are:
@@ -206,12 +223,12 @@ generate the domain xml.
 ### DRA API for reading device related information
 
 The examples below shows the APIs used to generate the vmi.status.deviceStatuses section:
-1. the pod status has reference to the resourceClaimName, pod.status.resourceClaimStatuses[].resourceClaimName where
-   the name of the claim is same as vmi.spec.resourceClaims[].Name
-1. pod spec has node name, pod.spec.nodeName
+1. the pod status has reference to the resourceClaimName, `pod.status.resourceClaimStatuses[].resourceClaimName` where
+   the name of the claim is same as `vmi.spec.resourceClaims[].Name`
+1. pod spec has node name, `pod.spec.nodeName`
 1. the resourceclaim status has device name and driver use for allocating the device,
-   resourceclaim.status.allocation.devices[].deviceName and resourceclaim.status.allocation.devices[].driver, where
-   resourceclaim.status.allocation.devices[].request is same as vmi.spec.domain.devices[].gpus[].claim.request
+   `resourceclaim.status.allocation.devices[].deviceName` and `resourceclaim.status.allocation.devices[].driver`, where
+   `resourceclaim.status.allocation.devices[].request` is same as `vmi.spec.domain.devices[].gpus[].claim.request`
 1. Using node name and driver name, the resource slice for that node could be found. Using device name, the attributes
    of the device could be found
 
@@ -381,9 +398,8 @@ spec:
     devices:
       gpus:
       - name: pgpu
-        claim: 
-          name: pgpu-claim-name
-          request: pgpu-request-name
+        claimName: pgpu-claim-name
+        requestName: pgpu-request-name
 status:
   deviceStatus:
     gpuStatuses:
@@ -458,12 +474,12 @@ metadata:
 spec:
   config:
   - opaque:
-    driver: gpu.nvidia.com
-    parameters:
-      apiVersion: gpu.nvidia.com/v1alpha1
-      driverConfig:
-       driver: vfio-pci
-      kind: GpuConfig
+      driver: gpu.nvidia.com
+      parameters:
+        apiVersion: gpu.nvidia.com/v1alpha1
+        driverConfig:
+         driver: vfio-pci
+        kind: GpuConfig
   selectors:
   - cel:
       expression: device.driver == 'gpu.nvidia.com' && device.attributes['gpu.nvidia.com'].type == 'gpu'
@@ -483,9 +499,8 @@ spec:
     resourceClaimTemplateName: single-gpu
   domain:
     gpus:
-    - claim:
-         name: gpu-resource-claim
-         request: gpu
+    - claimName: gpu-resource-claim
+      requestName: gpu
       name: example-pgpu
 ```
 
@@ -504,9 +519,8 @@ spec:
     resourceClaimTemplateName: single-gpu
   domain:
     gpus:
-    - claim:
-         name: gpu-resource-claim
-         request: gpu
+    - claimName: gpu-resource-claim
+      requestName: gpu
       name: example-pgpu
 status:
   deviceStatus:
@@ -739,6 +753,11 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 - Code changes behind feature gate
 - unit tests
 - mock e2e test
+
+Note: there are multiple challenges in writing a real e2e test like, developing a driver implementing kubevirt devices,
+bringing in the driver in kubevirt CI. Before vendors get a chance to develop a driver, there needs to be an API that 
+they can develop against which will not be available until the alpha release. For this reason, writing an e2e test with 
+real driver is outside the scope of alpha and will be handled in beta.
 
 ### Beta
 
