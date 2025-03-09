@@ -52,6 +52,10 @@ control of their devices using Virtual Machines and Containers.
     2. Mediated device uuid for vGPU.
 1. Devices have to either be of the type GPU or HostDevices.
 
+### Future Usecases
+1. NVMe devices https://github.com/kubevirt/community/issues/254
+1. Live migration of VMIs using DRA devices
+
 ### Unsupported Usecases
 
 1. Devices where the DRA driver does not set the attributes needed to configure libvirt dom XML for the devices will not
@@ -196,7 +200,7 @@ The first section vmi.spec.resourceClaims will have a list of devices needed to 
 available as a list will allow users to use the device from this list in GPU section or HostDevices section of the
 DomainSpec API.
 
-In v1alpha3 version of [DRA API](https://pkg.go.dev/k8s.io/api@v0.31.0/resource/v1alpha3#DeviceClaim), multiple drivers
+In v1beta1 version of [DRA API](https://pkg.go.dev/k8s.io/api@v0.32.0/resource/v1beta1#DeviceClaim), multiple drivers
 could potentially provision devices that are part of a single claim. For this reason, a separate list of claims required
 for the VMI (section 1) is needed instead of mentioning the resource claim in devices section
 [see Alternate Designs](#alternative-1)
