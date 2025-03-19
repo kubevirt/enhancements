@@ -38,6 +38,10 @@ Primary SIG and optional additional SIGs responsible for the feature.
 Use the `/sig $SIG` command to associate the primary SIG with the enhancement.
 -->
 
+Primary SIG:
+/sig $SIG
+
+Additional SIGs (optional):
 /sig $SIG
 
 **Enhancement link**:
