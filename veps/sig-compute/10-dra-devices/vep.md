@@ -332,18 +332,19 @@ spec:
 ---
 ```
 
-### Web hook changes
+### Webhook changes
 
-1. Allow DRA devices to be requested only if the corresponding DRA feature gate is enabled in kubevirt configuration
-   Note: All the following sections will assume that DRA feature gate is enabled
+1. Allow the VMI only if vmi spec is correct, i.e. resource claims for requested devices are specified
+
+Note: The feature gate verification when VMI requesting DRA device will either be done in webhook or controller, TBD
 
 
 ### Virt controller changes
 
 1. If devices are requested using DRA, virt controller needs to render the virt-launcher manifest such that
-   pod.spec.resourceClaims and pod.spec.containers.resources.claim sections are filled out.
+   `pod.spec.resourceClaims` and `pod.spec.containers.resources.claim` sections are filled out.
 1. virt-controller needs a mechanism to watch for virt-launcher pods, resourceclaims and resourceslices to populate the
-   vmi.status.deviceStatus using the steps mentioned in above section that has all the attributes (for example the
+   `vmi.status.deviceStatus` using the steps mentioned in above section that has all the attributes (for example the
    pciAddress for the gpu device):
     1. The pod status has information about the allocated/reserved resourceClaim.
     1. The resourceClaim has information about the individual requests in the claim and their allocated device names.
@@ -539,7 +540,7 @@ status:
 
 ## Alternatives
 
-## Alternative 1
+### Alternative 1
 ```
 type GPU struct {
 	// Name of the GPU device as exposed by a device plugin
@@ -707,9 +708,10 @@ Steps to make live migration work:
 
 ## Update/Rollback Compatibility
 
-- Since the feature will be behind a feature gate updates will not be impacted
-- Since the feature will be behind a feature gate, rollback will continue to work as long as feature gate is disabled
-- If the feature is enabled, the VMIs that use DRA devices will have to be cleaned up before attempting rollback.
+- The changes in this design are upgrade compatible
+- Rollback will continue to work as long as feature gate is disabled
+- If the feature is enabled, the VMIs that use DRA devices will have to be deleted and feature gate disabled before 
+  attempting rollback.
 
 ## Functional Testing Approach
 
@@ -735,14 +737,6 @@ An overview on the approaches used to functional test this design)
 1. e2e tests
 1. upgrade downgrade tests
 1. scale tests
-
-Beta Phase:
-- e2e test coverage
-- additional usecases if any
-- updates to API fields if needed
-
-GA:
-- upgrade/downgrade testing
 
 ## Feature lifecycle Phases
 
