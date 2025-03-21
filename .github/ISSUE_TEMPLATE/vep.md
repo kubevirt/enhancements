@@ -65,7 +65,16 @@ See https://github.com/kubevirt/community/blob/main/design-proposals/feature-lif
   * [] VEP PRs:
   * [] Code PRs:
   * [] Docs PRs:
-  * [] Bugs:
+
+* [] Beta
+  * [] VEP PRs:
+  * [] Code PRs:
+  * [] Docs PRs:
+
+* [] GA
+  * [] VEP PRs:
+  * [] Code PRs:
+  * [] Docs PRs:
 
 **Additional context**:
 
