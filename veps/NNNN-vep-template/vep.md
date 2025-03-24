@@ -84,10 +84,12 @@ Does this impact update compatibility and how?)
 An overview on the approaches used to functional test this design)
 -->
 
-## Implementation Phases
+## Implementation History
 
 <!--
-How/if this design will get broken up into multiple phases)
+For example:
+01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
+03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
 -->
 
 ## Feature lifecycle Phases
