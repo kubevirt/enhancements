@@ -4,7 +4,7 @@
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 
 ## Overview
 
@@ -70,7 +70,17 @@ Figure 1 describes the current interaction between various components:
 ![figure 1](migration_current_state.png)
 
 #### Proposed state
-To start a live migration one now has to create two `VirtualMachineInstanceMigration` resources. A `target` resource, and a `source` resource.
+To start a live migration one now has to create two `VirtualMachineInstanceMigration` resources. A `target` resource, and a `source` resource. Additionally in order to migrate a special `VirtualMachine` resource has to be created on the target which is copy of the source `VirtualMachine` but it has a special `runStrategy` indicating it is the receiving `VirtualMachine`. The virt-controller will create a special receiving `VirtualMachineInstance` that can be referenced by the `target` `VirtualMachineInstanceMigration`.
+
+Additionally some other resources may be required if they are referenced by the source `VirtualMachine`. Examples of these additional resources are:
+* Secrets, required to eventually start the receiver pod.
+* ConfigMaps, required to eventually start the receiver pod.
+* InstanceTypes, required to create the receiving `VirtualMachineInstace`.
+* PreferenceTypes, required to create the receiving `VirtualMachineInstace`.
+
+The source `VirtualMachine` will reference some disks and networks. Whatever creates the target `VirtualMachine` will be responsible for creating blank receiver disks, and properly mapping the networks from the source `VirtualMachine` to the target `VirtualMachine`
+
+When migrating inside the same namespace, the additional `VirtualMachine` and associated resources are not needed as they already exist in the namespace.
 
 The `source` resource will contain a `connectionURL` that points to the synchronization controller at the target. The `source` resource will also contain a key which has to be unique across all migrations. The `target` resource will contain the same key. This will allow the synchronization controller to map the `VirtualMachineInstance` it receives on the synchronization channel to the appropriate `target` `VirtualMachineInstance`. Once the synchronization has been established, any status updates can be communicated between the `source` and the `target` just like in the current state. This means enough information has been exchanged to start the receiver pod, and once the receiver pod is ready, the migration can start.
 
@@ -94,14 +104,17 @@ Figure 4 describes the interaction with a source and target `VirtualMachineInsta
 
 ![figure 4](decentralized_cross_cluster.png)
 
-#### Synchronization controller
-Once the `VirtualMachineInstanceMigration`s have been created, the target `virt-controller` will create a `VirtualMachineInstance` based on the associated `Virtual Machine` resource, but in a special receiver mode. This `VirtualMachineInstance` is not subject to the normal interactions of the `virt-controller` or `virt-handler`, while it is not synchronized with the source `VirtualMachineInstance`. The synchronization controller is responsible for synchronizing this `VirtualMachineInstance` with ones it receives over the synchronization channel based on the keys in the `VirtualMachineInstanceMigration`s.
+## Synchronization controller
 
-The synchronization controller allows one to synchronize two distinct and separate `VirtualMachineInstance`s. The synchronization controller is a separate controller that has access to modify `VirtualMachineInstance`s state and can connect to the migration network.
+The synchronization controller facilitates the synchronization of migration state between source and target `VirtualMachineInstance`s. This enables the `virt-controller` to interact with its `VirtualMachineInstance` as if it were the sole instance, maintaining consistency in proposed migration flows from the `virt-controller`'s perspective.
 
-There is a single active synchronization controller per cluster that listens on an established address port combination. TBD: how to advertise this address (maybe kubevirt CR?).
+Upon creation of `VirtualMachineInstanceMigration` resources, the target `virt-controller` generates a specialized `VirtualMachineInstance`. This instance is not subject to typical interactions with the `virt-controller` or `virt-handler`, nor synchronized with its source counterpart. The synchronization controller assumes responsibility for synchronizing this receiver `VirtualMachineInstance` with others it receives over the synchronization channel, based on the shared keys in the `VirtualMachineInstanceMigration`s.
 
-The `VirtualMachineInstanceMigration` resource will contain the name of the `VirtualMachineInstance` and a mapping key. Both the `source` and `target` will use the same mapping key, so the synchronization controller can map the received `VirtualMachineInstance` to its respective local instance.
+The synchronization controller empowers the decentralization of two distinct and separate `VirtualMachineInstance`s. It operates as a standalone controller that can modify `VirtualMachineInstance` state and connects to the migration network.
+
+A single active synchronization controller per cluster is designated, listening on an established address port combination. TBD: how this address will be advertised (perhaps through a kubevirt CR?). Since this synchronization controller should connect to the migration network, it cannot be part of the `virt-controller` pod. This means a distinct synchronization pod.
+
+The `VirtualMachineInstanceMigration` resource includes a name for the `VirtualMachineInstance` and a mapping key. Both source and target instances utilize the same mapping key to facilitate the synchronization controller in mapping received `VirtualMachineInstance`s to their respective local counterparts.
 
 Synchronization is achieved by following the flows in figure 5 and 6
 ##### Incoming VMI
