@@ -4,7 +4,7 @@
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 
 ## Overview
 
@@ -70,7 +70,17 @@ Figure 1 describes the current interaction between various components:
 ![figure 1](migration_current_state.png)
 
 #### Proposed state
-To start a live migration one now has to create two `VirtualMachineInstanceMigration` resources. A `target` resource, and a `source` resource.
+To start a live migration one now has to create two `VirtualMachineInstanceMigration` resources. A `target` resource, and a `source` resource. Additionally in order to migrate a special `VirtualMachine` resource has to be created on the target which is copy of the source `VirtualMachine` but it has a special `runStrategy` indicating it is the receiving `VirtualMachine`. The virt-controller will create a special receiving `VirtualMachineInstance` that can be referenced by the `target` `VirtualMachineInstanceMigration`.
+
+Additionally some other resources may be required if they are referenced by the source `VirtualMachine`. Examples of these additional resources are:
+* Secrets, required to eventually start the receiver pod.
+* ConfigMaps, required to eventually start the receiver pod.
+* InstanceTypes, required to create the receiving `VirtualMachineInstace`.
+* PreferenceTypes, required to create the receiving `VirtualMachineInstace`.
+
+The source `VirtualMachine` will reference some disks and networks. Whatever creates the target `VirtualMachine` will be responsible for creating blank receiver disks, and properly mapping the networks from the source `VirtualMachine` to the target `VirtualMachine`
+
+When migrating inside the same namespace, the additional `VirtualMachine` and associated resources are not needed as they already exist in the namespace.
 
 The `source` resource will contain a `connectionURL` that points to the synchronization controller at the target. The `source` resource will also contain a key which has to be unique across all migrations. The `target` resource will contain the same key. This will allow the synchronization controller to map the `VirtualMachineInstance` it receives on the synchronization channel to the appropriate `target` `VirtualMachineInstance`. Once the synchronization has been established, any status updates can be communicated between the `source` and the `target` just like in the current state. This means enough information has been exchanged to start the receiver pod, and once the receiver pod is ready, the migration can start.
 
