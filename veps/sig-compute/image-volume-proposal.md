@@ -161,6 +161,7 @@ include scenarios involving custom kernel boot / initrd and containerdisk.
 ### Beta
 - Wait for the imageVolume feature gate to be graduated to GA in Kubernetes.
 - Enable feature gate by default
+- Ensure that live migration completes successfully by preserving the original container-disk image if the tag is overwritten.
 
 ### GA
 - Remove all code for the old method in virt-handler, virt-controller, and virt-launcher, but continue supporting the 
