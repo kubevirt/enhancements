@@ -56,11 +56,25 @@ Link to any enhancement PRs.
 See https://github.com/kubevirt/community/blob/main/design-proposals/feature-lifecycle.md#releases for more context, please include links to relevant PRs
 -->
 
-* [] Alpha (v1.5.0?)
-* [] Beta (v1.6.0?)
-  * [] Additional Beta criteria
-* [] GA (v1.7.0?)
-  * [] Additional GA criteria
+* Alpha release target (x.y):
+* Beta release target (x.y):
+* Stable release target (x.y):
+
+
+* [] Alpha
+  * [] VEP PRs:
+  * [] Code PRs:
+  * [] Docs PRs:
+
+* [] Beta
+  * [] VEP PRs:
+  * [] Code PRs:
+  * [] Docs PRs:
+
+* [] GA
+  * [] VEP PRs:
+  * [] Code PRs:
+  * [] Docs PRs:
 
 **Additional context**:
 
