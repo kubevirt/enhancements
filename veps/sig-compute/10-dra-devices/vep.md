@@ -63,7 +63,13 @@ control of their devices using Virtual Machines and Containers.
     1. In the future a standardization could be envisioned for a PCI device where the attributes are set
        automatically through the DRA framework. When this is achieved, any DRA device should be available in KubeVirt VMs
 2. NetworkDevices or Storage Devices which need a lifecycle of its own will not be supported through HostDevices in alpha
-   release
+   release.
+   - For storage, NVMe devices may need to persist beyond pod deletion (e.g., during VM pause). However, current K8s 
+     DRA implementation deletes resource claims when the virt-launcher pod is deleted. Managing claims beyond pod 
+     lifecycle (for example VM pause case) is out of scope for this design. 
+   - For network devices, there is already existing mechanism of configuring the network, any DRA network device will have
+     to work existing functionality. There is a need to explore ideas on how to best achieve it potential in sig-network.
+     Hence, it is out of scope, will have to be picked up as a separate VEP
 
 ## Repos
 
@@ -612,17 +618,17 @@ type VirtualMachineInstanceStatus struct {
 	ResourceClaimStatuses []PodResourceClaimStatus `json:"resourceClaimStatuses,omitempty"`
 }
 type PodResourceClaimStatus struct {
-// Name uniquely identifies this resource claim inside the pod.
-// This must match the name of an entry in pod.spec.resourceClaims,
-// which implies that the string must be a DNS_LABEL.
-Name string `json:"name" protobuf:"bytes,1,name=name"`
-// ResourceClaimName is the name of the ResourceClaim that was
-// generated for the Pod in the namespace of the Pod. If this is
-// unset, then generating a ResourceClaim was not necessary. The
-// pod.spec.resourceClaims entry can be ignored in this case.
-//
-// +optional
-ResourceClaimName *string `json:"resourceClaimName,omitempty" protobuf:"bytes,2,opt,name=resourceClaimName"`
+    // Name uniquely identifies this resource claim inside the pod.
+    // This must match the name of an entry in pod.spec.resourceClaims,
+    // which implies that the string must be a DNS_LABEL.
+    Name string `json:"name" protobuf:"bytes,1,name=name"`
+    // ResourceClaimName is the name of the ResourceClaim that was
+    // generated for the Pod in the namespace of the Pod. If this is
+    // unset, then generating a ResourceClaim was not necessary. The
+    // pod.spec.resourceClaims entry can be ignored in this case.
+    //
+    // +optional
+    ResourceClaimName *string `json:"resourceClaimName,omitempty" protobuf:"bytes,2,opt,name=resourceClaimName"`
 }
 ```
 
