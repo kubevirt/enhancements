@@ -136,7 +136,7 @@ type DeviceSource struct {
 	// DeviceName is the name of the device provisioned by device-plugins
 	DeviceName *string `json:"deviceName,omitempty"`
 	// ClaimRequest provides the ClaimName from vmi.spec.resourceClaims[].name and
-	// requestName from resourceClaim.spec.devices.requests[].name
+	// DeviceRequestName from resourceClaim.spec.devices.requests[].name
 	// this fields requires DRA feature gate enabled
 	ClaimRequest *ClaimRequest `json:",inline,omitempty"`
 }
@@ -145,9 +145,9 @@ type ClaimRequest struct {
 	// ClaimName needs to be provided from the list vmi.spec.resourceClaims[].name where this
 	// device is allocated
 	ClaimName string `json:"claimName"`
-	// RequestName needs to be provided from resourceClaim.spec.devices.requests[].name where this
+	// DeviceRequestName needs to be provided from resourceClaim.spec.devices.requests[].name where this
 	// device is requested
-	RequestName string `json:"requestName"`
+	DeviceRequestName string `json:"deviceRequestName"`
 }
 
 type VirtualMachineInstanceStatus struct {
@@ -410,7 +410,7 @@ spec:
       gpus:
       - name: pgpu
         claimName: pgpu-claim-name
-        requestName: pgpu-request-name
+        deviceRequestName: pgpu-request-name
 status:
   deviceStatus:
     gpuStatuses:
@@ -511,7 +511,7 @@ spec:
   domain:
     gpus:
     - claimName: gpu-resource-claim
-      requestName: gpu
+      deviceRequestName: gpu
       name: example-pgpu
 ```
 
@@ -531,7 +531,7 @@ spec:
   domain:
     gpus:
     - claimName: gpu-resource-claim
-      requestName: gpu
+      deviceRequestName: gpu
       name: example-pgpu
 status:
   deviceStatus:
@@ -769,6 +769,9 @@ real driver is outside the scope of alpha and will be handled in beta.
 - feature gate turned on by default
 - e2e tests with 1 real driver implementation
 - consider additional usecases if any
+- work with kubernetes community to:
+  - find a generic solution for supporting device-plugins styles strings
+  - support discoverable pcie address and mdev UUID attributes
 
 ### GA
 - upgrade/downgrade testing 
