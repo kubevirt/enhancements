@@ -197,7 +197,11 @@ https://github.com/kubevirt/kubevirt/blob/v1.4.0/pkg/virt-launcher/virtwrap/api/
 
 - Similarly, the association between vCPUs and NUMA node in the VM is stored in
 the following memory data structure:[virt-launcher NUMA](
-https://github.com/kubevirt/kubevirt/blob/v1.4.0/pkg/virt-launcher/virtwrap/api/schema.go#L281)
+https://github.com/kubevirt/kubevirt/blob/v1.4.0/pkg/virt-launcher/virtwrap/api/schema.go#L281).
+It’s worth mentioning that we need to set
+`spec.template.spec.domain.cpu.numa.guestMappingPassthrough` in the VM CR for
+the domain XML to include the following NUMA information. For the specific VM
+CR configuration, please refer to the "API Example" section.
 
 ```xml
 <domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
@@ -249,6 +253,12 @@ spec:
         memory:              # memory NUMA settings
           hugepages:         # (KubeVirt already supported)
             pageSize: "2Mi"  #
+        devices:
+          gpus:
+          - deviceName: nvidia.com/GH100_H800
+            name: gpu-1
+          - deviceName: nvidia.com/GH100_H800
+            name: gpu-2
 ```
 
 ## Scalability
