@@ -82,7 +82,7 @@ The source `VirtualMachine` will reference some disks and networks. Whatever cre
 
 When migrating inside the same namespace, the additional `VirtualMachine` and associated resources are not needed as they already exist in the namespace.
 
-The `source` resource will contain a `connectionURL` that points to the synchronization controller at the target. The `source` resource will also contain a key which has to be unique across all migrations. The `target` resource will contain the same key. This will allow the synchronization controller to map the `VirtualMachineInstance` it receives on the synchronization channel to the appropriate `target` `VirtualMachineInstance`. Once the synchronization has been established, any status updates can be communicated between the `source` and the `target` just like in the current state. This means enough information has been exchanged to start the receiver pod, and once the receiver pod is ready, the migration can start.
+The `source` resource will contain a `connectionURL` that points to the synchronization controller at the target. The `source` resource will also contain a `migrationId` which has to be unique across all migrations. The `target` resource will contain the same `migrationId`. This will allow the synchronization controller to map the `VirtualMachineInstance` it receives on the synchronization channel to the appropriate `target` `VirtualMachineInstance`. Once the synchronization has been established, any status updates can be communicated between the `source` and the `target` just like in the current state. This means enough information has been exchanged to start the receiver pod, and once the receiver pod is ready, the migration can start.
 
 The target cluster will have a synchronization controller running in the kubevirt namespace, that has access to the migration channel (either pod network, or migration network). This controller waits for incoming synchronization connections from a source. When a `source` migration resource is created in the cluster, this synchronization controller will connect to the target synchronization and start synchronizing the `VirtualMachineInstance` status between them.
 
@@ -106,15 +106,15 @@ Figure 4 describes the interaction with a source and target `VirtualMachineInsta
 
 ## Synchronization controller
 
-The synchronization controller facilitates the synchronization of migration state between source and target `VirtualMachineInstance`s. This enables the `virt-controller` to interact with its `VirtualMachineInstance` as if it were the sole instance, maintaining consistency in proposed migration flows from the `virt-controller`'s perspective.
+The synchronization controller facilitates the synchronization of migration state between source and target `VirtualMachineInstance`s. This enables the `virt-controller` pod to interact with its `VirtualMachineInstance` as if it were the sole instance, maintaining consistency in proposed migration flows from the `virt-controller` pod's perspective.
 
-Upon creation of `VirtualMachineInstanceMigration` resources, the target `virt-controller` generates a specialized `VirtualMachineInstance`. This instance is not subject to typical interactions with the `virt-controller` or `virt-handler`, nor synchronized with its source counterpart. The synchronization controller assumes responsibility for synchronizing this receiver `VirtualMachineInstance` with others it receives over the synchronization channel, based on the shared keys in the `VirtualMachineInstanceMigration`s.
+Upon creation of `VirtualMachineInstanceMigration` resources, the target `vm-controller` generates a specialized `VirtualMachineInstance`. This instance is not subject to typical interactions with the `vmi-controller` or `virt-handler`, nor synchronized with its source counterpart. The synchronization controller assumes responsibility for synchronizing this receiver `VirtualMachineInstance` with others it receives over the synchronization channel, based on the shared migrationIds in the `VirtualMachineInstanceMigration`s.
 
 The synchronization controller empowers the decentralization of two distinct and separate `VirtualMachineInstance`s. It operates as a standalone controller that can modify `VirtualMachineInstance` state and connects to the migration network.
 
 A single active synchronization controller per cluster is designated, listening on an established address port combination. TBD: how this address will be advertised (perhaps through a kubevirt CR?). Since this synchronization controller should connect to the migration network, it cannot be part of the `virt-controller` pod. This means a distinct synchronization pod.
 
-The `VirtualMachineInstanceMigration` resource includes a name for the `VirtualMachineInstance` and a mapping key. Both source and target instances utilize the same mapping key to facilitate the synchronization controller in mapping received `VirtualMachineInstance`s to their respective local counterparts.
+The `VirtualMachineInstanceMigration` resource includes a name for the `VirtualMachineInstance` and a mapping `migrationId`. Both source and target instances utilize the same mapping `migrationId` to facilitate the synchronization controller in mapping received `VirtualMachineInstance`s to their respective local counterparts.
 
 Synchronization is achieved by following the flows in figure 5 and 6
 ##### Incoming VMI
@@ -132,7 +132,7 @@ Two major changes to the API.
 ##### SendTo
 If the `VirtualMachineInstanceMigration` contains a `sendTo` field it means it is the `source` of the migration. Using the `sendTo` field explicitly indicates the intent of the user that this is the `source`.
 
-A new required field `key` will be added. This field can be used to uniquely identify a received `VirtualMachineInstance` and map it to a receiving `VirtualMachineInstance`. The suggested `key` is a unique identifier, for instance, if any orchestrator uses a resource to orchestrate the migration, it could be the UID of that resource.
+A new required field `migrationId` will be added. This field can be used to uniquely identify a received `VirtualMachineInstance` and map it to a receiving `VirtualMachineInstance`. The suggested `migrationId` is a unique identifier, for instance, if any orchestrator uses a resource to orchestrate the migration, it could be the UID of that resource.
 
 A second required field is `connectURL` this is the URL the `source` synchronization controller will use to connect to the `target` synchronization controller.
 
@@ -146,14 +146,14 @@ metadata:
   name: vmim-source
 spec:
   sendTo:
-    key: <unique id>
+    migrationId: <unique id>
     connectURL: "the url to connect the sync channel"
   vmName: vmi-name
 ```
 ##### Receive
 If the `VirtualMachineInstanceMigration` contains a `receive` field it means it is the `target` of the migration. Using the `receive` field explicitly indicates the intent of the user that this is the `target`.
 
-A new required field `key` will be added. This field can be used to uniquely identify a received `VirtualMachineInstance` and map it to a receiving `VirtualMachineInstance`. The suggested `key` is a unique identifier, for instance, if any orchestrator uses a resource to orchestrate the migration, it could be the UID of that resource.
+A new required field `migrationID` will be introduced. This field serves as a unique identifier to map received `VirtualMachineInstance`s to their corresponding receiving `VirtualMachineInstance`. The recommended value for this field is a unique identifier, such as the UID of the orchestrator resource.
 
 _Target VirtualMachineInstanceMigration_
 ```yaml
@@ -163,7 +163,7 @@ metadata:
   name: vmim-target
 spec:
   receive:
-    key: <unique id>
+    migrationId: <unique id>
   vmName: vmi-name
 status:
   syncEndpoint: <address:port>
@@ -171,6 +171,7 @@ status:
 
 If neither `sendTo` or `receive` is specified it means this is a normal in namespace live migration, and the `VirtualMachineInstanceMigration` can be treated as if it is both the `source` and the `target` migration resource.
 
+The `synchronization endpoint` is available on the cluster level and can be set by either the cluster administrator or generated by kubevirt during startup of the `synchronization controller`. If deploying KubeVirt with the kubevirt operator, it makes sense to display the address and port in the status of the KubeVirt resource.
 #### VirtualMachineInstance status
 
 The `VirtualMachineInstance` status contains a `migrationState` field which is used to coordinate the migration process between the source and target `virt-handlers`. The virt-handlers only have the ability to read/update the `VirtualMachineInstances` so this is the mechanism used to coordinate the migration.
@@ -246,7 +247,7 @@ For example:
       syncAddress: <address to connect for sync channel>
 ```
 
-To keep backward compatibility if there is no `key`, it can be assumed it is both and it can follow both source and target flows in the `virt-controller`
+To keep backward compatibility if there is no `migrationId`, it can be assumed it is both and it can follow both source and target flows in the `virt-controller`
 
 ## Alternatives
 
@@ -257,6 +258,8 @@ The reason for going with a separate migration controller vs having a `virt-hand
 - Access to the migration network
 
 This eliminates the virt-controller because it doesn't have access to the migration network. The `virt-handler` is not ideal either since it is a privileged component and we want to restrict network connections to it as much possible. Therefore it makes sense to have a separate component that handles synchronization.
+
+"One suggested alternative is to completely eliminate the virt-handler from the migration equation, and establish a connection with an associated protocol between the `source` and `target` `virt-launcher`. This would assume that the `virt-launcher` has a connection to the migration network. And sufficient information can be exchanged on the orchestrator/synchronization for starting the `target` `virt-launcher` pod. All necessary information can then be exchanged through this protocol, and there is no need to synchronize between the `source` and `target` `VirtualMachineInstance`."
 
 ## Scalability
 
