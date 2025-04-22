@@ -17,6 +17,9 @@ functionality.
 ## Non Goals
 
 - Do nothing if VM CPU NUMA is not set.
+- The GPU devices associated with NUMA nodes do not support hot-plugging.
+- This only applies to GPU devices, i.e., based on `vm.spec.template.spec.domain.devices.gpus`,
+  and does not support other devices.
 
 ## Definition of Users
 
@@ -233,8 +236,9 @@ spec:
       - GPUDeviceNUMA # the feature gate to control the enabling and disabling of this functionality
 ```
 
-Second, create a VM with CPU/memory NUMA settings, GPU NUMA will be automatically
-set inside the VM:
+Second, create a GPU VM with CPU/memory NUMA settings. Once
+`vm.spec.template.spec.domain.cpu.numa` and `vm.spec.template.spec.domain.devices.gpus`
+are set, GPU NUMA will be automatically set inside the VM:
 
 ```yaml
 apiVersion: kubevirt.io/v1
