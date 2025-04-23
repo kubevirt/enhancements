@@ -1,4 +1,4 @@
-# VEP #NNNN: Your short, descriptive title
+# VEP #45: Support in-place pod resize for memory/cpu hotplug
 
 ## Release Signoff Checklist
 
@@ -23,8 +23,8 @@ On the hotplug's original [design proposal](https://github.com/kubevirt/communit
 > Implementation should be achievable today, with Kubernetes APIs that are at least in beta.
 > Unfortunately, at the time of writing, the Kubernetes vertical pod scaling API is only alpha.
 
-Fortunately, the in-place pod resize feature was [graduated to beta](https://github.com/kubernetes/enhancements/blob/61abddca34caac56d22b7db48734b7040dc68b43/keps/sig-node/1287-in-place-update-pod-resources/kep.yaml#L40)
-in Kubernetes 1.33.
+Fortunately, the in-place pod resize feature was [graduated to GA](https://github.com/kubernetes/enhancements/blob/6d3210f7dd5d547c8f7f6a33af6a09eb45193cd7/keps/sig-node/1287-in-place-update-pod-resources/kep.yaml#L42)
+in Kubernetes 1.35.
 Therefore, Kubevirt should aim to move away from live-migrating the VM on hotplug and instead use the in-place pod resize feature.
 
 ## Motivation
@@ -34,6 +34,8 @@ This will allow us to avoid live-migrating the VM on hotplug, which saves a lot 
 and improves the user experience.
 
 The change should be as transparent to the user as possible, as this is essentially an implementation detail.
+
+Additionally, it will enable better auto-scaling capabilities for Kubevirt.
 
 ## Goals
 
@@ -80,10 +82,24 @@ An alternative to completely dropping the live-migration update method is to kee
 to be explicitly enabled by the user. This could potentially help in situations where the pod cannot increase its resources
 due to node constraints or other reasons.
 
+## Risk and Limitations
+
+Currently, the Kubernetes in-place pod resize feature does not support dedicated CPUs
+[[1](https://github.com/kubernetes/enhancements/tree/61abddca34caac56d22b7db48734b7040dc68b43/keps/sig-node/1287-in-place-update-pod-resources#static-cpu--memory-policy)].:
+>Resizing pods with static CPU & memory policy configured is out-of-scope for the beta release of in-place resize. If a pod is a guaranteed QOS on a node with a static CPU or memory policy configured, then the resize will be marked as infeasible.
+
+However, this is currently being worked on in a separate KEP:
+[Support In-place Pod Resize with Static CPU and Static Memory Policy #5294](https://github.com/kubernetes/enhancements/issues/5294).
+
+This issue is currently being addressed and will probably be resolved at the GA phase.
+In the worst case scenario, we can fall-back to the migration method for such VMs.
+
 ## Scalability
 
 This should improve scalability dramatically as it reduces the number of live-migrations that need to be performed during
 hotplugs.
+
+It should also bring much better support for auto-scaling.
 
 ## Update/Rollback Compatibility
 
@@ -108,6 +124,8 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 -->
 
 ### Alpha
+
+target: v1.8.
 
 - [ ] Implement in-place pod resize for CPU and memory hotplugs.
 
