@@ -80,6 +80,15 @@ An alternative to completely dropping the live-migration update method is to kee
 to be explicitly enabled by the user. This could potentially help in situations where the pod cannot increase its resources
 due to node constraints or other reasons.
 
+## Risk and Limitations
+
+Currently, the Kubernetes in-place pod resize feature does not support dedicated CPUs
+[[1](https://github.com/kubernetes/enhancements/tree/61abddca34caac56d22b7db48734b7040dc68b43/keps/sig-node/1287-in-place-update-pod-resources#static-cpu--memory-policy)].:
+>Resizing pods with static CPU & memory policy configured is out-of-scope for the beta release of in-place resize. If a pod is a guaranteed QOS on a node with a static CPU or memory policy configured, then the resize will be marked as infeasible.
+
+This issue is currently being addressed and will probably be resolved at the GA phase.
+In the worst case scenario, we can fall-back to the migration method for such VMs.
+
 ## Scalability
 
 This should improve scalability dramatically as it reduces the number of live-migrations that need to be performed during
