@@ -48,28 +48,29 @@ As new features continue to be added to KubeVirt, the graph of objects related t
 /apis/subresources.kubevirt.io/v1/namespaces/{namespace}/virtualmachineinstances/{name}/objectgraph
 ```
 
-### API Examples
+### Graph Representation
 
-#### **1. First option: Hierarchical Representation**
+We propose a **Hierarchical Object Graph** to represent dependencies.
+Each object can have child objects, capturing direct relationships between resources (e.g., VM → VMI → Pod → PVC).
 
-This format visualizes dependencies in a tree structure, showing parent-child relationships between resources.
+#### API Schema
 
 ```go
-// ObjectGraphNode represents an individual resource node in the graph.
+// ObjectGraphNode represents an individual node in the graph.
 type ObjectGraphNode struct {
-	ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
-	Labels          map[string]string          `json:"labels,omitempty"`
-	Optional        bool                       `json:"optional"`
-	Children        []ObjectGraphNode          `json:"children,omitempty"`
+    ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
+    Labels          map[string]string          `json:"labels,omitempty"`
+    Optional        bool                       `json:"optional"`
+    Children        []ObjectGraphNode          `json:"children,omitempty"`
 }
 
-// ObjectGraphNodeList represents a list of object graph nodes.
+// ObjectGraph represents the complete dependency graph.
 //
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-type ObjectGraphNodeList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []ObjectGraphNode `json:"items"`
+type ObjectGraph struct {
+    metav1.TypeMeta `json:",inline"`
+    metav1.ListMeta `json:"metadata,omitempty"`
+    RootNodes       []ObjectGraphNode `json:"rootNodes"`
 }
 ```
 
@@ -131,84 +132,6 @@ type ObjectGraphNodeList struct {
 }
 ```
 
-#### **2. Second option: Flat Dependency List**
-
-This format provides a simple list of dependencies without indicating hierarchical relationships.
-
-```go
-// ObjectGraphNode represents a node in the object graph.
-type ObjectGraphNode struct {
-	ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
-	Labels          map[string]string          `json:"labels,omitempty"`
-}
-
-// ObjectGraphNodeList represents a list of object graph nodes.
-//
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-type ObjectGraphNodeList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []ObjectGraphNode `json:"items"`
-}
-```
-
-##### Example Output
-
-```json
-{
-  "items": [
-    {
-      "objectReference": {
-        "apiGroup": "kubevirt.io",
-        "kind": "virtualmachineinstances",
-        "name": "vm-cirros-source-ocs",
-        "namespace": "default"
-      },
-      "labels": {
-        "type": "",
-        "optional": "false"
-      }
-    },
-    {
-      "objectReference": {
-        "apiGroup": "",
-        "kind": "pods",
-        "name": "virt-launcher-vm-cirros-source-ocs-frn9h",
-        "namespace": "default"
-      },
-      "labels": {
-        "type": "",
-        "optional": "false"
-      }
-    },
-    {
-      "objectReference": {
-        "apiGroup": "cdi.kubevirt.io",
-        "kind": "datavolumes",
-        "name": "cirros-dv-source-ocs",
-        "namespace": "default"
-      },
-      "labels": {
-        "type": "storage",
-        "optional": "false"
-      }
-    },
-    {
-      "objectReference": {
-        "apiGroup": "",
-        "kind": "persistentvolumeclaims",
-        "name": "cirros-dv-source-ocs",
-        "namespace": "default"
-      },
-      "labels": {
-        "type": "storage",
-        "optional": "false"
-      }
-    }
-  ]
-}
-```
-
 ### **User Flow**
 
 1. Access the ObjectGraph API through the subresource endpoint for a VM/VMI.
@@ -235,16 +158,72 @@ type ObjectGraphNodeList struct {
 **Backend Storage PVC**  
 Identified by the persistent state PVC label.
 
-**Other Resources:**  
-- Should we include `networkAttachmentDefinitions` and `networks` in the ObjectGraph?  
-- Should optional objects such as `VMExports` or `VMSnapshots` be considered?  
+**Other Resources:**
+- Should we include `networkAttachmentDefinitions` and `networks` in the ObjectGraph?
+- Should optional objects such as `VMExports` or `VMSnapshots` be considered?
 
 ## **Alternatives**
+
+## Alternatives Considered
+
+### Flat Dependency List
+
+An alternative was to return a **flat list** of dependent objects without hierarchical relationships.
+
+Example schema:
+
+```go
+type ObjectGraphNode struct {
+    ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
+    Labels          map[string]string          `json:"labels,omitempty"`
+}
+```
+
+Example output:
+
+```json
+{
+  "items": [
+    {
+      "objectReference": {
+        "apiGroup": "kubevirt.io",
+        "kind": "VirtualMachineInstance",
+        "name": "vm1",
+        "namespace": "default"
+      }
+    },
+    {
+      "objectReference": {
+        "apiGroup": "",
+        "kind": "Pod",
+        "name": "virt-launcher-vm1",
+        "namespace": "default"
+      }
+    },
+    {
+      "objectReference": {
+        "apiGroup": "cdi.kubevirt.io",
+        "kind": "DataVolume",
+        "name": "dv1",
+        "namespace": "default"
+      }
+    }
+  ]
+}
+```
+
+We chose the hierarchical representation because:
+
+- Dependency relationships between objects are meaningful and should be explicit.
+- Migration, backup, and restore processes often require processing objects in dependency order.
+- Hierarchical graphs allow easier extensibility (for example, marking optional nodes).
+- Flat lists can become complex as the number of dependencies grows.
+
+### Other Considerations
 
 1. **Naming:** Is `ObjectGraph` descriptive enough even if we are returning a flat list of objects? Would `DependencyList` be more accurate?
 2. **Extensibility:** How can we ensure the API is extensible for future enhancements? Should the API be made more intelligent (with fields such as `Optional`) or just rely on labels for extensibility?
 3. **Filtering:** Should the user handle filtering, or should we allow some kind of filtering in the ObjectGraph request?
-4. **API Design:** Should we use a hierarchical or flat list representation for the Object Graph API?
 
 ## **Scalability**
 
