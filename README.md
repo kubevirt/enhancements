@@ -105,8 +105,8 @@ The particular deadlines are always changing based on the release and are publis
 The following deadlines are important for the VEP:
 
 1. VEP planning - at the beginning of every release cycle, each SIG would prioritize VEPs and decide which ones are being tracked for the upcoming release.
-2. Enhancement Freeze - The deadline for this milestone is Alpha release of KubeVirt. See [kubevirt/sig-release/releases](https://github.com/kubevirt/sig-release/releases)
-3. Code Freeze - This is tracked by each release [kubevirt/sig-release/releases](https://github.com/kubevirt/sig-release/releases)
+2. Enhancement Freeze - The deadline for this milestone is Alpha release of KubeVirt. See [kubevirt/sig-release/tree/main/releases](https://github.com/kubevirt/sig-release/tree/main/releases)
+3. Code Freeze - This is tracked by each release [kubevirt/sig-release/tree/main/releases](https://github.com/kubevirt/sig-release/tree/main/releases)
 
 ## Implementation Phases
 
