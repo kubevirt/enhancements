@@ -61,23 +61,28 @@ See https://github.com/kubevirt/community/blob/main/design-proposals/feature-lif
 * Stable release target (x.y):
 
 
-* [] Alpha
-  * [] VEP PRs:
-  * [] Code PRs:
-  * [] Docs PRs:
+* [ ] Alpha
+  * [ ] VEP PRs:
+  * [ ] Code PRs:
+  * [ ] Docs PRs:
 
-* [] Beta
-  * [] VEP PRs:
-  * [] Code PRs:
-  * [] Docs PRs:
+<!-- Uncomment these as you prepare the enhancement for the next stage
+* [ ] Beta
+  * [ ] VEP PRs:
+  * [ ] Code PRs:
+  * [ ] Docs PRs:
 
-* [] GA
-  * [] VEP PRs:
-  * [] Code PRs:
-  * [] Docs PRs:
-
-**Additional context**:
+* [ ] GA
+  * [ ] VEP PRs:
+  * [ ] Code PRs:
+  * [ ] Docs PRs:
+-->
 
 <!-- 
+**Additional context**:
 Add any other context about the feature here.
 -->
+
+
+> [!IMPORTANT]
+> Please keep this description up to date.
