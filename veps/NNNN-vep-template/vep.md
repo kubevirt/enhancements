@@ -30,7 +30,7 @@ The desired outcome
 
 <!--
 Why this enhancement is important Limitations to the scope of the design
-<!--
+-->
 
 ## Definition of Users
 
