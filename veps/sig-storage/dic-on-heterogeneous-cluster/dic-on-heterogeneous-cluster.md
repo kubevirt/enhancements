@@ -130,17 +130,33 @@ the control-plane nodes and one for the workload nodes.
 These lists will be dynamically updated as nodes are added or removed from the cluster.
 
 By default, the HCO will identify workload nodes as those labeled with `node-role.kubernetes.io/worker`. If the
-`spec.workloads.nodePlacement` field in the `HyperConverged` CR is defined, HCO will use this field to determine the
+`spec.workloads.nodePlacement` field in the `HyperConverged` CR is populated, HCO will use this field to determine the
 workload nodes instead.
 
-HCO will identify control-plane nodes as those labeled with `node-role.kubernetes.io/control-plane`.
+HCO will identify control-plane nodes as those labeled with `node-role.kubernetes.io/control-plane` or with
+`node-role.kubernetes.io/master`.
 
 >**Note**: The control-plane architecture list is expected to always be with only one architecture, as the control-plane
 > nodes are expected to be homogeneous. HCO will not force this, though.
 
+HCO will publish the lists of workloads and control-plane architectures in the `HyperConverged` CR's `status.nodeInfo`
+field.
+
+#### Error Handling
+If the `enableMultiArchBootImageImport` feature gate is not enabled, but the cluster contains workloads nodes with
+multiple architectures, HCO will trigger a warning level alert, to notify the user that the scheduling of virtual
+machines may fail, or they may not run as expected, due to the random scheduling on a node with architecture different
+from the image architecture.
+
+The alert will point to a runbook that will explain the issue and will suggest two alternatives:
+1. Enable the `enableMultiArchBootImageImport` feature gate in the `HyperConverged` CR, while explaining the risk of
+   using a feature that is not generally available.
+2. Set the `spec.workloads.nodePlacement` field in the `HyperConverged` CR, to limit the workload nodes to a single
+   architecture nodes, which will ensure that all virtual machines will run on a supported architecture.
+
 ### Reconciling the `SSP` Custom Resource
 The following changes in HCO behavior will be applied if:
-1. The new `enableMultiArchCommonBootImageImport` feature gate is enabled in the `HyperConverged` CR. This feature gate
+1. The new `enableMultiArchBootImageImport` feature gate is enabled in the `HyperConverged` CR. This feature gate
    is disabled by default.
 2. The cluster is not a single node cluster.
 
@@ -159,20 +175,26 @@ When reconciling the `SSP` CR, HCO will:
    `ssp.kubevirt.io/dict.architectures` annotation for each `DataImportCronTemplate`. When adding the
    `DataImportCronTemplate` object to the `SSP` CR, HCO will clean the architectures that are not present in cluster
     from the annotation.
-   
-   If there are no architectures that are supported by the image and present in the cluster, HCO will not add this
-   `DataImportCronTemplate` object to the `SSP` CR.
 
 5. HCO will not add the `ssp.kubevirt.io/dict.architectures` annotation to the custom `DataImportCronTemplate` objects.
    The user is responsible for adding the annotation to their custom `DataImportCronTemplate` objects.
 
-   However, if the annotation exists in a custom `DataImportCronTemplate` objects, HCO will clean the architectures that
-   are not present in the cluster from the annotation.
+   However, HCO will respect the `ssp.kubevirt.io/dict.architectures` annotation, if it exists in a custom
+   `DataImportCronTemplate` objects, and will perform the same logic as it does for the pre-defined
+   DataImportCronTemplates.
 
-For example:
+6. HCO will add the `ssp.kubevirt.io/dict.architectures` annotation to the `DataImportCronTemplate` objects in
+   the `HyperConverged` CR status, with the same value as used in the `SSP` CR. 
 
-If the pre-prepared `DataImportCronTemplate` object is annotated with `amd64,arm64`, and the cluster worker nodes are
-both `amd64` and `s390x`, HCO will set the corresponding object in the `SSP` CR like this:
+   HCO will populate the new `status.originalSupportedArchitectures` field in each DataImportCronTemplate object in the
+    `dataImportCronTemplates` field of the `HyperConverged` CR's status, with the original value of the annotation,
+   > The original value for pre-defined `DataImportCronTemplate` objects is the value that was set in the HCO image,
+   and the original value for custom `DataImportCronTemplate` objects is the value that was set by the user in the 
+   `HyperConverged` CR's `spec.dataImportCronTemplates` field.
+
+#### Example:
+If the pre-prepared `DataImportCronTemplate` object is annotated with `amd64,arm64`, and the cluster worker node
+architectures are `amd64` and `s390x`, HCO will set the corresponding object in the `SSP` CR like this:
 
 ```yaml
 apiVersion: ssp.kubevirt.io/v1beta3
@@ -180,6 +202,8 @@ kind: SSP
 spec:
   enableMultipleArchitectures: true
   cluster:
+    controlPlaneArchitectures:
+      - amd64
     workloadArchitectures:
       - amd64
       - s390x
@@ -191,6 +215,17 @@ spec:
             ssp.kubevirt.io/dict.architectures: "amd64"
     ...
 ```
+
+#### Error Handling
+If there are no architectures that are supported by the image and present in the cluster, HCO will not add this
+`DataImportCronTemplate` object to the `SSP` CR.
+
+For debug and troubleshooting, HCO will add this DataImportCronTemplate object to the `status.dataImportCronTemplates`
+list in the `HyperConverged` CR, even though it wasn't added to the `SSP` CR. HCO will set the 
+`ssp.kubevirt.io/dict.architectures` annotation to an empty string, and will add the `Deployed` condition with status
+of `False` to the status of this DataImportCronTemplate object.
+
+In addition, HCO will trigger an info level alert, to notify the user that the image is not supported in the cluster.
 
 ### Reconciling the `DataImportCron` Custom Resources
 Upon reconciling the `SSP` CR, for each `DataImportCronTemplate` object, SSP will create or update a `DataImportCron` CR
@@ -329,7 +364,7 @@ If there is more than one supported architecture, the default one will be the on
 The architecture agnostic `DataSource` will point to the default, architecture specific `DataSource` CR, by populating
 the `spec.source.dataSource` new field, and will not set any other field under `spec.source`.
 
-On upgrade from a previous version of HCO, or when the `enableMultiArchCommonBootImageImport` feature gate is enabled in
+On upgrade from a previous version of HCO, or when the `enableMultiArchBootImageImport` feature gate is enabled in
 the HyperConverged CR, there will be already an existing `DataSource` CR for the specific image. SSP will modify the
 existing `DataSource` CR by replacing the existing `spec.source.pvc` or `spec.source.snapshot` fields, with the new 
 `spec.source.dataSource` field.
@@ -479,105 +514,90 @@ By adopting the new CDI and SSP APIs, the `DataImportCronTemplate` type in Hyper
 as the type of the `spec` field is CDI's `DataImportCronSpec`, that one of its nested fields is the
 `DataVolumeSourceRegistry` type.
 
-The HyperConverged API will introduce the new `enableMultiArchCommonBootImageImport` feature gate, with default value of
+#### New feature Gate
+The HyperConverged API will introduce the new `enableMultiArchBootImageImport` feature gate, with default value of
 `false`.
 
+This feature gate will enable the heterogeneous cluster support for golden images, as described in this VEP.
+
+#### HyperConverged Status
+The HyperConverged `status` field will be extended with a new `nodeInfo` field, with two sub-fields:
+* `controlPlaneArchitectures` - a list of the architectures of the control-plane nodes
+* `workloadsArchitectures` - a list of the architectures of the workloads nodes
+
+For example:
+```yaml
+apiVersion: hco.kubevirt.io/v1beta1
+kind: HyperConverged
+status:
+  nodeInfo:
+    controlPlaneArchitectures:
+    - amd64
+    workloadsArchitectures:
+    - amd64
+```
+
+#### DataImportCronTemplates Status
+The existing HyperConverged `status.dataImportCronTemplates` field contains a list of DataImportCronTemplate objects. 
+Each one of these objects contains its own `status` field.
+
+This field will be extended with a new `originalSupportedArchitectures` field, which will contain a comma separated list
+of the architectures supported by the image, as listed in the `ssp.kubevirt.io/dict.architectures` annotation of the HCO
+image. This field will be populated only if the feature is enabled.
+
+For example:
+```yaml
+apiVersion: hco.kubevirt.io/v1beta1
+kind: HyperConverged
+status:
+  dataImportCronTemplates:
+    - metadata:
+        annotations:
+          ...
+          ssp.kubevirt.io/dict.architectures: amd64
+        name: centos-stream10-image-cron
+      spec:
+        ...
+      status:
+        commonTemplate: true
+        originalSupportedArchitectures: amd64,arm64,s390x
+```
+
+In addition, each DataImportCronTemplate object in the `status.dataImportCronTemplates` field will include a condition
+list. This field will be populated only in cases of an issue with the specific DataImportCronTemplate.
+
+For example: below is the DataImportCronTemplate object in the `status.dataImportCronTemplates` field, when the original
+`ssp.kubevirt.io/dict.architectures` annotation in the HyperConverged's spec, contains two not supported architectures.
+
+Notice the empty `ssp.kubevirt.io/dict.architectures` annotation, the `originalSupportedArchitectures` field, that
+reflects the original value of the annotation, and the `conditions` field, that contains a single `Deployed` condition
+with a status of `False`, and a reason of `UnsupportedArchitectures`.
+
+```yaml
+apiVersion: hco.kubevirt.io/v1beta1
+kind: HyperConverged
+status:
+  dataImportCronTemplates:
+    - metadata:
+        annotations:
+          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+          ssp.kubevirt.io/dict.architectures: ""
+        name: my-image
+      spec:
+        ...
+      status:
+        conditions:
+          - lastTransitionTime: "2025-07-09T11:00:30Z"
+            message: DataImportCronTemplate has no supported architectures for the current
+              cluster
+            reason: UnsupportedArchitectures
+            status: "False"
+            type: Deployed
+        originalSupportedArchitectures: someUnsupportedArch,otherUnsupportedArch
+```
+
 ## Alternatives
-### Multiplying the `DataImportCronTemplate` into Multiple `DataSource` CRs
-It is clear that any design will end up with multiple `DataSource` CRs, one for each supported architecture, pointing to
-the latest `VolumeSnapshot`/`PVC` for that architecture.
-
-The question is how high in the hierarchy the multiplication should be occurred. The above design suggests that it will
-be SSP to create multiple `DataImportCron` CRs for each multi-arch `DataImportCronTamplate`.
-
-Below are too additional suggestions for the same question.
-
-#### *[Rejected]* Create Multiple `DataImportCronTemplate` Objects, One for Each Architecture
-HCO could create a new `DataImportCronTemplate` object for each architecture in the `SSP` CR, and the user will be
-responsible for doing the same for custom `DataImportCronTemplate` objects.
-
-pros:
-
-- no changes are required from SSP, except for adopting the new CDI API, and changes regarding the VM templates.
-
-cons:
-
-- the user will be responsible for creating and maintaining the `DataImportCronTemplate` objects, and
-  the user will need to create a new `DataImportCronTemplate` object for each architecture.
-- the `SSP` CR will be huge, and will contain a lot of `DataImportCronTemplate` objects. It will be hard to maintain it
-  or understand it.
-- it looses the meaning of the templating mechanism, by the `DataImportCronTemplate` type.
-
-#### *[Rejected]* Create Multiple `DataSource` CRs from a Single `DataImportCron` Object
-No changes in SSP, regarding the `DataImportCronTemplate` objects. SSP will create a single `DataImportCron` CR for each
-`DataImportCronTemplate` object in the `SSP` CR, as done today. The `ssp.kubevirt.io/dict.architectures` (with a new
-name, e.g. `cdi.kubevirt.io/dict.architectures`) annotation will be copied to the `DataImportCron` CR, as any other
-annotation.
-
-CDI will create multiple `DataSource` CRs, one for each architecture, according to the
-`cdi.kubevirt.io/dict.architectures` annotation, and will import the images into architecture specific `VolumeSnapshot`
-resources. 
-
-When performing the actual image import, if the `cdi.kubevirt.io/dict.architectures` annotation is set in
-the `DataImportCron` CR, the CDI will create architecture specific `DataVolume` CR, for each architecture
-listed in the annotation. CDI will set the `DataVolome` CR's `spec.source.registry.platform.architecture` field, to the
-required architecture.
-
-CDI will add the `template.kubevirt.io/architecture` label to the `DataSource` CR, with the architecture of the image,
-and will set the `cdi.kubevirt.io/storage.import.datasource-name` label to the value of the `spec.managedDataSource` 
-field in the `DataImportCron` CR.
-
-CDI will need to remove any orphan `DataSource` or `VolumeSnapshot` CRs, that are not referenced by any `DataImportCron`
-CR.
-
-SSP will still need to create architecture specific templates, and will still need to set the `DataSource` name 
-in each template, to the architecture specific `DataSource` CR name.
-
-Open questions:
-1. SSP currently creates the `DataSource` CRs in some cases. We have two options here:
-   1. SSP will have to have the same logic as in CDI, when creating the architecture specific `DataSource` CRs.
-   2. SSP will no longer create the `DataSource` CRs, and will let CDI to do that.
-
-2. What is the best way for SSP to find out which architecture specific templates to create? 
-   1. SSP can use the new `spec.cluster.workloadArchitectures` field in the `SSP` CR, and create the templates
-      accordingly. 
-   
-      The problem with this approach is that if a specific `DataImportCronTemplate` object supports only
-      part of the architectures listed in the `spec.cluster.workloadArchitectures` field, there will be unused templates
-      deployed. It can be mitigated by not deploying a template, if its `DataSource` was not found.
-   
-   2. SSP can use the `cdi.kubevirt.io/dict.architectures` annotation in each `DataImportCronTemplate`, and create the
-      templates accordingly.
-   
-      The problem with this approach is that SSP will need to implement the logic to find out
-      which `DataImportCronTemplate` objects is related to each template. SSP can use the `spec.managedDataSource` field
-      in the `DataImportCronTemplate` object, to find the templates using the same `DataSource` name. It may be too 
-      complex to implement this solution.
-      > **Important**: this alternative will require no API changes in SSP, as the `spec.cluster.workloadArchitectures`
-        field is not needed.
-
-pros:
-
-- no changes are required from SSP, except for adopting the new CDI API, and changes regarding the VM templates.
-- The development of the changes in SSP and in HCO is not dependent on CDI.
-- If the 2nd option in the 2nd open question is chosen, the development of the changes in HCO is not dependent on SSP,
-  and each component can be developed and released independently.
-- In deployments without SSP, this solution will work as well, if the user creates the `DataImportCron` CRs manually.
-
-cons:
-
-- template handling in SSP seems to be more complex.
-
-### *[Accepted]* The Source of the Architecture List for Each Predefined Image
-For the predefined images, the architecture list is known in advance, and can be hardcoded in the DataImportCronTemplate
-file in the HCO image. HCO then will check what are the workload node architectures in the cluster, and will add the
-`ssp.kubevirt.io/dict.architectures` annotation to the `DataImportCronTemplate` object in the `SSP` CR, only with the
-architectures that are supported by the image, and by the cluster.
-
-However, these images are frequently updated, and we can never know if the architecture list that was set at HCO image
-build time, is still valid or not, at any point in the future.
-
-It seems like a low risk, but it will require a new release of HCO to update the architecture list.
+n/a (All the alternatives were either already accepted, or rejected)
 
 ## Scalability
 
