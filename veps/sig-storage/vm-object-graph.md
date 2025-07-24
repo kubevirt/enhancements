@@ -57,20 +57,25 @@ Each object can have child objects, capturing direct relationships between resou
 
 ```go
 // ObjectGraphNode represents an individual node in the graph.
-type ObjectGraphNode struct {
-    ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
-    Labels          map[string]string          `json:"labels,omitempty"`
-    Optional        bool                       `json:"optional"`
-    Children        []ObjectGraphNode          `json:"children,omitempty"`
-}
-
-// ObjectGraph represents the complete dependency graph.
 //
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-type ObjectGraph struct {
-    metav1.TypeMeta `json:",inline"`
-    metav1.ListMeta `json:"metadata,omitempty"`
-    RootNodes       []ObjectGraphNode `json:"rootNodes"`
+type ObjectGraphNode struct {
+	metav1.TypeMeta `json:",inline"`
+	ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
+	Labels          map[string]string          `json:"labels,omitempty"`
+	// +optional
+	Optional *bool `json:"optional,omitempty"`
+	// +listType=atomic
+	Children []ObjectGraphNode `json:"children,omitempty"`
+}
+
+// ObjectGraphOptions holds options for the object graph.
+type ObjectGraphOptions struct {
+	// IncludeOptionalNodes indicates whether to include optional nodes in the graph.
+	// True by default.
+	IncludeOptionalNodes *bool `json:"includeOptionalNodes,omitempty"`
+	// LabelSelector is used to filter nodes in the graph based on their labels.
+	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
 ```
 
