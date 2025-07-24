@@ -159,7 +159,6 @@ type ObjectGraph struct {
 Identified by the persistent state PVC label.
 
 **Other Resources:**
-- Should we include `networkAttachmentDefinitions` and `networks` in the ObjectGraph?
 - Should optional objects such as `VMExports` or `VMSnapshots` be considered?
 
 ## **Alternatives**
@@ -250,7 +249,13 @@ Each ObjectGraph is scoped to a single VM or VMI, reducing overall load. The gra
 
 ## **Feature Lifecycle Phases**
 
-- **Alpha:** Initial implementation with basic functionality.
-- **Beta:** Adapt external repos (e.g., Velero plugin) to use the ObjectGraph API.
-- **GA:** Improvements based on feedback.
+- **Alpha:**
+  - Initial implementation with basic functionality.
+- **Beta:**
+  - Include network resources for cross-cluster live migration:
+    - NetworkAttachmentDefinitions
+    - IPAMClaims
+  - Adapt external repos (e.g., Velero plugin) to use the ObjectGraph API.
+- **GA:**
+  - Improvements based on feedback.
 
