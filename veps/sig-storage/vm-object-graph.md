@@ -145,6 +145,10 @@ type ObjectGraphOptions struct {
 
 ### **Included Resources**
 
+#### Kubevirt-native Resources:
+
+The object graph currently tracks core kubevirt and kubernetes resources that are critical to VM lifecycle and behavior, including:
+
 - **Instance type controllerRevision (`status.instancetypeRef.controllerRevisionRef.Name`)**
 - **Preference controllerRevision (`status.preferenceRef.controllerRevisionRef.Name`)**
 - **VirtualMachineInstance (VMI):** Identified by VM name.  
@@ -165,6 +169,30 @@ Identified by the persistent state PVC label.
 
 **Other Resources:**
 - Should optional objects such as `VMExports` or `VMSnapshots` be considered?
+
+#### External Resources
+
+Kubevirt does not own all resources involved in VM operations. Some critical external resources are managed by other components or projects (e.g., Multus, IPAM extensions), but are still essential to VM functionality in operations like backup and restore or cross-cluster live migration.
+
+Examples include network-related resources like **NetworkAttachmentDefinitions** and **IPAMClaims**. These are currently not included in the object graph, primarily to keep kubevirt self-contained. However, in practice, some level of awareness of these resources is necessary to fully support certain VM workflows.
+
+We propose extending the object graph to include selected external resources under well-defined conditions, without importing their dependencies into the core project. Since the object graph is only built when explicitly requested by the user, we believe this is a safe and contained place to introduce support for these additional resources.
+
+To qualify for inclusion, an external resource must meet all of the following criteria:
+
+1. **Relevance**: The resource is directly involved in a kubevirt-supported VM/VMI operation (for example, cross-cluster live migration).
+
+2. **Reference or Ownership**:
+   - The resource is explicitly referenced in the VM/VMI spec (such as NADs in `networks[*]`), **or**
+   - It is defined or handled by a kubevirt-owned project (such as IPAMClaims from [`kubevirt/ipam-extensions`](https://github.com/kubevirt/ipam-extensions)).
+
+3. **Discoverability**: If the resource is not explicitly referenced in the VM spec or status, there must be a reliable and consistent way to associate it with a VM or VMI. For example, using kubevirt-defined labels, as shown in the [`ipam-extensions` controller logic](https://github.com/kubevirt/ipam-extensions/blob/5030f613e1d1aa372e38946686392989500fb79c/pkg/vminetworkscontroller/vmi_controller.go#L95).
+
+4. **No Direct Dependency**: The resource must be accessed via the **dynamic client** as an unstructured object, avoiding any imports of its external dependencies into the kubevirt codebase.
+
+5. **Limited Scope and Knowledge**: The object graph doesn't need to understand these resources in detail, just need access to their metadata to include them. The inclusion logic must remain isolated to the object graph logic and not affect other parts of the kubevirt codebase.
+
+This approach allows us to build a more complete and useful object graph while clearly defining the boundaries around external dependency inclusion. With filtering options, users can choose whether to include these external resources or stick to core kubevirt objects, ensuring flexibility without imposing the external dependencies.
 
 ## **Alternatives**
 
