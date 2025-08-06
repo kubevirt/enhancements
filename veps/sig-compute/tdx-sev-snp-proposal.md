@@ -95,29 +95,19 @@ domain xml:
      ...
    </domain>
 ```
-All parameters are optional. Note the Libvirt support is not ready in upstream,
-refer to the
-https://github.com/intel/libvirt-tdx/commit/962325568e67014c2ff2e41a673374fafd44e385
+All parameters are optional. Please refer to
+https://gitlab.com/libvirt/libvirt/-/blob/master/docs/formatdomain.rst?ref_type=heads#launch-security
 for the explanation of the parameters. From the implementation perspective,
-extend the VMI spec to map to the parameters:
+only extend the VMI spec to enable the basics in the proposal currently:
 
 ```xml
    spec:
      domain:
        launchSecurity:
-         tdx:
-           policy: 0x10000000
-           mrConfigId: xxx
-           mrOwner: xxx
-           mrOwnerConfig: xxx
+         tdx: {}
 ```
-
-For the Quote Generation Service(QGS), Libvirt currently only provides unix
-socket support, and it will use `/var/run/tdx-qgs/qgs.socket` when the path is
-not specified. As there is only one QGS service running on the host, and QGS is
-started with the default unix socket, just let Libvirt configures QGS in the
-default way. All parameters are optional to configure a TDX VM, please refer to
-API Examples.
+Let's hold off on adding more options to the VMI spec for now. We need further
+discussion on the use cases and how they would apply to VM creation.
 
 ### AMD Design
 
@@ -183,7 +173,7 @@ VMI spec.
 
 ### API Examples for Intel TDX
 
-- TDX VM with defaults settings
+- TDX VM with default options
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -195,17 +185,6 @@ spec:
     launchSecurity:
       tdx: {}
   ...
-```
-
-- TDX VM with user-defined parameters
-
-```yaml
-   spec:
-     domain:
-       launchSecurity:
-         tdx:
-           policy: 0x10000000
-           mrConfigId: xxx
 ```
 
 ### API Examples for AMD
