@@ -39,6 +39,7 @@ confidential guests.
 ## Non Goals
 - TDX & SEV-SNP Live Migration: Live migrations are currently not supported by
   either technologies.
+- All TDX & SEV-SNP libvirt XML configurations those would be use cases situations.
 - Custom Attestation Services: Only focus on the enabling the capabilities
   through the standard interfaces and not building a custom attestation
   infrastructure.
@@ -126,7 +127,7 @@ own attributes and elements that are similar to the type “sev”.
      ...
      <launchSecurity type='sev-snp'>
        <cbitpos>47</cbitpos>
-<policy>0x00030000</policy>
+       <policy>0x00030000</policy>
        <reducedPhysBits>1</reducedPhysBits>
 	<guestVisibileWorkarounds>...</guestVisibleWorkaround>
 	<idBlock>...</idBlock>
@@ -141,37 +142,15 @@ A new structure should be created for adding SEV-SNP on the `LaunchSecurity`
 field.
 ```go
 type SEVSNP struct {
-    // 64-bit SEV-SNP Guest Policy
-    // +optional
-    Policy *string `json:"policy,omitempty"`
-    // 16-byte base64 encoded guest hypervisor-defined workarounds.
-    // +optional
-    GuestVisibleWorkarounds *string `json:"guestVisibleWorkarounds,omitempty"`
-    // 96-byte base64 encoded ID Block Structure.
-    // +optional
-    IDBlock *string `json:"idBlock,omitempty"`
-    // 4096-byte base64 encoded ID Auth Structure.
-    // +optional
-    IDAuth *string `json:"idAuth,omitempty"`
-    // 32-byte base64 encoded user-defined blob to provide to the guest.
-    // +optional
-    HostData *string `json:"hostData,omitempty"`
-    // Whether the guest is allowed to use VCEK for attestation reports. Set to false to disable VCEK usage.
-    // +optional
-    AuthorKey *bool `json:"authorKey,omitempty"`
-    // Whether idAuth contains VCEK field for attestation
-    // +optional
-    VCEK *bool `json:"vcek,omitempty"`
-    // Optional attribute to indicate whether the hashes of the kernel, and command line should be included in the measurement done by the firmware.
-    KernelHashes *bool `json:"kernelHashes,omitempty"`
+  // 64-bit SEV-SNP Guest Policy
+  policy: "0x3000" # Default Policy
 }
 ```
-Similar to TDX, all elements for type=’sev-snp’, users should be able to
-provide additional settings to configure their Confidential VM. Some options
-should have a default value such as the policy if the user does not specify the
-VM should be using the QEMU default policy.  The node labeller will detect
-SEV-SNP capabilities from the LibVirt domain capabilities then apply the label
-to the node, while the node selector renderer will be extended to include
+Similar to TDX, all elements for type=’sev-snp’, this will be a basic enablement
+until further use cases arise to provide additional settings to configure a 
+Confidential VM. The default policy option will have a default value that QEMU specifies.
+The node labeller will detect SEV-SNP capabilities from the LibVirt domain capabilities then
+apply the label to the node, while the node selector renderer will be extended to include
 SEV-SNP scheduling.
 
 ### Security Considerations
@@ -214,69 +193,7 @@ spec:
   domain:
     launchSecurity:
       snp: {}
-    resources:
-      requests:
-        memory: 4Gi
-    devices:
-      disks:
-      - name: containerdisk
-        disk:
-          bus: virtio
   ...
-```
-
-- SEV-SNP enablement with simple policy setting
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachineInstance
-metadata:
-  name: sev-snp-vm
-spec:
-  domain:
-    launchSecurity:
-      snp:
-        policy: "0x00030000"
-    resources:
-      requests:
-        memory: 4Gi
-    devices:
-      disks:
-      - name: containerdisk
-        disk:
-          bus: virtio
-```
-
-- The following is an example of a full implementation of all available options for SEV-SNP.
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachineInstance
-metadata:
-  name: advanced-sev-snp-vm
-spec:
-  domain:
-    launchSecurity:
-      snp:
-        policy: "0x30000"
-        authorKey: true
-        vcek: true
-        guestVisibleWorkarounds: "YWJjZGVmZ2hpams="  # base64 encoded
-        idBlock: "bG9yZW0gaXBzdW0gZG9sb3Igc2l0IGFtZXQ="    # base64 encoded 96-byte block
-        idAuth: "Y29uc2VjdGV0dXIgYWRpcGlzY2luZyBlbGl0..."   # base64 encoded 4096-byte block
-        hostData: "c2VkIGRvIGVpdXNtb2QgdGVtcG9yIGluY2k="    # base64 encoded 32-byte data
-    resources:
-      requests:
-        memory: 4Gi
-    devices:
-      disks:
-      - name: containerdisk
-        disk:
-          bus: virtio
-  volumes:
-  - name: containerdisk
-    containerDisk:
-      image: quay.io/kubevirt/fedora-cloud-container-disk-demo
 ```
 
 ## Alternatives
@@ -306,9 +223,8 @@ services in the node.
 
 ### AMD SEV-SNP Phases:
 The initial phase of implementation will focus on integrating basic
-functionality for all elements, allowing users to input configurations without
-immediate validation. The subsequent phase will involve adding necessary checks
-to prevent the creation of improperly configured VMs (e.g., preventing users
+functionality. The subsequent phase will involve adding any missing use cases
+ and necessary checks to prevent the creation of improperly configured VMs (e.g., preventing users
 from setting KernelHashes without configuring kernel booting).
 
 ## Feature lifecycle Phases
