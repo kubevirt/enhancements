@@ -53,15 +53,21 @@ Additionally, KubeVirt only utilizes around 20% (~57/292) of all the Libvirt API
 
 ## Definition of Users
 
-<!--
-Who is this feature set intended for
--->
+The proposed plugin-based virtualization stack architecture is intended for advanced users and integrators of KubeVirt who require flexibility beyond the default Libvirt/QEMU/KVM stack. This includes:
+
+- Platform engineers and infrastructure teams deploying KubeVirt in environments where alternative virtualization stacks (e.g., Cloud Hypervisor, Firecracker) are preferred due to performance, security, or hardware compatibility requirements.
+
+- Distributors and downstream projects that package KubeVirt as part of a larger platform and need to support multiple hypervisor backends.
 
 ## User Stories
 
-<!--
-List of user stories this design aims to solve
--->
+### Infrastructure Architect
+
+As an infrastructure architect building a virtualization platform based on Firecracker, I want to be able to incorporate KubeVirt into my solution for its orchestration capabilities. The proposed design would allow me to have a KubeVirt deployment with a Firecracker-based virtualization stack.
+
+### KubeVirt Distribution Maintainer
+
+I package KubeVirt as part of a larger platform and want to support multiple hypervisors based on customer needs. The plugin model allows me to ship tailored virt-launchers and webhook logic per deployment.
 
 ## Repos
 
