@@ -220,7 +220,7 @@ Instead of the virt-handler querying GuestInfo and itself calculating whether th
 
 ## Code Maintenance
 
-We propose that the kubevirt/kubevirt repository would contain the entire source-code for vanilla KubeVirt (with libvirt-qemu-kvm virt-launcher), which is refactored according to the proposed plugin model. The source code for other plugin virt-launchers for alternative virtualization stacks would reside in separate [DM40.1][HG40.2]repositories, as outlined below.
+We propose that the kubevirt/kubevirt repository would contain the entire source-code for vanilla KubeVirt (with libvirt-qemu-kvm virt-launcher), which is refactored according to the proposed plugin model. The source code for other plugin virt-launchers for alternative virtualization stacks would reside in separate repositories, as outlined below.
 
 - Core kubevirt/kubevirt repository:
 
@@ -404,17 +404,55 @@ KubeVirt’s existing performance benchmarks will be used to validate that the i
 
 ## Implementation Phases
 
-We break the proposed implementation into the following phases:
+The proposed plugin-based virtualization stack architecture will be implemented in discrete phases to ensure incremental adoption, maintainability, and backwards compatibility. Each phase introduces isolated changes that build toward full support for pluggable virt-launchers and associated components.
 
-1. Decouple the Guest Agent’s status reporting from Libvirt and move the functionality into the plugin virt-launcher.
+### Phase 1: Make virt-handler agnostic the specifics of the Guest Agent
 
-2. Decouple node labeling: Migrate the virtualization capability extraction completely to the virt-launcher component and expose it via the Capability Extractor interface. Use sysfs information to query node topology in virt-handler itself.
+- Migrate the logic for determining whether the guest agent is connected and supported to the virt-launcher.
 
-3. Add the VirtualizationProfile CRD: Replace hardcoding Libvirt/QEMU/KVM-specific values by reading them from the VirtualizationProfile CRD. In case the cluster admin does not specify a VirtualizationProfile, default to the Libvirt/QEMU/KVM profile.
+- Ensure that virt-launcher exposes the status of the guest agent via the Command gRPC API.
 
-4. Refactor virt-launcher to isolate common code.
+- Update virt-handler's VirtualMachineController to determine the status of the guest agent by invoking the Command gRPC API.
 
-5. Implement plugin-based design for custom validating and mutating wehbooks.
+### Phase 2: Refactor virt-launcher for Plugin Support
+
+- Isolate common code in virt-launcher that handles communication with virt-handler (e.g., CmdServer, Notifier).
+
+- Define plugin interfaces (DomainManager, Notifier, CapabilityProvider) and ensure they are used exclusively for virtualization-stack-specific logic.
+
+- Enable external plugin repositories to build virt-launcher variants using the shared interface definitions.
+
+### Phase 3: Introduce VirtualizationProfile CRD
+
+- Define and register the VirtualizationProfile CRD to encapsulate virtualization stack-specific configuration.
+
+- Update virt-operator to consume this CRD and configure the virt-launcher and related components accordingly.
+
+- Ensure that default behavior is preserved when the CRD is not present and the plugin feature gate is disabled.
+
+### Phase 4: Decouple Node Labeling and Capability Extraction
+
+- Refactor the node labeling logic in virt-handler to consume virtualization capabilities via a standardized Capability interface.
+
+- Move node topology extraction out of Libvirt and into virt-handler, using sysfs directly.
+
+- Ensure that plugin virt-launchers can expose capabilities independently of Libvirt.
+
+### Phase 5: Pluggable Validating and Mutating Webhooks
+
+- Extend virt-api to support plugin webhook sidecars.
+
+- Update virt-operator to register plugin webhooks based on `KubeVirtConfiguration.PluginWebhooks`.
+
+- Implement rule-based replacement logic to override default webhook behavior with plugin-provided logic.
+
+### Phase 6: Plugin Lifecycle and Build Integration
+
+- Define the build and release process for plugin virt-launchers and webhooks.
+
+- Ensure that plugin repositories can generate container images and patch manifests for KubeVirt installation.
+
+- Document lifecycle management practices, including version compatibility and upgrade procedures.
 
 ## Open Questions
 
@@ -430,6 +468,21 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 ### Alpha
 
+- Initial implementation of the plugin model, including support for external virt-launcher plugins, plugin interfaces (DomainManager, Notifier, CapabilityProvider), and plugin webhook registration.
+
+- The API and plugin interfaces are considered unstable and may change. No guarantees of backward compatibility.
+
+- Controlled via the PluginVirtualizationStacks feature gate, which must be explicitly enabled.
+
 ### Beta
 
+- Use feedback from Alpha users to ensure that all interactions between the core KubeVirt components and virt-launcher take place via the Plugin interfaces. If needed, extend those interfaces.
+
+- Controlled via the PluginVirtualizationStacks feature gate, which must be explicitly enabled.
+
+- The API is considered stable within the Beta phase. Only additive changes are allowed; fields and interfaces may not be removed or renamed.
+
 ### GA
+
+Full support for plugin-based virtualization stacks as a core feature of KubeVirt. Includes stable plugin interfaces, webhook integration, and lifecycle tooling.
+The feature gate is removed - plugin support is enabled by default.
