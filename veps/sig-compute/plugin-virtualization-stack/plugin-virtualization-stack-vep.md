@@ -406,7 +406,7 @@ KubeVirt’s existing performance benchmarks will be used to validate that the i
 
 The proposed plugin-based virtualization stack architecture will be implemented in discrete phases to ensure incremental adoption, maintainability, and backwards compatibility. Each phase introduces isolated changes that build toward full support for pluggable virt-launchers and associated components.
 
-### Phase 1: Make virt-handler agnostic the specifics of the Guest Agent
+### Phase 1: Make virt-handler agnostic of specifics of the Guest Agent
 
 - Migrate the logic for determining whether the guest agent is connected and supported to the virt-launcher.
 
