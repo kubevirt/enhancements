@@ -65,9 +65,9 @@ List of user stories this design aims to solve
 
 ## Repos
 
-<!--
-List of repose this design impacts
--->
+- Core KubeVirt repo: https://github.com/kubevirt/kubevirt
+
+- Additional repositories containing implementation of plugin components (e.g., virt-launcher and admission webhooks) for alternative virtualization stacks.
 
 ## Design
 
