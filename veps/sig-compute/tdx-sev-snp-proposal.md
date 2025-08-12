@@ -76,6 +76,13 @@ confidential guests.
 
 ## Design
 
+### Common Features
+Both designs rely on labelling those nodes capable to running CVMs. In addition
+to labeling, the node "key ID" resources registers how many CVMs per node can
+be created so the scheduler is able consume one resource per CVM. This is
+applicable to both TDX and SNP and the available resources are available under
+`/sys/fs/cgroup/misc.capacity`.
+
 ### TDX Design
 A new TDX Feature Gate should be added first. Extend the node labeller to
 detect and label nodes capable of running TDX VMs, a corresponding node
