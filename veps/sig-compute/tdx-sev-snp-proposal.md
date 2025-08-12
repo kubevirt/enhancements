@@ -162,7 +162,7 @@ type SEVSNP struct {
 Similar to TDX, all elements for type=’sev-snp’, users should be able to
 provide additional settings to configure their Confidential VM. Some options
 should have a default value such as the policy if the user does not specify the
-VM should be using the QEMU default policy.  The node labller will detect
+VM should be using the QEMU default policy.  The node labeller will detect
 SEV-SNP capabilities from the LibVirt domain capabilities then apply the label
 to the node, while the node selector renderer will be extended to include
 SEV-SNP scheduling.
