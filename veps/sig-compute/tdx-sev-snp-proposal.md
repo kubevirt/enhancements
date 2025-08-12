@@ -167,6 +167,13 @@ SEV-SNP capabilities from the LibVirt domain capabilities then apply the label
 to the node, while the node selector renderer will be extended to include
 SEV-SNP scheduling.
 
+### Security Considerations
+- The infrastructure provider and the VMI author are untrusted. For example,
+  the infrastructure provider is always capable of injecting random cloud-init
+  stuff behind our back. So if an instance of a secret application runs inside
+  a CVM, via cloud-init, an infrastructure provider or a hacker could simply
+  execute random commands inside this VM.
+
 ## API Examples
 The bellow yaml snippets provide examples of how to request TDX feature in the
 VMI spec.
