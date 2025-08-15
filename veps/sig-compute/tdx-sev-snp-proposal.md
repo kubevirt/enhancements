@@ -11,7 +11,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 ## Overview
 This proposal deals with the enablement of the following technologies: Intel
 TDX & AMD Secure Encrypted Virtualization with Secure Nested Paging (SEV-SNP)
-in kubevirt. This enablement includes the support for creating confidential VMs
+in Kubevirt. This enablement includes the support for creating confidential VMs
 by using TDX & SEV-SNP by encrypting VM memory. For AMD, SEV is currently
 supported in KubeVirt, and this VEP proposes to build on top of this feature
 and integrates SEV-SNP support.
@@ -28,11 +28,11 @@ confidential guests.
 
 ## Goals
 - Enable TDX VM Deployment: Provide users the ability to deploy VMs that are
-  utilizing INTEL TDX technology.
+  utilizing Intel TDX technology.
 - Enable SEV-SNP VM Deployment: Provide users the ability to deploy VMs that
   are utilizing AMD SEV-SNP technology.
-- Extend the existing SEV Feature: Currently the SEV sits behind the
-  WorkloadEncryptionSEV adding SEV-SNP to feature is the next logical step.
+- Extend the existing SEV Feature: The SEV feature is currently in the alpha
+  phase. Extending it with SEV-SNP is the next logical step.
 - Extend Existing SEV Infrastructure: Use the existing SEV node labeling,
   scheduling, and domain generation infrastructure.
 
@@ -60,7 +60,7 @@ confidential guests.
 - As a Developer, I want to deploy VMs on a platform with TDX protection to
   meet compliance requirements for memory integrity.
 - As a Developer, I want to deploy VMs without needing to understand the low
-  level INTEL technology.
+  level Intel technology.
 - As a Cluster Admin, I want to enable SEV-SNP on cluster nodes so that
   Developers can deploy Confidential Compute workloads with SEV-SNP enabled.
 - As a Cluster Admin, I need to ensure that my clusters have the correct
@@ -68,8 +68,8 @@ confidential guests.
   nodes.
 - As a Developer, I want to deploy VMs on a platform with SEV-SNP protection to
   meet compliance requirements for memory integrity.
-- As a Developer, I want to deploy VMs without needing to understand the low
-  level AMD technology.
+- As a Developer, I want to deploy VMs without needing to understand the
+  low-level confidential computing technologies.
 
 ## Repos
 
@@ -78,11 +78,11 @@ confidential guests.
 ## Design
 
 ### Common Features
-Both designs rely on labelling those nodes capable to running CVMs. In addition
-to labeling, the node "key ID" resources registers how many CVMs per node can
-be created so the scheduler is able consume one resource per CVM. This is
-applicable to both TDX and SNP and the available resources are available under
-`/sys/fs/cgroup/misc.capacity`.
+Both designs rely on labelling those nodes capable to running CVMs
+(Confidential Virtual Machines). In addition to labeling, the node "key ID"
+resources registers how many CVMs per node can be created so the scheduler is
+able consume one resource per CVM. This is applicable to both TDX and SNP and
+the available resources are available under `/sys/fs/cgroup/misc.capacity`.
 
 ### TDX Design
 A new TDX Feature Gate should be added first. Extend the node labeller to
@@ -201,7 +201,7 @@ spec:
 ## Scalability
 
 ## Update/Rollback Compatibility
-- All new fields are fields should be optional
+- All new fields are optional and disabled by default
 - This should not impact existing VMs
 - AMD SEV Compatibility:
   - The AMD SEV-SNP feature sits behind the existing SEV feature gate without
@@ -210,22 +210,23 @@ spec:
 
 ## Functional Testing Approach
 - Unit testing to detect TDX & SEV-SNP from the libvirt capabilities.
-- Since TDX & SEV-SNP does not have support for nested virtualization this will
+- Since TDX & SEV-SNP do not have support for nested virtualization this will
   require bare metal hardware to conduct e2e testing.
 
 ## Implementation Phases
 ### Intel TDX Phases:
 This feature is split into two items. The first item corresponds to the
 enablement of TDX in kubevirt thus allowing the creation and deployment of
-confidential VMs using the TDX technology. The second item corresponds to the
-generation of blobs that require the deployment of QGS and MPA registering
-services in the node.
+confidential VMs using the TDX technology. This item also include the e2e
+tests. The second item corresponds to the generation of blobs that require the
+deployment of QGS and MPA registering services in the node.
 
 ### AMD SEV-SNP Phases:
 The initial phase of implementation will focus on integrating basic
-functionality. The subsequent phase will involve adding any missing use cases
- and necessary checks to prevent the creation of improperly configured VMs (e.g., preventing users
-from setting KernelHashes without configuring kernel booting).
+functionality. The initial phase also includes the e2e tests. The subsequent
+phase will involve adding any missing use cases and necessary checks to prevent
+the creation of improperly configured VMs (e.g., preventing users from setting
+KernelHashes without configuring kernel booting).
 
 ## Feature lifecycle Phases
 
