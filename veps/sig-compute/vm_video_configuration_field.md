@@ -148,4 +148,73 @@ We are targeting this feature to be introduced in **Alpha**.
    - The `video` field will be **optional**.
    - Users can opt into the new functionality without affecting existing behavior.
 
+- During Beta:
+
+  - Document supported video models per architecture, including multi-head
+    support where applicable.
+
+  - Test that Windows guests (including Windows 11 on ARM) can take advantage
+    of the `virtio` adapter to achieve higher resolutions.
+
+  - Explore and measure the overhead of each video model to provide guidance
+    for users.
+
+  - Add the missing documentation from Alpha into the USER_GUIDE, with
+    practical examples and usage notes.
+
+
+- For GA, the `video` configuration field will be considered stable and fully supported.
+
+  - **API Stability**  
+    The `video` field under `spec.template.spec.domain.devices` will be part of the stable VM API. Any changes will follow Kubernetes API deprecation policies.
+
+  - **Default Behavior**  
+    The architecture-specific defaults (e.g., VGA/Bochs for AMD64, virtio for Arm/s390x) will remain in place if no `video` field is specified. Explicit configuration will always override defaults.
+
+  - **Validation & Documentation**  
+    All supported video device models will be documented per architecture. The API will reject unsupported combinations (e.g., devices not available for the VM’s architecture). User guides will provide compatibility matrices and best-practice recommendations.
+
+  - **Backward Compatibility**  
+    Existing VMs that do not specify a `video` field will continue to behave as before. No migration or updates are required.
+
+  - **Testing & Support**  
+    GA status will be backed by comprehensive e2e and conformance tests across all supported architectures, operating systems (Linux and Windows), and major hypervisor backends (QEMU/KVM).  
+    Performance characteristics and overhead of different video devices will be documented.
+
+
+- **Feature Gate Lifecycle**  
+  The `VideoConfig` feature gate will guard this functionality during Alpha and Beta stages.  
+  Once the feature reaches GA, the feature gate will be removed and the functionality will be enabled by default.
+
+
+## Support Matrix (Pre-requisite for Beta)
+
+The following matrix summarizes the current default and supported video devices across architectures, firmware types, and guest OS categories.  
+This will serve as a reference for VM creators when selecting a video device.
+
+| Architecture | Firmware (BIOS/EFI) | Guest OS Type   | Default Video Device | Override Options                                                            | Notes                                                                             |
+|--------------|---------------------|-----------------|----------------------|-----------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
+| AMD64        | BIOS                | Linux / Windows | VGA                  | vga, cirrus, virtio (requires drivers), virtio-vga (fallback), ramfb, bochs | VGA is chosen for legacy compatibility.                                           |
+| AMD64        | EFI                 | Linux / Windows | Bochs                | vga, cirrus, virtio (requires drivers), virtio-vga (fallback), ramfb, bochs | Modern OSs can use virtio for higher resolutions.                                 |
+| ARM64        | BIOS / EFI          | Linux           | Virtio               | virtio, ramfb                                                               | No distinction between BIOS/EFI. ramfb is mainly used for installation workflows. |
+| ARM64        | BIOS / EFI          | Windows 11      | Virtio               | virtio, ramfb                                                               | ramfb is often required for installer; switch to virtio after drivers are loaded. |
+| s390x        | BIOS / EFI          | Linux           | Virtio               | virtio                                                                      | Only virtio is supported; ramfb not available.                                    |
+
+### Key Points
+- **AMD64**
+    - **BIOS VMs** default to **VGA**.
+    - **EFI VMs** default to **Bochs**.
+    - Both can be switched to `virtio` if drivers are present.
+    - Without drivers, fallback is `virtio-vga` to preserve compatibility.
+
+- **ARM64**
+    - Default is **virtio** regardless of BIOS/EFI.
+    - `ramfb` can be used for installer workflows (e.g. Windows on ARM), then replaced by virtio.
+
+- **s390x**
+    - Default is **virtio**.
+    - `ramfb` is **not supported**.
+
+
+
 Depending on adoption and feedback, we aim to promote the feature to **Beta** in a subsequent release, followed by **GA** once it is stable and widely used.
