@@ -32,7 +32,7 @@ Additionally, KubeVirt only utilizes around 20% (~57/292) of all the Libvirt API
 
 - Hardcoded Libvirt/QEMU/KVM-specific values in control-plane components: Code of components such as virt-controller and virt-handler contain hardcoded literals specific to one of Libvirt, QEMU or KVM. For example, the overhead imposed by Libvirt and QEMU VMM, executable names of QEMU VMM and libvirt daemon processes and name of the libvirt connection socket file.
 
-- Libvirt/QEMU-specific guest agent status determination: Virt-Handler uses checks the state of Libvirt channel "org.qemu.guest_agent.0” to determine if the guest agent is connected. It also assumes that the guest agent is QEMU Guest Agent and compares the list of supported commands with the set of required commands to determine if the agent is supported.
+- Libvirt/QEMU-specific guest agent status determination: Virt-Handler checks the state of the Libvirt channel "org.qemu.guest_agent.0” to determine if the guest agent is connected. It also assumes that the guest agent is QEMU Guest Agent and compares the list of supported commands with the set of required commands to determine if the agent is supported.
 
 ## Goals
 
