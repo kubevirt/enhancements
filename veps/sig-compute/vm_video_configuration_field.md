@@ -148,4 +148,19 @@ We are targeting this feature to be introduced in **Alpha**.
    - The `video` field will be **optional**.
    - Users can opt into the new functionality without affecting existing behavior.
 
+- During Beta:
+
+  - Document supported video models per architecture, including multi-head
+    support where applicable.
+
+  - Test that Windows guests (including Windows 11 on ARM) can take advantage
+    of the `virtio` adapter to achieve higher resolutions.
+
+  - Explore and measure the overhead of each video model to provide guidance
+    for users.
+
+  - Add the missing documentation from Alpha into the USER_GUIDE, with
+    practical examples and usage notes.
+
+
 Depending on adoption and feedback, we aim to promote the feature to **Beta** in a subsequent release, followed by **GA** once it is stable and widely used.
