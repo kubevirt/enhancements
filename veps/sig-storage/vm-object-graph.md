@@ -194,7 +194,18 @@ To qualify for inclusion, an external resource must meet all of the following cr
 
 This approach allows us to build a more complete and useful object graph while clearly defining the boundaries around external dependency inclusion. With filtering options, users can choose whether to include these external resources or stick to core kubevirt objects, ensuring flexibility without imposing the external dependencies.
 
-## **Alternatives**
+##### **Alternatives**
+
+If we decide that external dependencies should never be handled by a kubevirt/kubevirt-owned resource, here are some possible paths forward:
+
+1. Exclude external resources like IPAMClaims from the graph
+We could limit the object graph to only core VM-related objects and let integrations handle custom resources separately. If we decide NADs are worth including, this would currently only affect IPAMClaims. This reduces complexity and preserves the self-contained nature of kubevirt.
+
+2. Move the graph to an external repository
+This would provide more separation and flexibility, but it represents a departure from the original VEP and would require deprecating the already merged subresource.
+
+3. Allow user-defined or custom extensions in the graph
+There could be a mechanism for including additional resources on demand. I'm not sure how feasible is this, but it might offer a compromise between flexibility and maintainability.
 
 ## Alternatives Considered
 
