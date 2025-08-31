@@ -82,8 +82,13 @@ For allowing users to consume DRA devices, there are two main changes needed:
 1. API changes and the plumbing required in KubeVirt to generate the domain xml with the devices.
 2. Driver Implementation to set the required attributes for KubeVirt to use
 
-This design document focuses on part 1 of the problem. We're introducing a new feature gate `DRADevices`.
-All the API changes will be gated behind this feature gate so as not to break existing functionality.
+This design document focuses on part 1 of the problem. This design is introducing two new feature gates:We're introducing a new feature gate `DRADevices`.
+1. GPUsWithDRA
+2. HostDevicesWithDRA
+All the API changes will be gated behind either one of this feature gates so as not to break existing functionality.
+
+Both the GPUs as well as HostDevices have separate lifecycle but essentially have the same API, hence two separate
+feature gates are required.
 
 ### API Changes
 
