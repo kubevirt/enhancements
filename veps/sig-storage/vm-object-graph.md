@@ -57,20 +57,25 @@ Each object can have child objects, capturing direct relationships between resou
 
 ```go
 // ObjectGraphNode represents an individual node in the graph.
-type ObjectGraphNode struct {
-    ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
-    Labels          map[string]string          `json:"labels,omitempty"`
-    Optional        bool                       `json:"optional"`
-    Children        []ObjectGraphNode          `json:"children,omitempty"`
-}
-
-// ObjectGraph represents the complete dependency graph.
 //
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-type ObjectGraph struct {
-    metav1.TypeMeta `json:",inline"`
-    metav1.ListMeta `json:"metadata,omitempty"`
-    RootNodes       []ObjectGraphNode `json:"rootNodes"`
+type ObjectGraphNode struct {
+	metav1.TypeMeta `json:",inline"`
+	ObjectReference k8sv1.TypedObjectReference `json:"objectReference"`
+	Labels          map[string]string          `json:"labels,omitempty"`
+	// +optional
+	Optional *bool `json:"optional,omitempty"`
+	// +listType=atomic
+	Children []ObjectGraphNode `json:"children,omitempty"`
+}
+
+// ObjectGraphOptions holds options for the object graph.
+type ObjectGraphOptions struct {
+	// IncludeOptionalNodes indicates whether to include optional nodes in the graph.
+	// True by default.
+	IncludeOptionalNodes *bool `json:"includeOptionalNodes,omitempty"`
+	// LabelSelector is used to filter nodes in the graph based on their labels.
+	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
 ```
 
@@ -140,6 +145,10 @@ type ObjectGraph struct {
 
 ### **Included Resources**
 
+#### Kubevirt-native Resources:
+
+The object graph currently tracks core kubevirt and kubernetes resources that are critical to VM lifecycle and behavior, including:
+
 - **Instance type controllerRevision (`status.instancetypeRef.controllerRevisionRef.Name`)**
 - **Preference controllerRevision (`status.preferenceRef.controllerRevisionRef.Name`)**
 - **VirtualMachineInstance (VMI):** Identified by VM name.  
@@ -159,10 +168,46 @@ type ObjectGraph struct {
 Identified by the persistent state PVC label.
 
 **Other Resources:**
-- Should we include `networkAttachmentDefinitions` and `networks` in the ObjectGraph?
 - Should optional objects such as `VMExports` or `VMSnapshots` be considered?
 
-## **Alternatives**
+#### External Resources
+
+Kubevirt does not own all resources involved in VM operations. Some critical external resources are managed by other components or projects (e.g., Multus, IPAM extensions), but are still essential to VM functionality in operations like backup and restore or cross-cluster live migration.
+
+Examples include network-related resources like **NetworkAttachmentDefinitions** and **IPAMClaims**. These are currently not included in the object graph, primarily to keep kubevirt self-contained. However, in practice, some level of awareness of these resources is necessary to fully support certain VM workflows.
+
+We propose extending the object graph to include selected external resources under well-defined conditions, without importing their dependencies into the core project. Since the object graph is only built when explicitly requested by the user, we believe this is a safe and contained place to introduce support for these additional resources.
+
+To qualify for inclusion, an external resource must meet all of the following criteria:
+
+1. **Relevance**: The resource is directly involved in a kubevirt-supported VM/VMI operation (for example, cross-cluster live migration).
+
+2. **Reference or Ownership**:
+   - The resource is explicitly referenced in the VM/VMI spec (such as NADs in `networks[*]`), **or**
+   - It is defined or handled by a kubevirt-owned project (such as IPAMClaims from [`kubevirt/ipam-extensions`](https://github.com/kubevirt/ipam-extensions)).
+
+3. **Discoverability**: If the resource is not explicitly referenced in the VM spec or status, there must be a reliable and consistent way to associate it with a VM or VMI. For example, using kubevirt-defined labels, as shown in the [`ipam-extensions` controller logic](https://github.com/kubevirt/ipam-extensions/blob/5030f613e1d1aa372e38946686392989500fb79c/pkg/vminetworkscontroller/vmi_controller.go#L95).
+
+4. **No Direct Dependency**: The resource must be accessed via the **dynamic client** as an unstructured object, avoiding any imports of its external dependencies into the kubevirt codebase. External resources should be included via a generic mechanism, ensuring kubevirt does not need to hardcode knowledge of downstream CRDs.
+
+5. **Limited Scope and Knowledge**: The object graph doesn't need to understand these resources in detail, just need access to their metadata to include them. The inclusion logic must remain isolated to the object graph logic and not affect other parts of the kubevirt codebase.
+
+This approach allows us to build a more complete and useful object graph while clearly defining the boundaries around external dependency inclusion. With filtering options, users can choose whether to include these external resources or stick to core kubevirt objects, ensuring flexibility without imposing the external dependencies.
+
+**Provisional Note:** During the alpha phase, the inclusions mentioned on this field will remain experimental. A generic inclusion mechanism will be introduced to enable referencing external resources without hardcoding knowledge of them. This mechanism may evolve or be replaced before Beta.
+
+##### **Alternatives**
+
+If we decide that external dependencies should never be handled by a kubevirt/kubevirt-owned resource, here are some possible paths forward:
+
+1. Exclude external resources like IPAMClaims from the graph
+We could limit the object graph to only core VM-related objects and let integrations handle custom resources separately. If we decide NADs are worth including, this would currently only affect IPAMClaims. This reduces complexity and preserves the self-contained nature of kubevirt.
+
+2. Move the graph to an external repository
+This would provide more separation and flexibility, but it represents a departure from the original VEP and would require deprecating the already merged subresource.
+
+3. Allow user-defined or custom extensions in the graph
+There could be a mechanism for including additional resources on demand. I'm not sure how feasible is this, but it might offer a compromise between flexibility and maintainability.
 
 ## Alternatives Considered
 
@@ -250,7 +295,13 @@ Each ObjectGraph is scoped to a single VM or VMI, reducing overall load. The gra
 
 ## **Feature Lifecycle Phases**
 
-- **Alpha:** Initial implementation with basic functionality.
-- **Beta:** Adapt external repos (e.g., Velero plugin) to use the ObjectGraph API.
-- **GA:** Improvements based on feedback.
+- **Alpha:**
+  - Initial implementation with basic functionality.
+  - Introduce a generic inclusion mechanism for external resources, ensuring network resources are handled.
+- **Beta:**
+  - Evaluate and refine the generic inclusion mechanism.
+  - Decide whether NADs and IPAMClaims (or other external resources) should be fully included.
+  - Adapt external repos (e.g., Velero plugin) to use the ObjectGraph API.
+- **GA:**
+  - Improvements based on feedback.
 
