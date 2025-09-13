@@ -4,9 +4,7 @@
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 
 ## Overview  
 
@@ -59,36 +57,61 @@ Preserve the registration process in third-party controllers:
 - Allow controllers to optionally group functions of the same device filtered using `PCIVendorSelector`:  
   - `KubeVirtConfiguration.permittedHostDevices.PciHostDevice.GroupFunctions` *(bool, default false)*  
 
-If `GroupFunctions` is `false`, KubeVirt will create a `PCIDevicePlugin` (for a single function of the device) (same way KubeVirt acts today).  
-If `GroupFunctions` is `true`, KubeVirt will create a `PCIMultiFunctionDevicePlugin` (for all functions of the device).  
+If `GroupFunctions` is `false`, the `virt-launcher` pod will own a single function of the device (the current behavior).  
+If `GroupFunctions` is `true`, the `virt-launcher` pod will own the entire device, including all of its functions.  
 
 ### VirtualMachine Specification Updates  
 
 - `spec.domain.devices.hostDevices.name` *(stays required)*  
-- `spec.domain.devices.hostDevices.deviceName` *(changes to optional instead of required)*  
-- `spec.domain.devices.hostDevices.multiFunctionDeviceName` *(new field, optional)*  
-
-If a VM owner requests a `HostDevice` they must provide either `deviceName` or `multiFunctionDeviceName`.  
+- `spec.domain.devices.hostDevices.deviceName` *(stays required)*  
 
 ### In depth dive into current KubeVirt code
 
+#### Common consept
+
+Similar to how devices are passed to the `virt-launcher` pod today (via an environment variable prefixed with `PCI_RESOURCE`), a new prefix will be introduced: `MULTIFUNCTION_PCI_RESOURCE`.  
+For example: `MULTIFUNCTION_PCI_RESOURCE_VENDOR_COM_DEVICE="0000:02:00.0,`.  
+
+The `MULTIFUNCTION_PCI_RESOURCE` variable will contain a comma-separated list of PCI addresses (`domain:bus:device:function`) for each device's **function 0**.  
+Function 0 was chosen because, according to the PCIe specification, it must exist on every physical device.  
+
 #### virt-handler
 
-Pre VEP `device_controller` iterates over the `permittedHostDevices.PciHostDevice` and creates `PCIDevicePlugin`.  
-Post VEP `device_controller` creates `PCIDevicePlugin` and `PCIMultiFunctionDevicePlugin` based on `permittedHostDevices.PciHostDevice.GroupFunctions`.  
-Each `PCIMultiFunctionDevicePlugin` instance contains instances of `PCIDevice` that are functions of that device (collected using `filepath.Walk(pciBasePath...`).  
-This is all the data needed for the `virt-launcher` step.  
+The existing `PCIDevicePlugin` will be updated to handle multifunction device grouping.  
+
+**Current Behavior**  
+The `device_controller` creates a `PCIDevicePlugin` that registers all IOMMU groups for a given `resourceName`.  
+During allocation, it passes the `PCI_RESOURCE` environment variable to the `virt-launcher` pod.  
+
+**Proposed Behavior**  
+The `device_controller` will pass the new `GroupFunctions` flag to the `PCIDevicePlugin`. The plugin's logic will then change based on this flag:  
+- When `GroupFunctions` is `true`, the plugin will:
+  - Register only the IOMMU group belonging to the device's **function 0**.
+  - Handle the Allocate request by passing the new `MULTIFUNCTION_PCI_RESOURCE` environment variable.
+
+If the flag is `false`, the current behavior is preserved.  
+
+When a `virt-launcher` pod requests a `resourceName` managed by `GroupFunctions: true`,  
+it will start with a `MULTIFUNCTION_PCI_RESOURCE` environment variable and it will gain ownership of all the device's functions once scheduled.  
 
 #### virt-launcher
 
-Pre VEP `hostdevice` uses `AddressPool` which yields a single address per device.  
-The `AddressPool` does not fit the solution presented in this VEP. It will have to be refactored or another solution will be written alongside it. In both cases all code paths that share logic won't be duplicated.  
-In any case `virt-handler` prepared enough data to construct the required `xml` with all associated functions of an already allocated device.  
+`virt-launcher` creates resource pools from the provided environment variables.  
+It iterates through the `hostDevices` in the `VirtualMachine` spec and pops a matching resource from the pools.  
+If it finds a match, it generates the Libvirt XML using the PCI address from the popped value.  
+
+The new multifunction PCI resource will be treated as a new pool type.  
+When `virt-launcher` finds a match for a multifunction device, it will have the PCI address for function 0.
+It will then scan the host's `/sys/bus/pci/devices` directory to find all other functions of that device and generate Libvirt XML elements for every associated function.   
+
+TODO: discuss fixing the PCI tree and implement logic in `virt-launcher` that fixes the tree.  
+Once all related functions are found they should be grouped to each device and the VM should see all related functions in the context of a single PCI device.  
 
 ### Power Management Considerations for Single-Function and Multifunction Passthrough  
-During single-function passthrough, a sequence of events occurs within the Linux kernel that completely cuts power to the PCIe slot. *In short, Linux calls the ACPI function `_PS3` before passing the device to the VirtualMachine and later invokes `_PS0` to restore the device to its fully operational state.*  
 
-When dealing with multifunction devices, a Kubernetes node may have multiple instances of the same multifunction PCI device. If a VirtualMachine requests two function devices, the scheduler may allocate one function from two different physical devices.  
+During single-function passthrough, a sequence of events occurs within the Linux kernel that completely cuts power to the PCIe slot. *In short, QEMU trigers Linux (VFIO) to reset each function and if possible it will issue a full slot or bus reset*  
+
+When dealing with multifunction devices, a Kubernetes node may have multiple instances of the same multifunction PCI device. If a VirtualMachine requests two function devices, the scheduler may allocate one function from two different physical devices residing for example on two separate pcie slots.  
 
 If this occurs, Linux will not cut power to the host device during passthrough, resulting in behavioral discrepancies compared to scenarios where both functions originate from the same device. *This difference in power state transitions can impact device initialization for certain hardware.*  
 
@@ -96,13 +119,18 @@ If this occurs, Linux will not cut power to the host device during passthrough, 
 
 ```yaml
 # Example of a VirtualMachine with one QAT device, one GRID T4 GPU, and one ConnectX-4 LX device with both ports.
-# Requesting a multi-function device works similarly to requesting an individual device, but ensures all required ports are available.
-# This setup relies on a controller to register the ConnectX-4 LX device in `KubeVirtConfiguration.permittedHostDevices.pciHostDevice`.
+# Requesting a multi-function device works similarly to requesting a single-function device,
+# but ensures all required functions (ports) are allocated together from one physical card.
+# This setup relies on a controller to register the devices in `KubeVirtConfiguration.permittedHostDevices.pciHostDevice`,
+# and specifically the ConnectX-4 LX device using `GroupFunctions: true`.
 # Example of a single entry in `PciHostDevice`:
 # PciHostDevice.PCIVendorSelector: 15B3:1015
 # PciHostDevice.ResourceName: mellanox.com/MT27710_FAMILY_CONNECTX4_LX
 # PciHostDevice.GroupFunctions: true
-
+#
+# Note: If the cluster has two types of ConnectX-4 cards (e.g., a single-port and a dual-port variant that both use the same vendor selector),
+# the VM could be scheduled with either variant.
+#
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -118,7 +146,7 @@ spec:
             name: quickaccess1
           - deviceName: nvidia.com/GRID_T4-1Q # NVIDIA GRID T4 GPU
             name: gpu1
-          - multiFunctionDeviceName: mellanox.com/MT27710_FAMILY_CONNECTX4_LX # Requesting both functions of a ConnectX-4 LX device
+          - deviceName: mellanox.com/MT27710_FAMILY_CONNECTX4_LX # Requesting all functions of a ConnectX-4 LX device
             name: net1
 ```
 
@@ -138,17 +166,27 @@ This feature has no significant impact on scalability, as it does not introduce 
 ## Update/Rollback Compatibility  
 
 - The proposed changes are upgrade-compatible.  
-- Upon rollback, existing VirtualMachine objects using the `multiFunctionDeviceName` field will not be scheduled.  
-- The configuration will retain `ResourceName` for all `PciHostDevice` objects, ensuring it remains valid even if the new `GroupFunctions` persists after rollback.  
-
-## Functional Testing Approach  
-
-TODO: Review existing generic host devices tests and adapt them to cover the new grouping mechanism.  
+- Devices that were configured with `GroupFunctions` in the KubeVirt configuration will be treated as individual functions upon rollback.  
 
 ## Implementation Phases  
 
-This feature can be implemented in a single phase.  
+This feature should be broken down into three independent implementation phases:
+
+1. **Phase 1: Build the core logic into `virt-launcher`**  
+This involves adding the new env var to `virt-launcher` - find all the related device functions, and generate the correct Libvirt XML.
+
+2. **Phase 2: Hook into `virt-handler` and the default device plugin**  
+Update `virt-handler` and KubeVirt's device plugin to handle requests for these devices. This is optional, as people could write their own device plugins to use the Phase 1 logic.
+
+3. **Phase 3: Correctly order the guest PCI tree**  
+We need to make sure the guest OS sees a single device with multiple functions, not a bunch of separate devices.
+
+## Functional Testing Approach  
+
+Phase 1 can be tested using the existing `AddressPool` and `Generic HostDevice` framework under `pkg/virt-launcher/virtwrap/device/hostdevice/generic`.  
+Phase 2 requires minimal test adjustions in the existing `pkg/virt-handler/device-manager/pci_device_test.go`.  
+Phase 3 can be tested using tests on the logic that places devices on the root complex (see: `PlacePCIDevicesOnRootComplex`).  
 
 ## Feature Lifecycle Phases  
 
-Given its limited functional scope, this feature can be added in a single lifecycle phase without a feature gate.  
+Given the limited scope and the fact that an administrator must explicitly opt-in by setting `GroupFunctions: true`, phases 1 and 2 can be implemented in a single release without needing a feature gate.  
