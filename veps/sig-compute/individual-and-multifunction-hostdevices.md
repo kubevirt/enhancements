@@ -19,6 +19,10 @@ KubeVirt's existing host devices interface is designed to provide a generic mode
 - Inconsistent function allocation across different physical devices can affect performance and initialization.  
 - Power management behavior varies between single-function and multi-function passthrough, affecting device readiness after VM boot.  
 
+Passing the entire host device including all of its functions allows KubeVirt to be used in automated testing farms of pci host devices.  
+This allows CI jobs and PCI driver developers to request a virtual machine with a host device and gain access to the entire device.  
+For PCI driver development, it's crucial to boot a VM with a preserved PCI device tree mirroring the host system and to perform a bus reset prior to VM startup.  
+
 ## Goals  
 
 - Allow booting a VM using an entire PCI device with all its associated functions.  
