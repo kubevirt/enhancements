@@ -76,7 +76,7 @@ If `GroupFunctions` is `true`, the `virt-launcher` pod will own the entire devic
 Similar to how devices are passed to the `virt-launcher` pod today (via an environment variable prefixed with `PCI_RESOURCE`), a new prefix will be introduced: `MULTIFUNCTION_PCI_RESOURCE`.  
 For example: `MULTIFUNCTION_PCI_RESOURCE_VENDOR_COM_DEVICE="0000:02:00.0,`.  
 
-The `MULTIFUNCTION_PCI_RESOURCE` variable will contain a comma-separated list of PCI addresses (`domain:bus:device:function`) for each device's **function 0**.  
+The `MULTIFUNCTION_PCI_RESOURCE` variable will contain a comma-separated list of PCI addresses (`domain:bus:device.function`) for each device's **function 0**.  
 Function 0 was chosen because, according to the PCIe specification, it must exist on every physical device.  
 
 #### virt-handler
