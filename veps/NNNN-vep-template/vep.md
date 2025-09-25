@@ -86,16 +86,28 @@ Does this impact update compatibility and how?)
 An overview on the approaches used to functional test this design)
 -->
 
-## Implementation Phases
+## Implementation History
 
 <!--
-How/if this design will get broken up into multiple phases)
+For example:
+01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
+03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
 -->
 
-## Feature lifecycle Phases
+## Graduation Requirements
 
 <!--
-How and when will the feature progress through the Alpha, Beta and GA lifecycle phases
+The requirements for graduating to each stage.
+Example:
+### Alpha
+- [ ] Feature gate guards all code changes
+- [ ] Initial implementation supporting only X and Y use-cases
+
+### Beta
+- [ ] Implementation supports all X use-cases
+
+It is not necessary to have all the requirements for all stages in the initial VEP.
+They can be added later as the feature progresses, and there is more clarity towards its future.
 
 Refer to https://github.com/kubevirt/community/blob/main/design-proposals/feature-lifecycle.md#releases for more details
 -->
