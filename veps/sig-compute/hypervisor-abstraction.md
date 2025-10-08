@@ -10,7 +10,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hypervisor backends through a consistent contract, while keeping today's KVM-first behavior unchanged. For the MVP we scope the contract to the pieces already exercised in code—device selection and domain tweaks—so HyperV Layered can merge without waiting on a broader refactor. We also outline follow-on enhancements that can grow the abstraction once we gather feedback.
+Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hypervisor backends through a consistent contract, while keeping today's KVM-first behavior unchanged. For the MVP we scope the contract to the pieces already exercised in code—device selection and domain tweaks—so Hyper-V Layered can merge without waiting on a broader refactor. We also outline follow-on enhancements that can grow the abstraction once we gather feedback.
 
 ## Motivation
 
@@ -68,15 +68,17 @@ type DomainProfile struct {
   Mutators []DomainMutator
 }
 
-type DomainContext interface{}
-
 type DomainMutator interface {
-  Apply(*api.Domain, *v1.VirtualMachineInstance, DomainContext) error
+  Apply(*api.Domain, *v1.VirtualMachineInstance) error
 }
+
+type ValidationResult = field.ErrorList
 
 type Hypervisor interface {
   Devices(*v1.VirtualMachineInstance) []DeviceRequirement
-  DomainDefaults(*v1.VirtualMachineInstance, DomainContext) (DomainProfile, error)
+  DomainDefaults(*v1.VirtualMachineInstance) (DomainProfile, error)
+  ValidateVMI(*v1.VirtualMachineInstance) ValidationResult
+  MutateVMI(*v1.VirtualMachineInstance)
 }
 ```
 
@@ -113,9 +115,11 @@ spec:
 - `virt-handler`'s device manager uses the same list when spawning its permanent `GenericDevicePlugin` instances, so the existing lifecycle for `/dev/kvm` seamlessly extends to `/dev/mshv` or composite requirements.
 - Node labelling remains optional telemetry. Operators can surface informative labels, but functionality relies solely on allocatable resources.
 
-### Validation & Features
+### Validation & Mutation
 
-- Admission webhooks keep their existing Hyper-V logic for now. Validation that depends on the hypervisor interface (for example, GPU passthrough capability checks) is deferred to a future iteration once we expand the contract.
+- Hypervisors can use `ValidateVMI` to enforce requirements. The validating webhooks inside `virt-api` resolve the active hypervisor for every VirtualMachine and VirtualMachineInstance admission request using the same precedence rules as `virt-controller`.
+- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec (for example, seeding Hyper-V feature blocks or toggling defaults) before Kubernetes persists the object.
+- In tandem, these hooks enable opinionated defaults for each hypervisor while still rejecting incompatible specs, delivering flexibility without sacrificing guardrails.
 
 ### Observability Hooks
 
@@ -177,7 +181,7 @@ func (h *SampleHypervisor) Devices(_ *v1.VirtualMachineInstance) []hypervisor.De
   }}
 }
 
-func (h *SampleHypervisor) DomainDefaults(_ *v1.VirtualMachineInstance, _ hypervisor.DomainContext) (hypervisor.DomainProfile, error) {
+func (h *SampleHypervisor) DomainDefaults(_ *v1.VirtualMachineInstance) (hypervisor.DomainProfile, error) {
   profile := hypervisor.DomainProfile{
     Type: "sample",
     Mutators: []hypervisor.DomainMutator{sampleDomainMutator{}},
@@ -185,9 +189,9 @@ func (h *SampleHypervisor) DomainDefaults(_ *v1.VirtualMachineInstance, _ hyperv
   return profile, nil
 }
 
-type sampleDomainMutator struct{}
+type sampleDomainTypeMutator struct{}
 
-func (sampleDomainMutator) Apply(domain *api.Domain, _ *v1.VirtualMachineInstance, _ hypervisor.DomainContext) error {
+func (sampleDomainTypeMutator) Apply(domain *api.Domain, _ *v1.VirtualMachineInstance) error {
   if domain == nil {
     return nil
   }
