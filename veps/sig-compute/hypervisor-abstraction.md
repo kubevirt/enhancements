@@ -10,7 +10,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hypervisor backends through a consistent contract, while keeping today's KVM-first behavior unchanged. For the MVP we scope the contract to the pieces already exercised in code—device selection and domain tweaks—so Hyper-V Layered can merge without waiting on a broader refactor. We also outline follow-on enhancements that can grow the abstraction once we gather feedback.
+Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hypervisor backends through a consistent contract, while keeping today's KVM-first behavior unchanged. To start, we scope the contract to device selection, domain tweaks, validation and mutation so as to provide a flexible base that can evolve without introducing a major refactor. 
 
 ## Motivation
 
@@ -29,7 +29,6 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 
 - Deliver a full implementation of any specific new hypervisor backend.
 - Redesign the VirtualMachineInstance API schema beyond additive fields.
-- Replace existing Hyper-V enlightenment features or other architecture-specific helpers.
 - Mandate new observability requirements; telemetry hooks remain optional.
 
 ## Definition of Users
@@ -118,7 +117,7 @@ spec:
 ### Validation & Mutation
 
 - Hypervisors can use `ValidateVMI` to enforce requirements. The validating webhooks inside `virt-api` resolve the active hypervisor for every VirtualMachine and VirtualMachineInstance admission request using the same precedence rules as `virt-controller`.
-- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec (for example, seeding Hyper-V feature blocks or toggling defaults) before Kubernetes persists the object.
+- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec before Kubernetes persists the object.
 - In tandem, these hooks enable opinionated defaults for each hypervisor while still rejecting incompatible specs, delivering flexibility without sacrificing guardrails.
 
 ### Observability Hooks
@@ -139,7 +138,7 @@ metadata:
 spec:
   configuration:
     hypervisorConfiguration:
-      name: hyperv-layered
+      name: sample
     developerConfiguration:
       featureGates:
         - ConfigurableHypervisor
@@ -206,8 +205,6 @@ func NewHypervisor(name string) hypervisor.Hypervisor {
   switch strings.ToLower(name) {
   case "sample":
     return &SampleHypervisor{}
-  case "hyperv-layered":
-    return &HyperVLayeredHypervisor{}
   default:
     return &KVMHypervisor{}
   }
@@ -222,7 +219,7 @@ func NewHypervisor(name string) hypervisor.Hypervisor {
 
 ### Future Enhancements
 
-Full abstraction with—multi-device descriptors, richer domain defaults, hypervisor-driven validation, and alternate libvirt transports.
+Full abstraction with—multi-device descriptors, richer domain defaults, distribution of hypervisor-specific logic amongst component libraries.
 
 ## Scalability
 
