@@ -239,7 +239,7 @@ Full abstraction with—multi-device descriptors, richer domain defaults, distri
 
 ## Implementation History
 
-- 2025-10-XX: Initial VEP draft.
+- 2025-Oct-7: Initial VEP draft.
 
 ## Graduation Requirements
 
