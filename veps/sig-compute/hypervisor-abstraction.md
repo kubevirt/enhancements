@@ -4,7 +4,7 @@
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements]
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements]
 - [ ] (R) Target version is explicitly mentioned and approved
 - [ ] (R) Graduation criteria filled
 
