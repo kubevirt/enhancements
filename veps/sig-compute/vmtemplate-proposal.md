@@ -271,13 +271,13 @@ lifecycle phases](#feature-lifecycle-phases) for more.
 This design suggests developing this feature outside the core
 `kubevirt/kubevirt` repository, allowing to better organize the new code and to
 keep it separate from the core KubeVirt implementation. This means the feature
-will have its own operator, API server and controller.
-The [AAQ](https://github.com/kubevirt/application-aware-quota)
-repository can serve as a good starting point for scaffolding of all of this.
+will have its own API server and controller.
 
-This design proposes using a new `kubevirt/template-operator` repository. The
-components in this shall be named `virt-template-operator`,
-`virt-template-controller`, `virt-template-api` and so on.
+This design proposes using a new `kubevirt/virt-template` repository. The
+components in this shall be named `virt-template-controller`,
+`virt-template-apiserver` and so on. To allow publishing of the api and client
+separately from the main repo the `kubevirt/virt-template-api` and
+`kubevirt/virt-template-client-go` repositories are proposed.
 
 Although the feature should be developed separately, it should still be deployed
 by the `virt-operator` in the core repository of KubeVirt, so that some changes
@@ -297,7 +297,7 @@ The following changes to the main repository are required:
 
 * Add FeatureGate and/or configurable for the feature to the `KubeVirt` CRD
 * Extend `virt-operator` to allow deployment of the feature (pulling in
-  `virt-template-operator` so that it can deploy the feature.)
+  `virt-template` manifests so that it can deploy the feature.)
 * Extend `virtctl` with the commands described below (pulling in
   dependencies and not using a plugin mechanism.)
 
@@ -456,7 +456,7 @@ $ virtctl template process fedora -p foo=bar
 Internally the` process` subcommand should use the same processing logic as the
 `/process` subresource API that is described above. This should be
 achieved by vendoring the logic that is hosted in the external
-`kubevirt/template-operator` repository into `kubevirt/kubevirt` for use within
+`kubevirt/virt-template` repository into `kubevirt/kubevirt` for use within
 `virtctl`.
 
 #### VirtualMachineTemplateRequest
@@ -659,7 +659,7 @@ example of an adapted `VirtualMachineTemplate`.
 
 If this proposal is successful, the `kubevirt/common-templates` project would
 eventually be adapted to the `VirtualMachineTemplates` found in the new
-`kubevirt/template-operator` repository.
+`kubevirt/virt-template` repository.
 
 ### template.kubevirt.io/v1beta1
 
