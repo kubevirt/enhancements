@@ -1,4 +1,4 @@
-# VEP #22: Storage agnostic incremental backup using qemu
+# VEP #25: Storage agnostic incremental backup using qemu
 
 ## Release Signoff Checklist
 
