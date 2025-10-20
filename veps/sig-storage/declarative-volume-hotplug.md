@@ -328,16 +328,16 @@ A comprenhensive test suite that checks the guest state will be important for th
 
 ## Feature lifecycle Phases
 
-### Alpha
+### Alpha (KubeVirt 1.6)
 
 There will be two relevent featuregates:
 
-1. `HotplugVolumes` - This existing featuregate will enable declarative adding/removing volumes and their corresponding disks in pairs
-2. `InjectEjectCDROM` - This new feature gate will allow for VM definitions that contain a CD-ROM and no volume
+1. `DeclarativeHotplugVolumes` - New featuregate that enables declarative volume hotplug and inject/eject CD-ROM
+2. `HotplugVolumes` - This featuregate will be deprecated, but if enabled will take precedence over `DeclarativeHotplugVolumes` to preserve legacy behavior
 
-### Beta
+### Beta (KubeVirt 1.7)
 
-Perhaps after one or two releases, when we are confident that the feature is working as expected, move to beta.
+Declarative volume hotplug goes beta. No code changes required.
 
 ### GA
 
