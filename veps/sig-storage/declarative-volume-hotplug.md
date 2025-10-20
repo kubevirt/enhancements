@@ -5,8 +5,8 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.6
-- This VEP targets beta for version:
-- This VEP targets GA for version:
+- This VEP targets beta for version: v1.9
+- This VEP targets GA for version: v1.10
 
 ### Release Signoff Checklist
 
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -23,7 +23,7 @@ Proposal to support live updates of Virtual Machine volumes by directly editing 
 
 ## Motivation
 
-Currently, the only way to apply live updates to Virtual Machine volumes is via the VM subresource API. Updates to the disk/volume sections of a Virtual Machine specification will not be applied until the VM is restarted. This is undesireable for the following reasons:
+Currently, the only way to apply live updates to Virtual Machine volumes is via the VM subresource API. Updates to the disk/volume sections of a Virtual Machine specification will not be applied until the VM is restarted. This is undesirable for the following reasons:
 
 - Restarts are disruptive
 - The subresource API is not compatible with a [GitOps](https://kubevirt.io/user-guide/operations/gitops/) workflow
@@ -34,7 +34,7 @@ Currently, the only way to apply live updates to Virtual Machine volumes is via 
 - Address shortcomings of the Virtual Machine subresource API by allowing for Virtual Machine volumes to be updated in a declarative way and have those changes applied immediately
 - Support empty CD-ROM disks (no corresponding volume)
 - Inject/eject of CD-ROM volumes
-- A soft goal is to refactor the subresource API implementation to simply call the new declarative API and deprecate `vm.status.volumeRequests`
+- A soft goal is to refactor the subresource API implementation to write directly to VM volumes/disks when `DeclarativeHotplugVolumes` is enabled, deprecating the use of `vm.status.volumeRequests`. The field itself is retained for backward compatibility but is only used when the legacy `HotplugVolumes` feature gate is specified
 
 ## Non Goals
 
@@ -46,9 +46,9 @@ Currently, the only way to apply live updates to Virtual Machine volumes is via 
 
 ## User Stories
 
-- As a KubeVirt user, I want to be able to use `kubectl edit` to add/remove/change the volumes of a Virtual Machine and have those changes take effect immedietly without restarting the VM
-- As a KubeVirt user, I want to be able to add/remove/change the volumes of a Virtual Machine by updating the VM definition, pushing it to a git repository, and when a system like [Open Cluster Management](https://open-cluster-management.io/) or [ArgoCD](https://argoproj.github.io/cd/) applies those changes, they will take effect immedietly without restarting the VM
-- As a KubeVirt user, I want to be able define a CD-ROM disk on a Virtual Machine and simulate injecting/ejecting a CD-ROM disk by adding/removing volumes from the VM specification. Those changes should take effect immedietly without starting the Virtual Machine
+- As a KubeVirt user, I want to be able to use `kubectl edit` to add/remove/change the volumes of a Virtual Machine and have those changes take effect immediately without restarting the VM
+- As a KubeVirt user, I want to be able to add/remove/change the volumes of a Virtual Machine by updating the VM definition, pushing it to a git repository, and when a system like [Open Cluster Management](https://open-cluster-management.io/) or [ArgoCD](https://argoproj.github.io/cd/) applies those changes, they will take effect immediately without restarting the VM
+- As a KubeVirt user, I want to be able define a CD-ROM disk on a Virtual Machine and simulate injecting/ejecting a CD-ROM disk by adding/removing volumes from the VM specification. Those changes should take effect immediately without starting the Virtual Machine
 
 ## Repos
 
@@ -64,7 +64,7 @@ A couple different options were considered.
 
 In this case, the feature will be enabled by default except when VM Rollout strategy is `LiveUpdate` AND Volume Update Strategy is `Migration`
 
-There are currently two Volume Update Strategies, `Replacement` and `Migration`. `Replacement` "stages" declarative volume changes to be applied when the Virtual Machine restarts. `Migrtion` kicks off a live migration which will copy a volume's data to a new PVC.
+There are currently two Volume Update Strategies, `Replacement` and `Migration`. `Replacement` "stages" declarative volume changes to be applied when the Virtual Machine restarts. `Migration` kicks off a live migration which will copy a volume's data to a new PVC.
 
 With this option, the `Replacement` strategy will live update changes to any volume with `hotpluggable: true`
 
@@ -325,7 +325,11 @@ This feature depends on existing [volume hotplug machinery](https://kubevirt.io/
 
 ## Update/Rollback Compatibility
 
-On upgrade, any `hotpluggable: true` volumes that were staged for update will get hotplugged. This is not expected to be a common configuration though.
+On upgrade to v1.6 (alpha), any `hotpluggable: true` volumes that were staged for update will get hotplugged. This is not expected to be a common configuration though.
+
+On upgrade to v1.9 (beta), the `DeclarativeHotplugVolumes` feature gate becomes enabled by default. Users who were not previously opting into the feature will now have declarative volume hotplug active. The legacy `HotplugVolumes` feature gate is still available for users who need to revert to the previous behavior.
+
+On rollback from v1.9 to a prior version, the feature gate reverts to off-by-default. Volumes that were hotplugged via the declarative API will remain attached but any new declarative volume changes will be staged for restart rather than applied immediately.
 
 ## Functional Testing Approach
 
@@ -339,17 +343,32 @@ A comprenhensive test suite that checks the guest state will be important for th
 
 ## Feature lifecycle Phases
 
-### Alpha
+### Alpha (v1.6)
 
 There will be two relevent featuregates:
 
-1. `HotplugVolumes` - This existing featuregate will enable declarative adding/removing volumes and their corresponding disks in pairs
-2. `InjectEjectCDROM` - This new feature gate will allow for VM definitions that contain a CD-ROM and no volume
+1. `DeclarativeHotplugVolumes` - New featuregate that enables declarative volume hotplug and inject/eject CD-ROM
+2. `HotplugVolumes` - This featuregate will be deprecated, but if enabled will take precedence over `DeclarativeHotplugVolumes` to preserve legacy behavior
 
-### Beta
+A deprecation notice for `HotplugVolumes` was communicated with the v1.6 release.
 
-Perhaps after one or two releases, when we are confident that the feature is working as expected, move to beta.
+### Beta (v1.9)
 
-### GA
+No code changes are required. The implementation is complete with no known bugs.
 
-GA once the feature has been running in production without issue. Remove featuregates.
+Per [VEP 229](../meta-VEPs/229-beta-features-on-by-default/vep.md), the `DeclarativeHotplugVolumes` feature gate will be enabled by default starting in v1.9. Users and downstream vendors can still disable it via the `DisabledFeatureGates` mechanism if needed.
+
+The deprecated `HotplugVolumes` feature gate will be retained through the beta phase to preserve legacy behavior for users who have not yet migrated. It will be removed at GA.
+
+#### Graduation Criteria (Beta -> GA)
+
+- Feature has been enabled by default for at least one release with no critical issues reported
+- No regressions in existing volume hotplug functionality
+- `HotplugVolumes` feature gate usage has been sufficiently phased out
+
+### GA (v1.10)
+
+GA once the feature has been running enabled by default without critical issues. The following cleanup will occur:
+
+- Remove the `DeclarativeHotplugVolumes` feature gate (behavior becomes unconditional)
+- Remove the deprecated `HotplugVolumes` feature gate and associated legacy code path
