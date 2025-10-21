@@ -20,8 +20,9 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 
 ## Goals
 
-- Provide an explicit `Hypervisor` interface that supplies device requirements to schedule against plus domain defaults and mutators, avoiding invasive changes to existing components.
+- Document the cluster-wide hypervisor configuration and per-component extension points (defaults, converter, webhooks, node labeller) so downstream implementations can extend behavior without invasive changes to existing components.
 - Resolve the active hypervisor early and feed it through the virt-launcher converter so hypervisor-specific behavior stays localized.
+- Support both admission-time validation and mutation so administrators can enforce guardrails while still customizing VMIs for a given hypervisor.
 - Let components request allocatable device resources declared by the hypervisor configuration, avoiding new scheduling primitives.
 - Make it simple for downstreams to implement new hypervisors by following a documented contract.
 
@@ -29,6 +30,7 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 
 - Deliver a full implementation of any specific new hypervisor backend.
 - Redesign the VirtualMachineInstance API schema beyond additive fields.
+- Replace existing Hyper-V enlightenment features or other architecture-specific helpers.
 - Mandate new observability requirements; telemetry hooks remain optional.
 
 ## Definition of Users
@@ -40,7 +42,7 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 ## User Stories
 
 1. As a cluster administrator, I can declare a non-KVM hypervisor as the cluster default, and VMI pods schedule only on nodes that expose its required devices.
-2. As a platform engineer, I can supply hypervisor-specific libvirt defaults and mutators without forking the virt-launcher domain converter.
+2. As a platform engineer, I can supply hypervisor-specific VMI spec mutations and libvirt domain adjustments without forking the virt-launcher converter.
 3. As an upstream maintainer, I know exactly where to add validation, testing, and documentation when a new hypervisor is introduced.
 
 ## Repos
@@ -50,40 +52,18 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 
 ## Design
 
-### Hypervisor Interface
+### Hypervisor Extension Points
 
-```go
-// pkg/hypervisor/hypervisor.go
+Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declares the active hypervisor for the entire installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
 
-type DeviceRequirement struct {
-  Resource string
-  Count    int64
-  Optional bool
-}
+- **Defaults registry (`pkg/defaults/hypervisor/`)** – Defines a `DefaultsExtension` contract that exposes `MutateVMI`, `AdjustResources`, `GetMemoryOverhead`, and `DeviceRequests`. Implementations live in one file per hypervisor (for example, `kvm.go`, `hyperv-layered.go`). `pkg/defaults/defaults.go` delegates to the resolved extension.
+- **Converter library (`pkg/virt-launcher/virtwrap/converter/hypervisor/`)** – Implements the new `HypervisorConverter` interface described below. Each hypervisor file focuses on XML/domain differences while `base.go` holds the shared helpers. The converter selects the correct implementation via a local registry keyed by hypervisor name.
+- **Admission webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – Surface validation and mutation helpers that wrap existing webhook entry points. The admitters use the same cluster-configured hypervisor value as `virt-controller` and invoke the matching implementation.
+- **Node labeller (`pkg/virt-handler/node-labeller/hypervisor/`)** – Adds a lightweight hook so each hypervisor can declare the devices to probe, the preferred libvirt `virt-type`, and optional feature discovery (such as Hyper-V enlightenments for KVM on amd64).
 
-type DomainProfile struct {
-  Type string
-  XMLNS string
-  Mutators []DomainMutator
-}
+This split preserves the “implement once, reuse everywhere” story without routing everything through a monolithic interface. New hypervisors can land incrementally—start with defaults and webhooks, add converter support, then extend node labelling—while keeping the contract for each area explicit and testable.
 
-type DomainMutator interface {
-  Apply(*api.Domain, *v1.VirtualMachineInstance) error
-}
-
-type ValidationResult = field.ErrorList
-
-type Hypervisor interface {
-  Devices(*v1.VirtualMachineInstance) []DeviceRequirement
-  DomainDefaults(*v1.VirtualMachineInstance) (DomainProfile, error)
-  ValidateVMI(*v1.VirtualMachineInstance) ValidationResult
-  MutateVMI(*v1.VirtualMachineInstance)
-}
-```
-
-The `Hypervisor` interface is intentionally small. It returns static information about required host devices (including optional or multi-quantity entries), libvirt defaults, and mutators that should run during domain conversion. `DeviceRequirement` identifies each resource name, the quantity to request, and whether the dependency is optional.
-
-### Selection and Overrides
+### Selection
 
 - `virt-config` loads cluster-wide defaults from an additive `hypervisorConfiguration` field on the `KubeVirt` CR. The `name` selects the cluster-wide default hypervisor implementation. A dedicated feature gate, `ConfigurableHypervisor`, guards the new functionality:
 
@@ -97,32 +77,48 @@ spec:
         - ConfigurableHypervisor
 ```
 
-- VMIs can opt in to a specific hypervisor via the annotation `hypervisor.kubevirt.io/name: sample-hypervisor`.
-- `virt-controller` resolves the hypervisor for each VMI when generating launcher manifests and embeds the ID in pod annotations and the `ConverterContext`.
-- The implementation ships with a factory (`hypervisor.NewHypervisor`) that instantiates the appropriate provider based on the resolved name, keeping selection logic centralized without a global registry.
+- `virt-controller` reads the configured hypervisor from `ClusterConfig` when generating launcher manifests and threads that ID through the `ConverterContext` so downstream components can act consistently.
+- Each package's registry uses the configured name to locate its implementation, avoiding a monolithic factory while keeping selection logic consistent.
 
-### Integration with Defaults and Converter
+### Integration with Defaults, Converter, and Resource Accounting
 
-1. `virt-controller` and `virt-handler` populate the `ConverterContext` with the resolved hypervisor ID before calling into virtwrap.
-2. `virtwrap/api` defaults request `DomainDefaults` from the active hypervisor to stamp the baseline domain type, XML namespace, and attach mutators.
-3. The converter executes the returned mutators immediately after defaults, interleaving hypervisor-specific XML edits with existing architecture helpers (CPU topology, devices, timers).
-4. Subsequent converter phases remain untouched.
+1. `virt-controller` and `virt-handler` read the configured hypervisor from `ClusterConfig`, add that ID to the serialized `ConverterContext` they already ship alongside the launcher pod, and virt-launcher folds it into its `DomainContext` right before domain generation.
+2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI, compute device requests, and reconcile pod/domain resource totals via `AdjustResources` and `GetMemoryOverhead`. The same extension feeds the controller so it can request the correct device plugin resources.
+3. When virt-launcher converts the VMI, it instantiates the matching `HypervisorConverter`. That implementation stamps baseline domain defaults, contributes mutators, and interleaves its edits with the existing architecture helpers (CPU topology, devices, timers).
+4. The launcher still reuses the existing `setLaunchSecurity`, disk, and network helpers; hypervisor-specific cases funnel through the converter abstractions so defaults remain declarative.
+5. `HandleHousekeeping` lives in the converter implementation, letting each hypervisor attach timers, watchdogs, and other housekeeping tweaks right before the domain is finalized.
+
+### Converter Restructuring Inside Virt-launcher
+
+- The existing `pkg/virt-launcher/virtwrap/converter` package becomes a reusable library with a new `hypervisor` subpackage. Shared translation helpers for disks, NICs, CPU topology, and security settings live in `converter/hypervisor/base.go` as `BaseHypervisorConverter` utilities.
+- A narrow `HypervisorConverter` interface (for example, `SetDomainType`) captures every point where the current converter branches on hypervisor-specific logic.
+- Per-hypervisor implementations (e.g., `converter/hypervisor/kvm.go`, `converter/hypervisor/hyperv-layered.go`) embed the base helper and override only the methods they need. `NewHypervisorConverter(name string)` returns the correct implementation based on the resolved hypervisor name, mirroring the runtime factory used across the control plane.
+- Existing call sites inside the converter depend on the interface, keeping shared logic untouched while cleanly isolating hypervisor-specialized code paths.
+- Unit tests port alongside the refactor so every converter branch remains covered; new tests exercise the factory and ensure fallback to the KVM implementation when an unknown hypervisor is requested.
+
+### Hypervisor-Specific Defaults and Validations
+
+- `pkg/defaults/hypervisor/` hosts one file per implementation (for example, `kvm.go`, `hyperv-layered.go`). Each file implements the `DefaultsExtension` contract and mirrors the structure we already use for architecture-specific defaults. A tiny `registry.go` wires them into a local map.
+- `pkg/defaults/defaults.go` reads the active hypervisor from `ClusterConfig` and delegating `MutateVMI`, `AdjustResources`, `GetMemoryOverhead`, and `DeviceRequests` to the extension. Existing architecture helpers become wrappers that reuse the new hypervisor implementations for backwards compatibility.
+- `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/` mirrors the layout. Each hypervisor implementation exposes validation and mutation helpers, and the admitters simply delegate after resolving the hypervisor ID. This mirrors the per-architecture structure we introduced recently and keeps webhook behavior aligned with defaults.
+
+This layout keeps downstream additions straightforward: drop new `pkg/defaults/hypervisor/<name>.go` and `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/<name>.go` files, register them with the per-package map, and the control plane picks them up automatically.
 
 ### Scheduling and Device Management
 
-- `virt-controller` calls `Devices()` to determine the device plugin resources (for example, `devices.kubevirt.io/mshv` plus an auxiliary firmware device) to request. Kubernetes schedules VMI pods only on nodes that advertise the required quantities; entries flagged `Optional: true` may be skipped when the resource is absent.
+- `virt-controller` reads the `DeviceRequests` declared by the defaults extension to determine the device plugin resources (for example, `devices.kubevirt.io/mshv` plus an auxiliary firmware device) to request. Kubernetes schedules VMI pods only on nodes that advertise the required quantities; entries flagged `Optional: true` may be skipped when the resource is absent.
 - `virt-handler`'s device manager uses the same list when spawning its permanent `GenericDevicePlugin` instances, so the existing lifecycle for `/dev/kvm` seamlessly extends to `/dev/mshv` or composite requirements.
-- Node labelling remains optional telemetry. Operators can surface informative labels, but functionality relies solely on allocatable resources.
+- The node-labeller sidecar in `virt-handler` is seeded with the resolved hypervisor. It probes only the devices declared by the active implementation and sets libvirt's preferred `virt-type` before querying capabilities, so downstream hypervisors can surface their own CPU/memory traits without patching the container image.
+- Node labelling remains optional telemetry. Operators can surface informative labels, but functionality relies solely on allocatable resources. When the hypervisor/architecture combination implies additional feature discovery (for example, Hyper-V enlightenments), the labeller defers to helper hooks exposed by the implementation. In the MVP we continue to evaluate Hyper-V enlightenments only when the hypervisor is `kvm` and the architecture is `amd64`, matching the current behaviour while providing a seam for future backends.
 
-### Validation & Mutation
+### Validation & Mutation Webhooks
 
-- Hypervisors can use `ValidateVMI` to enforce requirements. The validating webhooks inside `virt-api` resolve the active hypervisor for every VirtualMachine and VirtualMachineInstance admission request using the same precedence rules as `virt-controller`.
-- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec before Kubernetes persists the object.
+- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec (for example, seeding Hyper-V Layered feature blocks or toggling defaults) before Kubernetes persists the object.
+- Hypervisors can use `Validate` to enforce requirements. The validating webhooks inside `virt-api` read the configured hypervisor from `ClusterConfig`, matching the value embedded by `virt-controller`, so admission stays consistent with reconciliation.
 - In tandem, these hooks enable opinionated defaults for each hypervisor while still rejecting incompatible specs, delivering flexibility without sacrificing guardrails.
 
 ### Observability Hooks
 
-- The chosen hypervisor ID is attached to launcher pods as `hypervisor.kubevirt.io/name` for dashboards and debugging.
 - Monitoring can leverage existing metrics that expose allocatable device resources (e.g., `devices_kubevirt_io_*`). No new mandatory metrics are introduced.
 
 ## API Examples
@@ -138,7 +134,7 @@ metadata:
 spec:
   configuration:
     hypervisorConfiguration:
-      name: sample
+      name: hyperv-layered
     developerConfiguration:
       featureGates:
         - ConfigurableHypervisor
@@ -146,70 +142,80 @@ spec:
   imagePullPolicy: Always
 ```
 
-### VMI Annotation Override
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachineInstance
-metadata:
-  name: demo-vmi
-  annotations:
-    hypervisor.kubevirt.io/name: sample-hypervisor
-spec:
-  domain:
-    cpu:
-      cores: 4
-    devices:
-      disks:
-        - name: containerdisk
-          disk:
-            bus: virtio
-  volumes:
-    - name: containerdisk
-      containerDisk:
-        image: kubevirt/fedora-cloud-container-disk-demo:latest
-```
+With this configuration in place, every VMI reconciled by the control plane inherits the `hyperv-layered` behavior automatically—no per-object annotations are required.
 
 ### Adding a Hypervisor Implementation
 
-```go
-func (h *SampleHypervisor) Devices(_ *v1.VirtualMachineInstance) []hypervisor.DeviceRequirement {
-  return []hypervisor.DeviceRequirement{{
-    Resource: "devices.kubevirt.io/sample",
-    Count:    1,
-  }}
-}
+1. **Defaults** – Drop `pkg/defaults/hypervisor/sample.go`:
 
-func (h *SampleHypervisor) DomainDefaults(_ *v1.VirtualMachineInstance) (hypervisor.DomainProfile, error) {
-  profile := hypervisor.DomainProfile{
-    Type: "sample",
-    Mutators: []hypervisor.DomainMutator{sampleDomainMutator{}},
-  }
-  return profile, nil
-}
+   ```go
+   type sampleDefaults struct{}
 
-type sampleDomainTypeMutator struct{}
+   func (sampleDefaults) MutateVMI(vmi *v1.VirtualMachineInstance) {
+     // seed sample defaults
+   }
 
-func (sampleDomainTypeMutator) Apply(domain *api.Domain, _ *v1.VirtualMachineInstance) error {
-  if domain == nil {
-    return nil
-  }
-  domain.Spec.Type = "sample"
-  return nil
-}
+   func (sampleDefaults) AdjustResources(vmi *v1.VirtualMachineInstance, ratio *string) error {
+     // reuse existing helpers; return nil when no adjustments are needed
+     return nil
+   }
 
-// Wire the implementation into the factory, typically by extending
-// hypervisor.NewHypervisor with a new case:
+   func (sampleDefaults) GetMemoryOverhead(vmi *v1.VirtualMachineInstance, arch string, ratio *string) resource.Quantity {
+     return baseMemoryOverhead(vmi, arch, ratio)
+   }
 
-func NewHypervisor(name string) hypervisor.Hypervisor {
-  switch strings.ToLower(name) {
-  case "sample":
-    return &SampleHypervisor{}
-  default:
-    return &KVMHypervisor{}
-  }
-}
-```
+   func (sampleDefaults) DeviceRequests(_ *v1.VirtualMachineInstance) []DeviceRequest {
+     return []DeviceRequest{{Resource: "devices.kubevirt.io/sample", Count: 1}}
+   }
+
+   func init() {
+     RegisterDefaultsExtension("sample", sampleDefaults{})
+   }
+   ```
+
+2. **Converter** – Add `pkg/virt-launcher/virtwrap/converter/hypervisor/sample.go` implementing the `HypervisorConverter` interface (overriding only the methods that differ from the base helper).
+
+   ```go
+   type sampleConverter struct {
+     *BaseHypervisorConverter
+   }
+
+   func newSampleConverter() HypervisorConverter {
+     return &sampleConverter{
+       BaseHypervisorConverter: NewBaseHypervisorConverter(),
+     }
+   }
+
+   func (c *sampleConverter) SetDomainType(dom *api.Domain) {
+     dom.Spec.Type = "sample"
+   }
+
+   func init() {
+     RegisterHypervisorConverter("sample", newSampleConverter)
+   }
+   ```
+
+3. **Admission** – Create `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/sample.go` that exports `MutateVMI` and `Validate` functions and register them in the webhook registry.
+
+4. **Node labeller (optional for MVP)** – Provide `pkg/virt-handler/node-labeller/hypervisor/sample.go` declaring the devices and libvirt `virt-type` to probe. If the hypervisor relies on architecture-specific features, add the corresponding helper hooks.
+
+   ```go
+   type sampleLabeller struct{}
+
+   func (sampleLabeller) Devices() []DeviceProbe {
+     return []DeviceProbe{
+       {Path: "/dev/sample", ResourceName: "devices.kubevirt.io/sample"},
+     }
+   }
+
+   func (sampleLabeller) PreferredVirtType() string {
+     return "sample"
+   }
+   
+   func init() {
+     RegisterHypervisorLabeller("sample", sampleLabeller{})
+   }
+   ```
 
 ## Alternatives
 
@@ -219,17 +225,19 @@ func NewHypervisor(name string) hypervisor.Hypervisor {
 
 ### Future Enhancements
 
-Full abstraction with—multi-device descriptors, richer domain defaults, distribution of hypervisor-specific logic amongst component libraries.
+Full abstraction with—multi-device descriptors, richer domain defaults, hypervisor-driven validation, and alternate libvirt transports.
+
+- Extend `virt-handler` node-labeller to surface per-hypervisor capability labels so schedulers and operators can audit readiness without relying on device resources alone.
 
 ## Scalability
 
-- Hypervisor selection is resolved via a constant-time factory call during existing reconciles, keeping control-loop complexity independent of how many implementations ship.
+- Hypervisor selection resolves once per reconcile, and each component performs a constant-time lookup in its registry, keeping control-loop complexity independent of how many implementations ship.
 - Converter mutators execute in a deterministic order to avoid combinatorial growth in conditionals.
 
 ## Update/Rollback Compatibility
 
 - The feature is additive. Clusters without hypervisor configuration continue to use KVM exclusively.
-- Rolling back to a version without the abstraction leaves hypervisor-specific annotations unused but harmless.
+- Rolling back to a version without the abstraction reverts to the existing KVM default once the new configuration field is removed or ignored.
 
 ## Functional Testing Approach
 
@@ -246,7 +254,7 @@ Full abstraction with—multi-device descriptors, richer domain defaults, distri
 ### Alpha
 
 - Feature gate covers configurable hypervisor
-- Cluster-wide hypervisor configuration and VMI annotation implemented.
+- Cluster-wide hypervisor configuration implemented and consumed by defaults, converter, and webhooks.
 - Basic functional tests for alternative hypervisor scheduling and domain generation.
 
 ### Beta
