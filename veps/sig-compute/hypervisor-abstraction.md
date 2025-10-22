@@ -56,7 +56,8 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 
 Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declares the active hypervisor for the entire installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
 
-- **Defaults registry (`pkg/defaults/hypervisor/`)** – Defines a `DefaultsExtension` contract that exposes `MutateVMI`, `AdjustResources`, `GetMemoryOverhead`, and `DeviceRequests`. Implementations live in one file per hypervisor (for example, `kvm.go`, `hyperv-layered.go`). `pkg/defaults/defaults.go` delegates to the resolved extension.
+- **Defaults registry (`pkg/defaults/hypervisor/`)** – Defines a `DefaultsExtension` contract that exposes `MutateVMI` and `DeviceRequests`. Implementations live in one file per hypervisor (for example, `kvm.go`, `hyperv-layered.go`). `pkg/defaults/defaults.go` delegates to the resolved extension.
+- **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, and `GetMemoryOverhead`. Each implementation registers under the same hypervisor key so `virt-controller`, `virt-handler`, and virt-launcher can resolve the correct runtime hooks.
 - **Converter library (`pkg/virt-launcher/virtwrap/converter/hypervisor/`)** – Implements the new `HypervisorConverter` interface described below. Each hypervisor file focuses on XML/domain differences while `base.go` holds the shared helpers. The converter selects the correct implementation via a local registry keyed by hypervisor name.
 - **Admission webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – Surface validation and mutation helpers that wrap existing webhook entry points. The admitters use the same cluster-configured hypervisor value as `virt-controller` and invoke the matching implementation.
 - **Node labeller (`pkg/virt-handler/node-labeller/hypervisor/`)** – Adds a lightweight hook so each hypervisor can declare the devices to probe, the preferred libvirt `virt-type`, and optional feature discovery (such as Hyper-V enlightenments for KVM on amd64).
@@ -80,13 +81,13 @@ spec:
 - `virt-controller` reads the configured hypervisor from `ClusterConfig` when generating launcher manifests and threads that ID through the `ConverterContext` so downstream components can act consistently.
 - Each package's registry uses the configured name to locate its implementation, avoiding a monolithic factory while keeping selection logic consistent.
 
-### Integration with Defaults, Converter, and Resource Accounting
+### Integration with Defaults, Runtime, and Converter
 
 1. `virt-controller` and `virt-handler` read the configured hypervisor from `ClusterConfig`, add that ID to the serialized `ConverterContext` they already ship alongside the launcher pod, and virt-launcher folds it into its `DomainContext` right before domain generation.
-2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI, compute device requests, and reconcile pod/domain resource totals via `AdjustResources` and `GetMemoryOverhead`. The same extension feeds the controller so it can request the correct device plugin resources.
-3. When virt-launcher converts the VMI, it instantiates the matching `HypervisorConverter`. That implementation stamps baseline domain defaults, contributes mutators, and interleaves its edits with the existing architecture helpers (CPU topology, devices, timers).
-4. The launcher still reuses the existing `setLaunchSecurity`, disk, and network helpers; hypervisor-specific cases funnel through the converter abstractions so defaults remain declarative.
-5. `HandleHousekeeping` lives in the converter implementation, letting each hypervisor attach timers, watchdogs, and other housekeeping tweaks right before the domain is finalized.
+2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI and surface `DeviceRequests`. The controller uses those requests when constructing launcher pods so the scheduler can account for hypervisor-specific devices.
+3. Control-plane components resolve the `HypervisorRuntime` implementation to run `AdjustResources` and `GetMemoryOverhead`, keeping pod-level resource calculations in sync with the mutated spec. The same runtime contract is reused by virt-handler for memlock sizing and ancillary bookkeeping.
+4. When virt-launcher converts the VMI, it instantiates both the `HypervisorConverter` and the `HypervisorRuntime`. The converter stamps baseline domain defaults and interleaves its edits with the existing architecture helpers, while the runtime's `HandleHousekeeping` hook attaches timers, watchdogs, and other hypervisor-specific tweaks immediately before the domain is finalized.
+5. The launcher still reuses the existing `setLaunchSecurity`, disk, and network helpers; hypervisor-specific cases funnel through the converter and runtime abstractions so defaults remain declarative.
 
 ### Converter Restructuring Inside Virt-launcher
 
@@ -99,10 +100,11 @@ spec:
 ### Hypervisor-Specific Defaults and Validations
 
 - `pkg/defaults/hypervisor/` hosts one file per implementation (for example, `kvm.go`, `hyperv-layered.go`). Each file implements the `DefaultsExtension` contract and mirrors the structure we already use for architecture-specific defaults. A tiny `registry.go` wires them into a local map.
-- `pkg/defaults/defaults.go` reads the active hypervisor from `ClusterConfig` and delegating `MutateVMI`, `AdjustResources`, `GetMemoryOverhead`, and `DeviceRequests` to the extension. Existing architecture helpers become wrappers that reuse the new hypervisor implementations for backwards compatibility.
+- `pkg/defaults/defaults.go` reads the active hypervisor from `ClusterConfig` and delegates `DeviceRequests` to the extension. Existing architecture helpers become wrappers that reuse the new hypervisor implementations for backwards compatibility.
+- `pkg/hypervisor/runtime/` introduces a sibling registry for `HypervisorRuntime` implementations. `virt-controller` consults it to call `AdjustResources` and `GetMemoryOverhead`, while virt-handler and virt-launcher reuse the same implementation for memlock sizing and `HandleHousekeeping`.
 - `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/` mirrors the layout. Each hypervisor implementation exposes validation and mutation helpers, and the admitters simply delegate after resolving the hypervisor ID. This mirrors the per-architecture structure we introduced recently and keeps webhook behavior aligned with defaults.
 
-This layout keeps downstream additions straightforward: drop new `pkg/defaults/hypervisor/<name>.go` and `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/<name>.go` files, register them with the per-package map, and the control plane picks them up automatically.
+This layout keeps downstream additions straightforward: drop new `pkg/defaults/hypervisor/<name>.go`, `pkg/hypervisor/runtime/<name>.go`, and `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/<name>.go` files, register them with the per-package map, and the control plane picks them up automatically.
 
 ### Scheduling and Device Management
 
@@ -146,23 +148,10 @@ With this configuration in place, every VMI reconciled by the control plane inhe
 
 ### Adding a Hypervisor Implementation
 
-1. **Defaults** – Drop `pkg/defaults/hypervisor/sample.go`:
+1. **Defaults** – `pkg/defaults/hypervisor/sample.go`:
 
    ```go
    type sampleDefaults struct{}
-
-   func (sampleDefaults) MutateVMI(vmi *v1.VirtualMachineInstance) {
-     // seed sample defaults
-   }
-
-   func (sampleDefaults) AdjustResources(vmi *v1.VirtualMachineInstance, ratio *string) error {
-     // reuse existing helpers; return nil when no adjustments are needed
-     return nil
-   }
-
-   func (sampleDefaults) GetMemoryOverhead(vmi *v1.VirtualMachineInstance, arch string, ratio *string) resource.Quantity {
-     return baseMemoryOverhead(vmi, arch, ratio)
-   }
 
    func (sampleDefaults) DeviceRequests(_ *v1.VirtualMachineInstance) []DeviceRequest {
      return []DeviceRequest{{Resource: "devices.kubevirt.io/sample", Count: 1}}
@@ -173,7 +162,31 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
    ```
 
-2. **Converter** – Add `pkg/virt-launcher/virtwrap/converter/hypervisor/sample.go` implementing the `HypervisorConverter` interface (overriding only the methods that differ from the base helper).
+2. **Runtime** – Add `pkg/hypervisor/runtime/sample.go` implementing the `HypervisorRuntime` interface so controllers, handlers, and virt-launcher share runtime hooks.
+
+   ```go
+   type sampleRuntime struct{}
+
+   func (sampleRuntime) AdjustResources(_ *v1.VirtualMachineInstance, _ *string) error {
+     // reuse existing helpers; return nil when no adjustments are needed
+     return nil
+   }
+
+   func (sampleRuntime) GetMemoryOverhead(vmi *v1.VirtualMachineInstance, arch string, ratio *string) resource.Quantity {
+     return baseMemoryOverhead(vmi, arch, ratio)
+   }
+
+   func (sampleRuntime) HandleHousekeeping(_ *v1.VirtualMachineInstance, dom *api.Domain) error {
+     // attach timers/watchdogs if the hypervisor requires it
+     return nil
+   }
+
+   func init() {
+     RegisterHypervisorRuntime("sample", sampleRuntime{})
+   }
+   ```
+
+3. **Converter** – Add `pkg/virt-launcher/virtwrap/converter/hypervisor/sample.go` implementing the `HypervisorConverter` interface (overriding only the methods that differ from the base helper).
 
    ```go
    type sampleConverter struct {
@@ -195,7 +208,7 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
    ```
 
-3. **Admission** – Create `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/sample.go` that exports `MutateVMI` and `Validate` functions and register them in the webhook registry.
+4. **Admission** – Create `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/sample.go` that exports `MutateVMI` and `Validate` functions and register them in the webhook registry.
 
 4. **Node labeller (optional for MVP)** – Provide `pkg/virt-handler/node-labeller/hypervisor/sample.go` declaring the devices and libvirt `virt-type` to probe. If the hypervisor relies on architecture-specific features, add the corresponding helper hooks.
 
@@ -211,7 +224,7 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    func (sampleLabeller) PreferredVirtType() string {
      return "sample"
    }
-   
+
    func init() {
      RegisterHypervisorLabeller("sample", sampleLabeller{})
    }
