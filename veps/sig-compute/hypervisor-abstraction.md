@@ -56,7 +56,15 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 
 Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declares the active hypervisor for the entire installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
 
-- **Defaults registry (`pkg/defaults/hypervisor/`)** – Defines a `DefaultsExtension` contract that exposes `MutateVMI` and `DeviceRequests`. Implementations live in one file per hypervisor (for example, `kvm.go`, `hyperv-layered.go`). `pkg/defaults/defaults.go` delegates to the resolved extension.
+ - **Defaults provider registry (`pkg/defaults/providers/`)** – Introduces a single `DefaultsProvider` interface applied in layered order (Base → Hypervisor → Architecture → Hypervisor+Architecture → Finalization). Providers are registered under composite keys like `kvm/amd64` or `mshv/arm64`. Each provider implements:
+   ```go
+   type DefaultsProvider interface {
+       ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient)
+       ApplyVMISpecDefaults(spec *v1.VirtualMachineInstanceSpec, cc *virtconfig.ClusterConfig) error
+       FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error
+   }
+   ```
+   Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
 - **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, and `GetMemoryOverhead`. Each implementation registers under the same hypervisor key so `virt-controller`, `virt-handler`, and virt-launcher can resolve the correct runtime hooks.
 - **Converter library (`pkg/virt-launcher/virtwrap/converter/hypervisor/`)** – Implements the new `HypervisorConverter` interface described below. Each hypervisor file focuses on XML/domain differences while `base.go` holds the shared helpers. The converter selects the correct implementation via a local registry keyed by hypervisor name.
 - **Admission webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – Surface validation and mutation helpers that wrap existing webhook entry points. The admitters use the same cluster-configured hypervisor value as `virt-controller` and invoke the matching implementation.
@@ -97,14 +105,100 @@ spec:
 - Existing call sites inside the converter depend on the interface, keeping shared logic untouched while cleanly isolating hypervisor-specialized code paths.
 - Unit tests port alongside the refactor so every converter branch remains covered; new tests exercise the factory and ensure fallback to the KVM implementation when an unknown hypervisor is requested.
 
-### Hypervisor-Specific Defaults and Validations
+### Hypervisor-Specific Defaults
 
-- `pkg/defaults/hypervisor/` hosts one file per implementation (for example, `kvm.go`, `hyperv-layered.go`). Each file implements the `DefaultsExtension` contract and mirrors the structure we already use for architecture-specific defaults. A tiny `registry.go` wires them into a local map.
-- `pkg/defaults/defaults.go` reads the active hypervisor from `ClusterConfig` and delegates `DeviceRequests` to the extension. Existing architecture helpers become wrappers that reuse the new hypervisor implementations for backwards compatibility.
-- `pkg/hypervisor/runtime/` introduces a sibling registry for `HypervisorRuntime` implementations. `virt-controller` consults it to call `AdjustResources` and `GetMemoryOverhead`, while virt-handler and virt-launcher reuse the same implementation for memlock sizing and `HandleHousekeeping`.
-- `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/` mirrors the layout. Each hypervisor implementation exposes validation and mutation helpers, and the admitters simply delegate after resolving the hypervisor ID. This mirrors the per-architecture structure we introduced recently and keeps webhook behavior aligned with defaults.
+The defaults system is refactored to support multi-axis overrides (hypervisor, architecture, combined) without expanding large `switch` statements.
 
-This layout keeps downstream additions straightforward: drop new `pkg/defaults/hypervisor/<name>.go`, `pkg/hypervisor/runtime/<name>.go`, and `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/<name>.go` files, register them with the per-package map, and the control plane picks them up automatically.
+Precedence (least → most specific):
+1. Base defaults (generic cluster configuration driven)
+2. Hypervisor layer (e.g. kvm-wide adjustments)
+3. Architecture layer (generic amd64, arm64, s390x adjustments)
+4. Hypervisor+Architecture layer (fine-grained divergence)
+5. Finalization (derived/status + feature dependency resolution)
+
+Rules:
+* Each layer sets only zero-value (unset) fields.
+* User-specified values are never overridden.
+* Finalization runs once after all mutation layers.
+
+Interface (single contract):
+```go
+type DefaultsProvider interface {
+  ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient)
+  ApplyVMISpecDefaults(spec *v1.VirtualMachineInstanceSpec, cc *virtconfig.ClusterConfig) error
+  FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error
+}
+```
+
+Embedding hierarchy examples:
+```go
+type BaseDefaults struct{}
+type KVMDefaults struct { *BaseDefaults }
+type MSHVDefaults struct { *BaseDefaults }
+type ArchAMD64Defaults struct { *BaseDefaults }
+type ArchArm64Defaults struct { *BaseDefaults }
+type ArchS390XDefaults struct { *BaseDefaults }
+// Combined
+type KVMAmd64Defaults struct { *KVMDefaults }
+type KVMArm64Defaults struct { *KVMDefaults }
+type KVMS390XDefaults struct { *KVMDefaults }
+type MSHVAmd64Defaults struct { *MSHVDefaults }
+```
+
+Resolution map (composite key):
+```go
+var providers = map[string]DefaultsProvider{
+  "kvm/amd64":  &KVMAmd64Defaults{&KVMDefaults{&BaseDefaults{}}},
+  "kvm/arm64":  &KVMArm64Defaults{&KVMDefaults{&BaseDefaults{}}},
+  "kvm/s390x":  &KVMS390XDefaults{&KVMDefaults{&BaseDefaults{}}},
+  "mshv/amd64": &MSHVAmd64Defaults{&MSHVDefaults{&BaseDefaults{}}},
+  "kvm":        &KVMDefaults{&BaseDefaults{}},
+  "mshv":       &MSHVDefaults{&BaseDefaults{}},
+  "amd64":      &ArchAMD64Defaults{&BaseDefaults{}}, // optional generic arch layer
+  "arm64":      &ArchArm64Defaults{&BaseDefaults{}},
+  "s390x":      &ArchS390XDefaults{&BaseDefaults{}},
+  "":           &BaseDefaults{},
+}
+
+func ResolveDefaultsProvider(hypervisor, arch string) DefaultsProvider {
+  if p, ok := providers[hypervisor+"/"+arch]; ok { return p }
+  if p, ok := providers[hypervisor]; ok { return p }
+  if p, ok := providers[arch]; ok { return p }
+  return providers[""]
+}
+
+// RegisterDefaultsProvider allows hypervisor or arch-specific packages to register
+// their implementations at init time. Not concurrency-safe by design; all
+// registrations occur during Go init sequencing before any controller threads
+// resolve providers.
+func RegisterDefaultsProvider(key string, p DefaultsProvider) {
+  providers[key] = p
+}
+```
+
+Invocation flow (webhook / controller):
+```go
+provider := ResolveDefaultsProvider(detectedHypervisor, detectedArch)
+provider.ApplyVMISpecDefaults(&vmi.Spec, clusterConfig)
+provider.FinalizeVMI(vmi, clusterConfig)
+```
+
+Migration steps:
+1. Introduce interface + base provider wrapping existing logic (no behavior change).
+2. Move architecture-specific functions into provider structs; keep old functions as thin wrappers (marked deprecated).
+3. Enable hypervisor resolution (defaulting to "kvm" until hypervisor config is set).
+4. Add combined providers only when divergence appears.
+5. Remove deprecated wrappers after grace period.
+
+
+### Hypervisor-Specific Validations
+
+`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/` provides per-hypervisor validation and mutation helpers. Each implementation enforces compatibility (required devices, unsupported feature combinations) after defaults have populated the spec. The admitters resolve the active hypervisor from `ClusterConfig` and delegate to the matching validator.
+
+Key points:
+* Validation is distinct from defaulting: validators never set user-facing defaults (that is handled by `DefaultsProvider`).
+* Hypervisor-specific rejection messages surface early (webhook) instead of deferring to runtime/libvirt errors.
+* Tests cover both acceptance of valid specs and explicit rejection of incompatible feature / device combos.
 
 ### Scheduling and Device Management
 
@@ -148,17 +242,32 @@ With this configuration in place, every VMI reconciled by the control plane inhe
 
 ### Adding a Hypervisor Implementation
 
-1. **Defaults** – `pkg/defaults/hypervisor/sample.go`:
+1. **Defaults Provider** – `pkg/defaults/providers/sample.go` (or `pkg/defaults/providers/sample_amd64.go` when arch-specific):
 
    ```go
-   type sampleDefaults struct{}
+   // sample.go
+   type SampleDefaults struct{ *BaseDefaults }
 
-   func (sampleDefaults) DeviceRequests(_ *v1.VirtualMachineInstance) []DeviceRequest {
-     return []DeviceRequest{{Resource: "devices.kubevirt.io/sample", Count: 1}}
+   func (d *SampleDefaults) ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient) {
+       d.BaseDefaults.ApplyVMDefaults(vm, cc, client) // call embedded base first
+       // sample hypervisor-wide VM template tweaks (if any)
+   }
+
+   func (d *SampleDefaults) ApplyVMISpecDefaults(spec *v1.VirtualMachineInstanceSpec, cc *virtconfig.ClusterConfig) error {
+       if err := d.BaseDefaults.ApplyVMISpecDefaults(spec, cc); err != nil { return err }
+       // set zero-value fields only (e.g. disk bus, firmware) for sample hypervisor
+       return nil
+   }
+
+   func (d *SampleDefaults) FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error {
+       // derived/status adjustments after all layers
+       return d.BaseDefaults.FinalizeVMI(vmi, cc)
    }
 
    func init() {
-     RegisterDefaultsExtension("sample", sampleDefaults{})
+       RegisterDefaultsProvider("sample", &SampleDefaults{&BaseDefaults{}})
+       // Example arch-specific divergence:
+       // RegisterDefaultsProvider("sample/amd64", &SampleAmd64Defaults{SampleDefaults: &SampleDefaults{&BaseDefaults{}}})
    }
    ```
 
