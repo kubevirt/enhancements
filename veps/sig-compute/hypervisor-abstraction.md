@@ -117,7 +117,6 @@ Precedence (least → most specific):
 5. Finalization (derived/status + feature dependency resolution)
 
 Rules:
-* Each layer sets only zero-value (unset) fields.
 * User-specified values are never overridden.
 * Finalization runs once after all mutation layers.
 
