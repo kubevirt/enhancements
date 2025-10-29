@@ -171,13 +171,18 @@ include scenarios involving custom kernel boot / initrd and containerdisk.
 
 ### Beta
 - Wait for the imageVolume feature gate to be graduated to GA in Kubernetes.
-- Enable feature gate by default
 - Ensure that live migration completes successfully by preserving the original container-disk image if the tag is overwritten.
 
 ### GA
-- Remove all code for the old method in virt-handler, virt-controller, and virt-launcher, but continue supporting the 
-old virt-launchers in virt-handler.
-- For VMs not supporting migration we should have alerts and long enough grace period
+- Ensure all functional tests pass successfully with ImageVolume. Unit tests that disable ImageVolume should be
+  either deleted or adjusted.
+- Ensure there is no performance regression compared to the old containerDisk method.
+- Remove the code in virt-controller that sets the virt-launcher pod spec to work without ImageVolume.
+- Remove the code in virt-handler that handles the bind mount for pods without ImageVolume, as no more pods use the
+  old containerDisk method.
+- Remove the `--image-volume` flag from virt-launcher.
 
 ### Post-GA
-Remove any remaining code for the old method in virt-handler once it is safe from upgrade perspective.
+- Remove all code for the old method in virt-handler, virt-controller, and virt-launcher, but continue supporting the
+  old virt-launchers in virt-handler.
+- Remove any remaining code for the old method in virt-handler once it is safe from upgrade perspective.
