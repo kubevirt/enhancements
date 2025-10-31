@@ -1,4 +1,4 @@
-# VEP #95: Hypervisor Abstraction Layer
+# VEP #97: Hypervisor Abstraction Layer
 
 ## Release Signoff Checklist
 
