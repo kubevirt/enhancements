@@ -66,21 +66,20 @@ The VMPool API represents all the tunings necessary for managing a pool of state
 	* **Unmanaged** - No automation during updates. The VM is never touched after creation. Users manually update individual VMs in a pool.
 	* **Opportunistic** - Opportunistic update of VMs which are in a halted state.
 	* **Proactive** - (Default) Proactive update by forcing VMs to restart during update.
-		* **SelectionPolicy** - (Optional) (Defaults to "random" base policy when no SelectionPolicy is configured) The priority in which VM instances are selected for proactive scale-in
-			* **OrderedPolicies** - (Optional) Ordered list of selection policies. Initial policies include [LabelSelector]. Future policies may include a [NodeSelector] or other selection mechanisms.
-			* **BasePolicy** - (Optional) Catch all polices [Oldest|Newest|Random]
+		* **SelectionPolicy** - (Optional) (Defaults to "random" sort policy when no SelectionPolicy is configured) The priority in which VM instances are selected for proactive scale-in
+			* **Selectors** - (Optional) Selectors is a list of selection policies including [LabelSelectors] and [NodeSelectors]
+			* **SortPolicy** - (Optional) Catch all polices [Oldest|Newest|Random|Ascending|Descending]
 * **ScaleInStrategy** - (Optional) Specifies how the VMPool controller manages scaling in VMs within a VMPool
 	* **Unmanaged** - No automation during scale-in. The VM is never touched after creation. Users manually delete individual VMs in a pool. Persistent state preservation is up to the user removing the VMs
 	* **Opportunistic** - Opportunistic scale-in of VMs which are in a halted state.
 		* **StatePreservation** - (Optional) specifies if and how to preserve state of VMs selected for scale-in.
 			* **Disabled** - (Default) all state for VMs selected for scale-in will be deleted
 			* **Offline** - PVCs for VMs selected for scale-in will be preserved and reused on scale-out (decreases provisioning time during scale out)
-			* **Online** - PVCs and memory for VMs selected for scale-in will be preserved and reused on scale-out (decreases provisioning and boot time during scale out)
-Each VM’s PVCs are preserved for future scale out
+			* **Online** - PVCs and memory for VMs selected for scale-in will be preserved and reused on scale-out (decreases provisioning and boot time during scale out) Each VM’s PVCs are preserved for future scale out
 	* **Proactive** - (Default) Proactive scale-in by forcing VMs to shutdown during scale-in.
-		* **SelectionPolicy** - (Optional) (Defaults to "random" base policy when no SelectionPolicy is configured) The priority in which VM instances are selected for proactive scale-in
-			* **OrderedPolicies** - (Optional) Ordered list of selection policies. Initial policies include [LabelSelector]. Future policies may include a [NodeSelector] or other selection mechanisms.
-			* **BasePolicy** - (Optional) Catch all polices [Oldest|Newest|Random]
+		* **SelectionPolicy** - (Optional) (Defaults to "random" sort policy when no SelectionPolicy is configured) The priority in which VM instances are selected for proactive scale-in
+			* **Selectors** - (Optional) Selectors is a list of selection policies including [LabelSelectors] and [NodeSelectors]
+			* **SortPolicy** - (Optional) Catch all polices [Oldest|Newest|Random|Ascending|Descending]
 		* **StatePreservation** - (Optional) specifies if and how to preserve state of VMs selected for scale-in.
 			* **Disabled** - (Default) all state for VMs selected for scale-in will be deleted
 			* **Offline** - PVCs for VMs selected for scale-in will be preserved and reused on scale-out (decreases provisioning time during scale out)
@@ -88,6 +87,7 @@ Each VM’s PVCs are preserved for future scale out
 Each VM’s PVCs are preserved for future scale out
 * **Autohealing** - (Optional)  (Defaults to disabled with nil pointer) Pointer to struct which specifies when a VMPool should should completely replace a failing VM with a reprovisioned instance. 
 	* **StartupFailureThreshold** - (Optional) (Defaults to 3) An integer representing how many consecutive failures to reach a running state (which includes failing to pass liveness probes at startup when liveness probes are enabled) should result in reprovisioning.
+  * **MinFailingToStartDuration** - (Optional) (Defaults to 5 mins) It is the minimum time a VM must be in a failing status (applies to status conditions like CrashLoopBackOff, Unschedulable) before being replaced. It measures the duration since the VM's Ready condition transitioned to False.
 
 
 ## API Examples
@@ -106,11 +106,11 @@ spec:
     proactive:
       statePreservation: Offline
       selectionPolicy:
-        basePolicy: "Oldest"
+        sortPolicy: "Oldest"
   updateStrategy:
     proactive:
       selectionPolicy:
-        basePolicy: "Oldest"
+        sortPolicy: "Oldest"
   template:
     spec:
       dataVolumeTemplates:
@@ -186,7 +186,7 @@ spec:
             name: datavolumedisk
 ```
 
-**Automatic rolling updates and scale-in strategy with VM ordered selection policy on scale-in**
+**Automatic rolling updates and scale-in strategy with VM Selectors selection policy on scale-in**
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -199,15 +199,15 @@ spec:
   scaleInStrategy:
     proactive:
       selectionPolicy:
-        orderedPolicies:
+        selectors:
           - labelSelector
             - non-important-vms
-        basePolicy: "Oldest"
+        sortPolicy: "Oldest"
       statePreservation: Offline
   updateStrategy:
     proactive:
       selectionPolicy:
-        basePolicy: "Oldest"
+        sortPolicy: "Oldest"
   template:
     spec:
       dataVolumeTemplates:
