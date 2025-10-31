@@ -67,7 +67,102 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declar
    Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
 - **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, and `GetMemoryOverhead`. Each implementation registers under the same hypervisor key so `virt-controller`, `virt-handler`, and virt-launcher can resolve the correct runtime hooks.
 - **Converter library (`pkg/virt-launcher/virtwrap/converter/hypervisor/`)** – Implements the new `HypervisorConverter` interface described below. Each hypervisor file focuses on XML/domain differences while `base.go` holds the shared helpers. The converter selects the correct implementation via a local registry keyed by hypervisor name.
-- **Admission webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – Surface validation and mutation helpers that wrap existing webhook entry points. The admitters use the same cluster-configured hypervisor value as `virt-controller` and invoke the matching implementation.
+- **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – Surface validation and mutation helpers that wrap existing webhook entry points. The admitters use the same cluster-configured hypervisor value as `virt-controller` and invoke the matching implementation.
+
+For extensible validation webhooks, we define the `Validator` interface, for validating multiple aspects of `VirtualMachine` and `VirtualMachineInstance` definitions.
+
+```go
+type Validator interface {
+    // Validate spec of VirtualMachine
+    ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpec, config *virtconfig.ClusterConfig, isKubeVirtServiceAccount bool) []metav1.StatusCause
+
+    // Validate spec of VirtualMachineInstance
+    ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
+    
+    // Validate hot-plug updates to VMI
+    ValidateHotplug(oldVmi *v1.VirtualMachineInstance, newVmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) []metav1.StatusCause
+}
+```
+
+The above `Validator` interface would be implemented by the `BaseValidator` that contains validation functionality common across hypervisors and architectures.
+
+```go
+type BaseValidator struct {}
+
+func (b *BaseValidator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    var causes []metav1.StatusCause
+
+    ... // more validation functions
+    causes = append(causes, b.validateNUMA(field, spec)...)
+    causes = append(causes, b.validateGuestMemoryLimit(field, spec)...)
+    ... // more validation functions
+
+}
+
+func (b *BaseValidator) validateNUMA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    // generic (hypervisor/arch-agnostic) logic for validation of VMI's NUMA spec
+}
+```
+
+Following is a hypervisor-specific validator.
+
+```go
+type MshvValidator struct { *BaseValidator }
+
+func (m *MshvValidator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    var causes []metav1.StatusCause
+
+    // Execute common validation logic
+    causes = append(causes, m.BaseValidator.ValidateVirtualMachineInstanceSpec(field, spec, config))
+
+    // Run hypervisor-specific check
+    causes = append(causes, m.validateCPUModel(field, spec, config))
+
+    return causes
+}
+
+func (m *MshvValidator) validateCPUModel (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    // For MSHV hypervisor, the guest's CPU model has to be "qemu64-v1"
+    var causes []metav1.StatusCause
+
+    if spec.Domain.CPU.model != "qemu64-v1" {
+        // append validation failure cause to causes
+    }
+
+    return causes
+}
+
+```
+
+This can be further extended to perform architecture-specific checks for a given hypervisor.
+
+```go
+type Amd64Validator struct {}
+
+func (a *Amd64Validator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    var causes []metav1.StatusCause
+    causes = append(causes, a.validateWathdogAmd64(field, spec, config))
+    return causes
+}
+
+type MshvAmd64Validator struct { *MshvValidator *Amd64Validator }
+
+func (ma *MshvAmd64Validator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    var causes []metav1.StatusCause
+
+    // Execute hypervisor-specific validation logic
+    causes = append(causes, m.MshvValidator.ValidateVirtualMachineInstanceSpec(field, spec, config))
+
+    // Execute arch-specific validation logic
+    causes = append(causes, m.Amd64Validator.ValidateVirtualMachineInstanceSpec(field, spec, config))
+
+    // Run hypervisor-arch-specific check
+    causes = append(causes, m.validateMshvAmd64SpecificConfig(field, spec, config))
+
+    return causes
+}
+```
+
 - **Node labeller (`pkg/virt-handler/node-labeller/hypervisor/`)** – Adds a lightweight hook so each hypervisor can declare the devices to probe, the preferred libvirt `virt-type`, and optional feature discovery (such as Hyper-V enlightenments for KVM on amd64).
 
 This split preserves the “implement once, reuse everywhere” story without routing everything through a monolithic interface. New hypervisors can land incrementally—start with defaults and webhooks, add converter support, then extend node labelling—while keeping the contract for each area explicit and testable.
