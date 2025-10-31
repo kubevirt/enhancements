@@ -1,4 +1,4 @@
-# VEP #95.1: Hypervisor Abstraction - Capability Registry for Hypervisor Feature Discovery
+# VEP #97.1: Hypervisor Abstraction - Capability Registry for Hypervisor Feature Discovery
 
 ## Release Signoff Checklist
 
