@@ -60,108 +60,13 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declar
    ```go
    type DefaultsProvider interface {
        ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient)
-       ApplyVMISpecDefaults(spec *v1.VirtualMachineInstanceSpec, cc *virtconfig.ClusterConfig) error
        FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error
    }
    ```
    Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
 - **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, and `GetMemoryOverhead`. Each implementation registers under the same hypervisor key so `virt-controller`, `virt-handler`, and virt-launcher can resolve the correct runtime hooks.
 - **Converter library (`pkg/virt-launcher/virtwrap/converter/hypervisor/`)** – Implements the new `HypervisorConverter` interface described below. Each hypervisor file focuses on XML/domain differences while `base.go` holds the shared helpers. The converter selects the correct implementation via a local registry keyed by hypervisor name.
-- **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – Surface validation and mutation helpers that wrap existing webhook entry points. The admitters use the same cluster-configured hypervisor value as `virt-controller` and invoke the matching implementation.
-
-For extensible validation webhooks, we define the `Validator` interface, for validating multiple aspects of `VirtualMachine` and `VirtualMachineInstance` definitions.
-
-```go
-type Validator interface {
-    // Validate spec of VirtualMachine
-    ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpec, config *virtconfig.ClusterConfig, isKubeVirtServiceAccount bool) []metav1.StatusCause
-
-    // Validate spec of VirtualMachineInstance
-    ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
-    
-    // Validate hot-plug updates to VMI
-    ValidateHotplug(oldVmi *v1.VirtualMachineInstance, newVmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) []metav1.StatusCause
-}
-```
-
-The above `Validator` interface would be implemented by the `BaseValidator` that contains validation functionality common across hypervisors and architectures.
-
-```go
-type BaseValidator struct {}
-
-func (b *BaseValidator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
-    var causes []metav1.StatusCause
-
-    ... // more validation functions
-    causes = append(causes, b.validateNUMA(field, spec)...)
-    causes = append(causes, b.validateGuestMemoryLimit(field, spec)...)
-    ... // more validation functions
-
-}
-
-func (b *BaseValidator) validateNUMA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
-    // generic (hypervisor/arch-agnostic) logic for validation of VMI's NUMA spec
-}
-```
-
-Following is a hypervisor-specific validator.
-
-```go
-type MshvValidator struct { *BaseValidator }
-
-func (m *MshvValidator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
-    var causes []metav1.StatusCause
-
-    // Execute common validation logic
-    causes = append(causes, m.BaseValidator.ValidateVirtualMachineInstanceSpec(field, spec, config))
-
-    // Run hypervisor-specific check
-    causes = append(causes, m.validateCPUModel(field, spec, config))
-
-    return causes
-}
-
-func (m *MshvValidator) validateCPUModel (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
-    // For MSHV hypervisor, the guest's CPU model has to be "qemu64-v1"
-    var causes []metav1.StatusCause
-
-    if spec.Domain.CPU.model != "qemu64-v1" {
-        // append validation failure cause to causes
-    }
-
-    return causes
-}
-
-```
-
-This can be further extended to perform architecture-specific checks for a given hypervisor.
-
-```go
-type Amd64Validator struct {}
-
-func (a *Amd64Validator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
-    var causes []metav1.StatusCause
-    causes = append(causes, a.validateWathdogAmd64(field, spec, config))
-    return causes
-}
-
-type MshvAmd64Validator struct { *MshvValidator *Amd64Validator }
-
-func (ma *MshvAmd64Validator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
-    var causes []metav1.StatusCause
-
-    // Execute hypervisor-specific validation logic
-    causes = append(causes, m.MshvValidator.ValidateVirtualMachineInstanceSpec(field, spec, config))
-
-    // Execute arch-specific validation logic
-    causes = append(causes, m.Amd64Validator.ValidateVirtualMachineInstanceSpec(field, spec, config))
-
-    // Run hypervisor-arch-specific check
-    causes = append(causes, m.validateMshvAmd64SpecificConfig(field, spec, config))
-
-    return causes
-}
-```
+- **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – We introduce a Validator interface that will define validation functions for core KubeVirt resources that have hypervisor-specific constraints, namely VM and VMI. Each hypervisor will provide its own concrete Validator to enforce rules and constraints relevant to its capabilities.
 
 - **Node labeller (`pkg/virt-handler/node-labeller/hypervisor/`)** – Adds a lightweight hook so each hypervisor can declare the devices to probe, the preferred libvirt `virt-type`, and optional feature discovery (such as Hyper-V enlightenments for KVM on amd64).
 
@@ -287,12 +192,91 @@ Migration steps:
 
 ### Hypervisor-Specific Validations
 
-`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/` provides per-hypervisor validation and mutation helpers. Each implementation enforces compatibility (required devices, unsupported feature combinations) after defaults have populated the spec. The admitters resolve the active hypervisor from `ClusterConfig` and delegate to the matching validator.
+`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/` provides per-hypervisor implementation of the `Validator` interface. Each implementation enforces compatibility (required devices, unsupported feature combinations) after defaults have populated in the spec.
 
-Key points:
-* Validation is distinct from defaulting: validators never set user-facing defaults (that is handled by `DefaultsProvider`).
-* Hypervisor-specific rejection messages surface early (webhook) instead of deferring to runtime/libvirt errors.
-* Tests cover both acceptance of valid specs and explicit rejection of incompatible feature / device combos.
+#### Key points
+
+- Validation is distinct from defaulting: validators never set user-facing defaults (that is handled by `DefaultsProvider`).
+- Hypervisor-specific rejection messages surface early (webhook) instead of deferring to runtime/libvirt errors.
+- Tests cover both acceptance of valid specs and explicit rejection of incompatible feature / device combos.
+
+#### Proposed Code Structure
+
+```go
+type Validator interface {
+    // Validate spec of VirtualMachine
+    ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
+
+    // Validate spec of VirtualMachineInstance
+    ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
+    
+    // Validate hot-plug updates to VMI. For example, this would encapsulate functionality in the ValidateHotplugDiskConfiguration function.
+    ValidateHotplug(oldVmi *v1.VirtualMachineInstance, newVmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) []metav1.StatusCause
+}
+```
+
+The above `Validator` interface would be implemented by the `BaseValidator` that contains validation functionality common across hypervisors and architectures.
+
+```go
+type BaseValidator struct {}
+
+func (b *BaseValidator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    var causes []metav1.StatusCause
+    ... // more validation functions
+    causes = append(causes, b.validateNUMA(field, spec)...)
+    causes = append(causes, b.validateGuestMemoryLimit(field, spec)...)
+    ... // more validation functions
+}
+
+func (b *BaseValidator) validateNUMA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    // generic (hypervisor/arch-agnostic) logic for validation of VMI's NUMA spec
+}
+```
+
+Each hypervisor-specific implementation of the validator would embed the `BaseValidator` to inherit the common validation logic. A skeleton implementation for MSHV-specific Validator implementation is shown below.
+
+```go
+type MshvValidator struct { *BaseValidator }
+
+func (m *MshvValidator) ValidateVirtualMachineInstanceSpec (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    var causes []metav1.StatusCause
+    // Execute common validation logic
+    causes = append(causes, m.BaseValidator.ValidateVirtualMachineInstanceSpec(field, spec, config))
+    // Run hypervisor-specific check
+    causes = append(causes, m.validateCPUModel(field, spec, config))
+    // Run checks specific to the hypervisor-arch pair
+    arch := spec.Architecture
+    if arch == "" {
+      arch = "amd64" // Or from the clusterConfig 
+    }
+    switch arch {
+    case "amd64":
+      causes = append(causes, m.validateVmiForAmd64(spec))
+    case "arm64":
+      causes = append(causes, m.validateVmiForArm64(spec))
+    case "s390x":
+      causes = append(causes, m.validateVmiForS390x(spec))
+    return causes
+}
+
+// Validation function catering to an MSHV-specific constraint on VMI CPU
+func (m *MshvValidator) validateCPUModel (field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+    var causes []metav1.StatusCause
+    // For MSHV hypervisor, the guest's CPU model has to be "qemu64-v1"
+    if spec.Domain.CPU.model != "qemu64-v1" {
+        // append validation failure cause to causes
+    }
+    return causes
+}
+```
+
+#### Code Organization
+
+The following directory will be created to host the `Validator` interface and the hypervisor-specific implementations: `pkg/virt-api/webhooks/validating-webhook/validators`.
+
+- `Validator` interface would be defined in `pkg/virt-api/webhooks/validating-webhook/validators/validator.go`.
+- Implementation of `Validator` interface for `KVM` would like in `pkg/virt-api/webhooks/validating-webhook/validators/kvm/kvm.go`.
+- Architecture-specific validation logic would reside in per-architecture files of the form `pkg/virt-api/webhooks/validating-webhook/validators/kvm/{amd64,arm64,s390x}.go`.
 
 ### Scheduling and Device Management
 
