@@ -89,13 +89,14 @@ spec:
 - `virt-controller` reads the configured hypervisor from `ClusterConfig` when generating launcher manifests and threads that ID through the `ConverterContext` so downstream components can act consistently.
 - Each package's registry uses the configured name to locate its implementation, avoiding a monolithic factory while keeping selection logic consistent.
 
-### Integration with Defaults, Runtime, and Converter
+### Integration with Defaults, Runtime, Converter and Validating Webhooks
 
 1. `virt-controller` and `virt-handler` read the configured hypervisor from `ClusterConfig`, add that ID to the serialized `ConverterContext` they already ship alongside the launcher pod, and virt-launcher folds it into its `DomainContext` right before domain generation.
 2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI and surface `DeviceRequests`. The controller uses those requests when constructing launcher pods so the scheduler can account for hypervisor-specific devices.
 3. Control-plane components resolve the `HypervisorRuntime` implementation to run `AdjustResources` and `GetMemoryOverhead`, keeping pod-level resource calculations in sync with the mutated spec. The same runtime contract is reused by virt-handler for memlock sizing and ancillary bookkeeping.
 4. When virt-launcher converts the VMI, it instantiates both the `HypervisorConverter` and the `HypervisorRuntime`. The converter stamps baseline domain defaults and interleaves its edits with the existing architecture helpers, while the runtime's `HandleHousekeeping` hook attaches timers, watchdogs, and other hypervisor-specific tweaks immediately before the domain is finalized.
 5. The launcher still reuses the existing `setLaunchSecurity`, disk, and network helpers; hypervisor-specific cases funnel through the converter and runtime abstractions so defaults remain declarative.
+6. The proposed `Validator` interface's hypervisor-specific implementation would be resolved and invoked from within the `Admit` function of the concerned `Admitter` implementations - e.g., `VMsAdmitter`, `VMICreateAdmitter`, `VMIUpdateAdmitter`, `VMIRSAdmitter`, etc.
 
 ### Converter Restructuring Inside Virt-launcher
 
