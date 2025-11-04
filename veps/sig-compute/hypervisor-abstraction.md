@@ -99,11 +99,58 @@ spec:
 
 ### Converter Restructuring Inside Virt-launcher
 
-- The existing `pkg/virt-launcher/virtwrap/converter` package becomes a reusable library with a new `hypervisor` subpackage. Shared translation helpers for disks, NICs, CPU topology, and security settings live in `converter/hypervisor/base.go` as `BaseHypervisorConverter` utilities.
-- A narrow `HypervisorConverter` interface (for example, `SetDomainType`) captures every point where the current converter branches on hypervisor-specific logic.
-- Per-hypervisor implementations (e.g., `converter/hypervisor/kvm.go`, `converter/hypervisor/mshv.go`) embed the base helper and override only the methods they need. `NewHypervisorConverter(name string)` returns the correct implementation based on the resolved hypervisor name, mirroring the runtime factory used across the control plane.
-- Existing call sites inside the converter depend on the interface, keeping shared logic untouched while cleanly isolating hypervisor-specialized code paths.
-- Unit tests port alongside the refactor so every converter branch remains covered; new tests exercise the factory and ensure fallback to the KVM implementation when an unknown hypervisor is requested.
+- The existing `pkg/virt-launcher/virtwrap/converter` package becomes a reusable library with a new `hypervisor` subpackage. Introduce a new interface named `HypervisorConverter` that exposes the main functions for converting VMI spec to Libvirt domain XML.
+
+```golang
+// pkg/virt-launcher/virtwrap/converter/hypervisor/converter.go
+type HypervisorConverter interface {
+    SetDomainType(domain *api.Domain, ctx *ConverterContext) error
+    ConvertWatchdog(source *v1.Watchdog, watchdog *api.Watchdog) error
+    ValidateDiskBus(bus v1.DiskBus) error
+    LaunchSecurity(vmi *v1.VirtualMachineInstance) *api.LaunchSecurity
+    SetIOThreads(vmi *v1.VirtualMachineInstance, domain *api.Domain, vcpus uint) error
+    ConvertClock(source *v1.Clock, clock *api.Clock) error
+    ConvertFeatures(source *v1.Features, features *api.Features, ctx *ConverterContext) error
+}
+```
+
+- Shared translation helpers for disks, NICs, CPU topology, and security settings live in `converter/hypervisor/base.go` as `BaseHypervisorConverter` utilities.
+
+```go
+type BaseHypervisorConverter struct{} // Shared logic, e.g., generic disk mappings
+
+func (c *BaseHypervisorConverter) SetDomainType(domain *api.Domain, ctx *ConverterContext) error {
+    domain.Spec.Type = "qemu" // Default for KVM
+    return nil
+}
+```
+
+- Implementation of the `HypervisorConverter` interface for specific hypervisor would leverage struct embedding to re-use common functions from the `BaseHypervisorConverter`, while custom functionality is achieved by overriding.
+
+```go
+type MshvHypervisorConverter struct {
+    BaseHypervisorConverter
+}
+
+func (c *MshvHypervisorConverter) SetDomainType(domain *api.Domain, ctx *ConverterContext) error {
+    domain.Spec.Type = "future" 
+    return nil
+}
+```
+
+- A new function `NewHypervisorConverter(name string)` returns the correct implementation based on the resolved hypervisor name, mirroring the runtime factory used across the control plane.
+
+```go
+func NewHypervisorConverter(name string) HypervisorConverter {
+    base := BaseHypervisorConverter{}
+    switch name {
+    case "mshv":
+        return &MshvHypervisorConverter{BaseHypervisorConverter: base}
+    default:
+        return &KvmHypervisorConverter{BaseHypervisorConverter: base}
+    }
+}
+```
 
 ### Hypervisor-Specific Defaults
 
