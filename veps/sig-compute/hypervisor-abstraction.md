@@ -101,7 +101,7 @@ spec:
 
 - The existing `pkg/virt-launcher/virtwrap/converter` package becomes a reusable library with a new `hypervisor` subpackage. Shared translation helpers for disks, NICs, CPU topology, and security settings live in `converter/hypervisor/base.go` as `BaseHypervisorConverter` utilities.
 - A narrow `HypervisorConverter` interface (for example, `SetDomainType`) captures every point where the current converter branches on hypervisor-specific logic.
-- Per-hypervisor implementations (e.g., `converter/hypervisor/kvm.go`, `converter/hypervisor/hyperv-layered.go`) embed the base helper and override only the methods they need. `NewHypervisorConverter(name string)` returns the correct implementation based on the resolved hypervisor name, mirroring the runtime factory used across the control plane.
+- Per-hypervisor implementations (e.g., `converter/hypervisor/kvm.go`, `converter/hypervisor/mshv.go`) embed the base helper and override only the methods they need. `NewHypervisorConverter(name string)` returns the correct implementation based on the resolved hypervisor name, mirroring the runtime factory used across the control plane.
 - Existing call sites inside the converter depend on the interface, keeping shared logic untouched while cleanly isolating hypervisor-specialized code paths.
 - Unit tests port alongside the refactor so every converter branch remains covered; new tests exercise the factory and ensure fallback to the KVM implementation when an unknown hypervisor is requested.
 
@@ -287,7 +287,7 @@ The following directory will be created to host the `Validator` interface and th
 
 ### Validation & Mutation Webhooks
 
-- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec (for example, seeding Hyper-V Layered feature blocks or toggling defaults) before Kubernetes persists the object.
+- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec (for example, seeding Microsoft Hypervisor (MSHV) feature blocks or toggling defaults) before Kubernetes persists the object.
 - Hypervisors can use `Validate` to enforce requirements. The validating webhooks inside `virt-api` read the configured hypervisor from `ClusterConfig`, matching the value embedded by `virt-controller`, so admission stays consistent with reconciliation.
 - In tandem, these hooks enable opinionated defaults for each hypervisor while still rejecting incompatible specs, delivering flexibility without sacrificing guardrails.
 
@@ -308,7 +308,7 @@ metadata:
 spec:
   configuration:
     hypervisorConfiguration:
-      name: hyperv-layered
+      name: mshv
     developerConfiguration:
       featureGates:
         - ConfigurableHypervisor
@@ -316,7 +316,7 @@ spec:
   imagePullPolicy: Always
 ```
 
-With this configuration in place, every VMI reconciled by the control plane inherits the `hyperv-layered` behavior automatically—no per-object annotations are required.
+With this configuration in place, every VMI reconciled by the control plane inherits the `mshv` behavior automatically—no per-object annotations are required.
 
 ### Adding a Hypervisor Implementation
 
