@@ -73,10 +73,11 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declar
 
  - **Defaults provider registry (`pkg/defaults/providers/`)** – Introduces a single `DefaultsProvider` interface applied in layered order (Base → Hypervisor → Architecture → Hypervisor+Architecture → Finalization). Providers are registered under composite keys like `kvm/amd64` or `mshv/arm64`. Each provider implements:
    ```go
-   type DefaultsProvider interface {
-       ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient)
-       FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error
-   }
+    type DefaultsProvider interface {
+      ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient)
+      ApplyVMISpecDefaults(spec *v1.VirtualMachineInstanceSpec, cc *virtconfig.ClusterConfig) error
+      FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error
+    }
    ```
    Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
 - **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, and `GetMemoryOverhead`.
