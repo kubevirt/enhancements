@@ -442,9 +442,22 @@ Full abstraction with—multi-device descriptors, richer domain defaults, hyperv
 
 ## Functional Testing Approach
 
-- Unit tests for each hypervisor implementation verifying domain defaults and mutators.
-- Integration tests covering virt-controller manifest rendering and device manager plugin registration with other hypervisors enabled.
-- End-to-end lanes that launch VMIs under at least two hypervisors (e.g., KVM plus a stub hypervisor) to confirm scheduling and domain generation.
+The goal of testing for multi-hypervisor support is to ensure that for each in-tree hypervisor implementation, all supported KubeVirt features are verified.
+
+- Unit tests for each hypervisor implementation for validating functionality concerning each extension point with comprehensive coverage for all new code.
+- Integration tests should test the following for each in-tree hypervisor:
+  - Validate if `virt-handler`'s device plugin can detect correct hypervisor device on the node and label node with correct allocatable and capacity.
+  - Validate `virt-controller`'s rendering of `virt-launcher` pod spec.
+  - Validate node-labeller's ability to add expected node labels for each hypervisor.
+  - Validate runtime adjustments to VMI, such as memlock limit adjustment and housekeeping thread management.
+
+### Integration with existing Prow-based CI testing
+
+To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) integration, we recommend incorporating MSHV-specific tests into KubeVirt’s existing CI workflows. The following changes are proposed:
+
+- Introduce dedicated testing lanes for MSHV on AMD64, aligned with each SIG (e.g., sig-compute) and Kubernetes version.
+- Enhance the Prow provisioner to support provisioning Azure-based Kubernetes clusters, enabling deployment and testing of KubeVirt distributions backed by MSHV.
+- Optimize CI resource usage by scheduling non-KVM hypervisor tests during the second phase of CI execution—triggered after the /lgtm label is applied—when comprehensive validation runs are performed.
 
 ## Implementation History
 
