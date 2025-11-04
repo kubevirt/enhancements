@@ -332,12 +332,6 @@ The following directory will be created to host the `Validator` interface and th
 - The node-labeller sidecar in `virt-handler` is seeded with the resolved hypervisor. It probes only the devices declared by the active implementation and sets libvirt's preferred `virt-type` before querying capabilities, so downstream hypervisors can surface their own CPU/memory traits without patching the container image.
 - Node labelling remains optional telemetry. Operators can surface informative labels, but functionality relies solely on allocatable resources. When the hypervisor/architecture combination implies additional feature discovery (for example, Hyper-V enlightenments), the labeller defers to helper hooks exposed by the implementation. In the MVP we continue to evaluate Hyper-V enlightenments only when the hypervisor is `kvm` and the architecture is `amd64`, matching the current behaviour while providing a seam for future backends.
 
-### Validation & Mutation Webhooks
-
-- The mutating webhook shares the same resolution flow and invokes `MutateVMI` early in the admission chain, giving providers a chance to normalize the spec (for example, seeding Microsoft Hypervisor (MSHV) feature blocks or toggling defaults) before Kubernetes persists the object.
-- Hypervisors can use `Validate` to enforce requirements. The validating webhooks inside `virt-api` read the configured hypervisor from `ClusterConfig`, matching the value embedded by `virt-controller`, so admission stays consistent with reconciliation.
-- In tandem, these hooks enable opinionated defaults for each hypervisor while still rejecting incompatible specs, delivering flexibility without sacrificing guardrails.
-
 ### Observability Hooks
 
 - Monitoring can leverage existing metrics that expose allocatable device resources (e.g., `devices_kubevirt_io_*`). No new mandatory metrics are introduced.
