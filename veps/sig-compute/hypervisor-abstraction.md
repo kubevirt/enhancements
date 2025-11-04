@@ -57,6 +57,20 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declares the active hypervisor for the entire installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
 
 - **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – We introduce a Validator interface that will define validation functions for core KubeVirt resources that have hypervisor-specific constraints, namely VM and VMI. Each hypervisor will provide its own concrete Validator to enforce rules and constraints relevant to its capabilities.
+
+  ```go
+  type Validator interface {
+      // Validate spec of VirtualMachine
+      ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
+
+      // Validate spec of VirtualMachineInstance
+      ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
+      
+      // Validate hot-plug updates to VMI. For example, this would encapsulate functionality in the ValidateHotplugDiskConfiguration function.
+      ValidateHotplug(oldVmi *v1.VirtualMachineInstance, newVmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) []metav1.StatusCause
+  }
+  ```
+
  - **Defaults provider registry (`pkg/defaults/providers/`)** – Introduces a single `DefaultsProvider` interface applied in layered order (Base → Hypervisor → Architecture → Hypervisor+Architecture → Finalization). Providers are registered under composite keys like `kvm/amd64` or `mshv/arm64`. Each provider implements:
    ```go
    type DefaultsProvider interface {
@@ -76,6 +90,20 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declar
   ```
 
 - **Converter library (`pkg/virt-launcher/virtwrap/converter/hypervisor/`)** – Implements the new `HypervisorConverter` interface described below. Each hypervisor file focuses on XML/domain differences while `base.go` holds the shared helpers. The converter selects the correct implementation via a local registry keyed by hypervisor name.
+
+  ```golang
+  // pkg/virt-launcher/virtwrap/converter/hypervisor/converter.go
+  type HypervisorConverter interface {
+      SetDomainType(domain *api.Domain, ctx *ConverterContext) error
+      ConvertWatchdog(source *v1.Watchdog, watchdog *api.Watchdog) error
+      ValidateDiskBus(bus v1.DiskBus) error
+      LaunchSecurity(vmi *v1.VirtualMachineInstance) *api.LaunchSecurity
+      SetIOThreads(vmi *v1.VirtualMachineInstance, domain *api.Domain, vcpus uint) error
+      ConvertClock(source *v1.Clock, clock *api.Clock) error
+      ConvertFeatures(source *v1.Features, features *api.Features, ctx *ConverterContext) error
+  }
+  ```
+
 - **Node labeller (`pkg/virt-handler/node-labeller/hypervisor/`)** – Adds a lightweight hook so each hypervisor can declare the devices to probe, the preferred libvirt `virt-type`, and optional feature discovery (such as Hyper-V enlightenments for KVM on amd64).
 
 This split preserves the “implement once, reuse everywhere” story without routing everything through a monolithic interface. New hypervisors can land incrementally—start with defaults and webhooks, add converter support, then extend node labelling—while keeping the contract for each area explicit and testable.
