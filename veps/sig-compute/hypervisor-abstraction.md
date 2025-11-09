@@ -38,7 +38,8 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 - Cluster administrators who need to bootstrap KubeVirt on hardware that exposes alternative virtualization devices.
 - VM owners who would like to run a virtual machines using a non-KVM hypervisor with its differentiated capabilities
 - Platform vendors integrating proprietary or emerging hypervisor stacks with KubeVirt.
-- Upstream contributors maintaining virt-launcher, virt-controller, and virt-handler.
+- Upstream maintainers of core virt-launcher, virt-controller, and virt-handler.
+- Hypervisor-specific experts maintaining hypervisor-specific logic and validations.
 
 ## User Stories
 
