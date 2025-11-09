@@ -23,7 +23,7 @@ Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hyp
 - Document the cluster-wide hypervisor configuration and per-component extension points (defaults, converter, webhooks, node labeller) so downstream implementations can extend behavior without invasive changes to existing components.
 - Resolve the active hypervisor early and feed it through the virt-launcher converter so hypervisor-specific behavior stays localized.
 - Support both admission-time validation and mutation so administrators can enforce guardrails while still customizing VMIs for a given hypervisor.
-- Let components request allocatable device resources declared by the hypervisor configuration, avoiding new scheduling primitives.
+- Let VMs request hypervisor-specific allocatable device resources, avoiding new scheduling primitives.
 - Make it simple for downstreams to implement new hypervisors by following a documented contract.
 
 ## Non Goals
