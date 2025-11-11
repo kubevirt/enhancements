@@ -12,7 +12,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 Introduce a centralized capability registry that provides a declarative matrix for expressing feature constraints across hypervisor and architecture combinations. The registry enables validation, test filtering, and clear error messages without duplicating logic across components. 
 
-**Note:** This VEP was extracted from VEP #95 (Hypervisor Abstraction Layer) to allow independent discussion and implementation of the capability registry design. The registry serves as the feature discovery mechanism for the broader hypervisor abstraction framework described in VEP #95. 
+**Note:** This VEP was extracted from VEP 97 (Hypervisor Abstraction Layer) to allow independent discussion and implementation of the capability registry design. The registry serves as the feature discovery mechanism for the broader hypervisor abstraction framework described in VEP 97. 
 
 ## Motivation
 
@@ -319,7 +319,7 @@ Capability: graphics.vga
 See: https://kubevirt.io/user-guide/graphics#compatibility
 ```
 
-## Alternatives
+## Undesired alternatives
 
 1. **Status quo** – Continue scattered architecture-specific validation files. This increases maintenance burden and makes adding hypervisors difficult.
 2. **Per-hypervisor capability files** – Create `pkg/capabilities/hypervisor/kvm/amd64.go` etc. Rejected due to file sprawl and duplication.
@@ -356,6 +356,7 @@ See: https://kubevirt.io/user-guide/graphics#compatibility
 - Known constraints registered for KVM (VGA unsupported on arm64, experimental features with gates).
 - Basic validation webhook integration (unregistered capabilities allowed by default).
 - Test decorator framework for capability-based filtering.
+- Unit tests
 
 ### Beta
 
