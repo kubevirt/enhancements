@@ -341,7 +341,7 @@ See: https://kubevirt.io/user-guide/graphics#compatibility
 - Unit tests for capability registry ensuring correct lookup precedence and fallback behavior.
 - Integration tests verifying validation webhooks reject unsupported features with correct error messages.
 - Integration tests confirming test decorators correctly skip tests on unsupported platforms.
-- End-to-end tests covering all support levels (Unregistered, Unsupported, Experimental, Deprecated).
+- Minimal end-to-end tests covering a happy path and a negative path to demonstrate the wiring; the bulk of the coverage lives in unit and integration tests that exercise resolution and webhook behavior.
 
 ## Implementation History
 
