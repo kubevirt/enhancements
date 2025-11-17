@@ -10,20 +10,27 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-Introduce a Hypervisor Abstraction Layer that lets KubeVirt plug in multiple hypervisor backends through a consistent contract, while keeping today's KVM-first behavior unchanged. To start, we scope the contract to device selection, domain tweaks, validation and mutation so as to provide a flexible base that can evolve without introducing a major refactor. 
+This proposal introduces a Hypervisor Abstraction Layer for KubeVirt, enabling the platform to integrate multiple hypervisor backends through a set of consistent, well-defined interfaces—while preserving the current KVM-first behavior as the default. The initial scope focuses on key areas critical to hypervisor integration, including:
+
+- Device exposition and selection
+- Adjustments to Libvirt domain XML
+- Spec validation and mutation logic
+- Runtime modifications to VirtualMachineInstances (VMIs)
+
+By limiting the scope to these foundational aspects, the design provides a flexible base that can evolve over time without requiring a disruptive refactor of existing components.
 
 ## Motivation
 
 - KubeVirt currently hard-codes KVM/QEMU assumptions throughout virt-launcher, virt-handler, virt-controller, and node preparation scripts.
-- Platform teams that rely on alternative accelerators or hypervisor stacks face invasive forks to replace `/dev/kvm`, libvirt domain types, or resource scheduling hints.
+- Platform teams that rely on alternative accelerators or hypervisor stacks face invasive forks to replace `/dev/kvm`, libvirt domain types, or runtime adjustments (e.g., assigning housekeeping threads to a particular cgroup).
 - A scoped abstraction keeps the project approachable for contributors while unlocking new hardware backends.
 
 ## Goals
 
 - Document the cluster-wide hypervisor configuration and per-component extension points (defaults, converter, webhooks, node labeller) so downstream implementations can extend behavior without invasive changes to existing components.
-- Resolve the active hypervisor early and feed it through the virt-launcher converter so hypervisor-specific behavior stays localized.
+- Resolve the hypervisor to be used for a VMI early and feed it through the virt-launcher converter so hypervisor-specific behavior stays localized.
 - Support both admission-time validation and mutation so administrators can enforce guardrails while still customizing VMIs for a given hypervisor.
-- Let components request allocatable device resources declared by the hypervisor configuration, avoiding new scheduling primitives.
+- Reuse the device plugin for exposing hypervisor device on each node and for scheduling VMIs, thereby avoiding new scheduling pritimives.
 - Make it simple for downstreams to implement new hypervisors by following a documented contract.
 
 ## Non Goals
