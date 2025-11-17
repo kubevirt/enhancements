@@ -121,17 +121,21 @@ This split preserves the “implement once, reuse everywhere” story without ro
 
 ### Selection
 
-- `virt-config` loads cluster-wide defaults from an additive `hypervisorConfiguration` field on the `KubeVirt` CR. The `hypervisorConfiguration` field is a list of hypervisors that can be supported on the cluster. In the current VEP, we will enforce that the number of elements in this list is less than or equal to 1, i.e., to enforce only a single hypervisor for the entire cluster. A future VEP will consider adding support for multiple hypervisors on the same cluster. The `name` in each hypervisor configuration entry selects the cluster-wide hypervisor implementation. A dedicated feature gate, `ConfigurableHypervisor`, guards the new functionality:
+- `virt-config` loads cluster-wide defaults from an additive `hypervisorConfiguration` field on the `KubeVirt` CR. The `hypervisorConfiguration` field is a list of hypervisors that can be supported on the cluster. 
 
-```yaml
-spec:
-  configuration:
-    hypervisorConfiguration:
-    - name: kvm
-    developerConfiguration:
-      featureGates:
-        - ConfigurableHypervisor
-```
+  **Single-hypervisor Constraint:** In the current VEP, we will enforce that the number of elements in this list is less than or equal to 1, i.e., to enforce only a single hypervisor for the entire cluster. A future VEP will consider adding support for multiple hypervisors on the same cluster. The `name` in each hypervisor configuration entry selects the cluster-wide hypervisor implementation. Supporting multiple hypervisors in the same cluster will also necessitate the addition of a per-VMI field `hypervisor` to denote on which hypervisor the VMI has to be created.
+  
+  A dedicated feature gate, `ConfigurableHypervisor`, guards the new functionality:
+
+    ```yaml
+    spec:
+      configuration:
+        hypervisorConfiguration:
+        - name: kvm
+        developerConfiguration:
+          featureGates:
+            - ConfigurableHypervisor
+    ```
 
 - `virt-controller` reads the configured hypervisor from `ClusterConfig` when generating launcher manifests and threads that ID through the `ConverterContext` so downstream components can act consistently.
 - Each package's registry uses the configured name to locate its implementation, avoiding a monolithic factory while keeping selection logic consistent.
@@ -507,11 +511,13 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
    ```
 
-## Alternatives
+### Alternative Design Considered: Plugin model
 
-1. **Status quo** – Continue duplicating KVM assumptions everywhere. This blocks new hypervisors and increases maintenance burden.
-2. **Deep plugin model** – Move domain generation to separate binaries per hypervisor. Rejected for complexity and duplication of KubeVirt control-plane logic.
-3. **Libvirt-only configuration** – Attempt to encode all variability via libvirt XML fragments in CRDs. Lacks validation, testing, and integration with device management.
+The alternative design that we evaluated was a plugin model for hypervisor integration. In this approach, KubeVirt would define a set of core interfaces (similar to the ones described above), but instead of implementing these interfaces in-tree, KubeVirt would provide the mechanism for dynamically loading external implementations at runtime. Each hypervisor backend (e.g., KVM, MSHV, or future hypervisors) could supply its own plugin, packaged and maintained in a separate repository. These plugins would register with KubeVirt components (virt-launcher, virt-handler, etc.) through a well-defined contract.
+
+While the plugin-based approach offers strong decoupling and extensibility, it requires significant refactoring of the KubeVirt codebase. Hypervisor-specific logic is currently invoked from multiple components (e.g., virt-launcher, virt-handler, API), and introducing a dynamic plugin mechanism would involve redesigning these interactions and adding lifecycle management for external modules.
+
+For the initial implementation of multi-hypervisor support, we chose an in-tree design to achieve a working solution faster. This approach allows us to validate the abstraction layer, experiment with real-world scenarios, and identify what works and what does not. With these learnings, we will be better positioned to propose a robust plugin-based architecture for multi-hypervisor support in the future.
 
 ### Future Enhancements
 
@@ -557,6 +563,7 @@ To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) 
 ### Alpha
 
 - Feature gate covers configurable hypervisor
+- Validation webhook for KubeVirt CR enforce that hypervisor configuration contains at most 1 entry, thereby enforcing only 1 supported hypervisor in the cluster.
 - Cluster-wide hypervisor configuration implemented and consumed by defaults, converter, and webhooks.
 - Basic functional tests for alternative hypervisor scheduling and domain generation.
 
