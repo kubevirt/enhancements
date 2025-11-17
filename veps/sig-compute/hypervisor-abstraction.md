@@ -30,7 +30,7 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 - Document the cluster-wide hypervisor configuration and per-component extension points (defaults, converter, webhooks, node labeller) so downstream implementations can extend behavior without invasive changes to existing components.
 - Resolve the hypervisor to be used for a VMI early and feed it through the virt-launcher converter so hypervisor-specific behavior stays localized.
 - Support both admission-time validation and mutation so administrators can enforce guardrails while still customizing VMIs for a given hypervisor.
-- Reuse the device plugin for exposing hypervisor device on each node and for scheduling VMIs, thereby avoiding new scheduling pritimives.
+- Let VMs request hypervisor-specific allocatable device resources, avoiding new scheduling primitives.
 - Make it simple for downstreams to implement new hypervisors by following a documented contract.
 
 ## Non Goals
@@ -43,14 +43,17 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 ## Definition of Users
 
 - Cluster administrators who need to bootstrap KubeVirt on hardware that exposes alternative virtualization devices.
+- VM owners who would like to run a virtual machines using a non-KVM hypervisor with its differentiated capabilities
 - Platform vendors integrating proprietary or emerging hypervisor stacks with KubeVirt.
-- Upstream contributors maintaining virt-launcher, virt-controller, and virt-handler.
+- Upstream maintainers of core virt-launcher, virt-controller, and virt-handler.
+- Hypervisor-specific experts maintaining hypervisor-specific logic and validations.
 
 ## User Stories
 
-1. As a cluster administrator, I can declare a non-KVM hypervisor as the cluster default, and VMI pods schedule only on nodes that expose its required devices.
+1. As a cluster administrator, I can I would like to deploy KubeVirt on a cluster with non-KVM hypervisor nodes, and have non-KVM VMs schedule only on nodes that expose its required devices.
 2. As a platform engineer, I can supply hypervisor-specific VMI spec mutations and libvirt domain adjustments without forking the virt-launcher converter.
-3. As an upstream maintainer, I know exactly where to add validation, testing, and documentation when a new hypervisor is introduced.
+3. As a core maintainer, I can maintain and develop the core of KubeVirt without deep knowledge of all specific hypervisors. 
+4. As a hypervisor-specific expert I know exactly where to add hypervisor-specific validation, testing and documentation when a new hypervisor is introduced, letting me develop quickly and independently.
 
 ## Repos
 
