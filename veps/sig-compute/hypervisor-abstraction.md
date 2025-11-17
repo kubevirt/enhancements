@@ -64,7 +64,7 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 
 ### Hypervisor Extension Points
 
-Cluster configuration (`spec.configuration.hypervisorConfiguration.name`) declares the active hypervisor for the entire installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
+Cluster configuration (`spec.configuration.hypervisorConfiguration`) declares the list of supported hypervisors for the KubeVirt installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
 
 - **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – We introduce a Validator interface that will define validation functions for core KubeVirt resources that have hypervisor-specific constraints, namely VM and VMI. Each hypervisor will provide its own concrete Validator to enforce rules and constraints relevant to its capabilities.
 
@@ -121,13 +121,13 @@ This split preserves the “implement once, reuse everywhere” story without ro
 
 ### Selection
 
-- `virt-config` loads cluster-wide defaults from an additive `hypervisorConfiguration` field on the `KubeVirt` CR. The `name` selects the cluster-wide default hypervisor implementation. A dedicated feature gate, `ConfigurableHypervisor`, guards the new functionality:
+- `virt-config` loads cluster-wide defaults from an additive `hypervisorConfiguration` field on the `KubeVirt` CR. The `hypervisorConfiguration` field is a list of hypervisors that can be supported on the cluster. In the current VEP, we will enforce that the number of elements in this list is less than or equal to 1, i.e., to enforce only a single hypervisor for the entire cluster. A future VEP will consider adding support for multiple hypervisors on the same cluster. The `name` in each hypervisor configuration entry selects the cluster-wide hypervisor implementation. A dedicated feature gate, `ConfigurableHypervisor`, guards the new functionality:
 
 ```yaml
 spec:
   configuration:
     hypervisorConfiguration:
-      name: kvm
+    - name: kvm
     developerConfiguration:
       featureGates:
         - ConfigurableHypervisor
@@ -138,12 +138,13 @@ spec:
 
 ### Integration with Defaults, Runtime, Converter and Validating Webhooks
 
-1. `virt-controller` and `virt-handler` read the configured hypervisor from `ClusterConfig`, add that ID to the serialized `ConverterContext` they already ship alongside the launcher pod, and virt-launcher folds it into its `DomainContext` right before domain generation.
-2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI and surface `DeviceRequests`. The controller uses those requests when constructing launcher pods so the scheduler can account for hypervisor-specific devices.
-3. Control-plane components resolve the `HypervisorRuntime` implementation to run `AdjustResources` and `GetMemoryOverhead`, keeping pod-level resource calculations in sync with the mutated spec. The same runtime contract is reused by virt-handler for memlock sizing and ancillary bookkeeping.
-4. When virt-launcher converts the VMI, it instantiates both the `HypervisorConverter` and the `HypervisorRuntime`. The converter stamps baseline domain defaults and interleaves its edits with the existing architecture helpers, while the runtime's `HandleHousekeeping` hook attaches timers, watchdogs, and other hypervisor-specific tweaks immediately before the domain is finalized.
-5. The launcher still reuses the existing `setLaunchSecurity`, disk, and network helpers; hypervisor-specific cases funnel through the converter and runtime abstractions so defaults remain declarative.
-6. The proposed `Validator` interface's hypervisor-specific implementation would be resolved and invoked from within the `Admit` function of the concerned `Admitter` implementations - e.g., `VMsAdmitter`, `VMICreateAdmitter`, `VMIUpdateAdmitter`, `VMIRSAdmitter`, etc.
+1. The proposed `Validator` interface's hypervisor-specific implementation would be resolved and invoked from within the `Admit` function of the concerned `Admitter` implementations - e.g., `VMsAdmitter`, `VMICreateAdmitter`, `VMIUpdateAdmitter`, `VMIRSAdmitter`, etc.
+2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI and set the appropriate default values for the specific hypervisor supported on the cluster.
+3. `virt-controller` reads the configured hypervisor from `ClusterConfig`, and adds a K8s device request for the appropriate hypervisor device to the `virt-launcher` pod definition so that it can be scheduled on the node with that hypervisor device. Furthermore, it adds the hypervisor information to the command-line of the `virt-launcher`, which the `virt-launcher` pod then uses to instantiate the right implementation of the `HypervisorConverter` for converting VMI spec to Libvirt domain XML.
+4. The `virt-controller` resolves the `HypervisorRuntime` implementation to run `GetMemoryOverhead`, keeping pod-level resource calculations in sync with the mutated spec. The same runtime contract is used by virt-handler to run the `AdjustResources` function for memlock sizing and ancillary bookkeeping.
+5. When virt-launcher converts the VMI, it instantiates both the `HypervisorConverter` and the `HypervisorRuntime`. The converter stamps baseline domain defaults and interleaves its edits with the existing architecture helpers.
+6. The virt-launcher component will continue to leverage existing helpers for common functionality, such as setLaunchSecurity, disk configuration, and network setup. Hypervisor-specific extensions to the converter logic will extend the base implementation of these helpers to introduce specialized logic.
+
 
 ### Converter Restructuring Inside Virt-launcher
 
@@ -397,7 +398,7 @@ metadata:
 spec:
   configuration:
     hypervisorConfiguration:
-      name: mshv
+    - name: mshv
     developerConfiguration:
       featureGates:
         - ConfigurableHypervisor
@@ -405,7 +406,7 @@ spec:
   imagePullPolicy: Always
 ```
 
-With this configuration in place, every VMI reconciled by the control plane inherits the `mshv` behavior automatically—no per-object annotations are required.
+With this configuration in place, every VMI reconciled by the control plane inherits the `mshv` behavior automatically — no per-object annotations are required.
 
 ### Adding a Hypervisor Implementation
 
@@ -453,7 +454,7 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
 
    func (sampleRuntime) HandleHousekeeping(_ *v1.VirtualMachineInstance, dom *api.Domain) error {
-     // attach timers/watchdogs if the hypervisor requires it
+     // assign housekeeping CPU threads to appropriate cgroup
      return nil
    }
 
