@@ -12,7 +12,9 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 This VEP enables AI workloads in VMs to achieve near-native performance by preserving
 host NUMA topology for PCIe devices. KubeVirt will automatically mirror device placement
-so AI frameworks can optimize communication paths and avoid cross-socket traffic.
+so AI frameworks can optimize communication paths and avoid cross-socket traffic. This is
+achieved by using QEMU's [pcie-expander-bus](https://github.com/qemu/qemu/blob/711a1ddf899bef577907a10db77475c8834da52f/include/hw/pci/pci_bridge.h#L92-L100)
+controllers to create NUMA-aware PCIe hierarchies in the guest.
 
 ## Motivation
 
