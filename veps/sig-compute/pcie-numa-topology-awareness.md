@@ -94,25 +94,37 @@ This approach ensures each passthrough device appears on a guest PCIe bus that c
 its actual host NUMA node, enabling AI frameworks to make optimal communication and memory access
 decisions.
 
-A VM with NUMA-aware PCIe topology will look like this:
+A non NUMA-aware PCIe topology of a VM looks like this:
+
+```
+   pcie.0
+   --------------------------------------------------------------------------------------
+         |                   |                     |                 |
+   ---------------    ------------------    ---------------    ---------------
+   | PCIe Device |    | pcie-root-port |    | PCIe Device |    | PCIe Device |
+   |  (GPU/NIC)  |    ------------------    |  (GPU/NIC)  |    |  (GPU/NIC)  |
+   ---------------                          ---------------    ---------------
+```
+
+While a NUMA-aware PCIe topology will look like this:
 
 ```
    pcie.0
    --------------------------------------------------------------------------------------
          |                   |                     |                         |
-   --------------     ------------------     -------------             -------------
+   --------------     ------------------    ---------------           ---------------
    | PCIe Device |    | pcie-root-port |    |  pxb-pcie   |           |  pxb-pcie   |
    --------------     ------------------    | (NUMA node) |           | (NUMA node) |
-                                             -------------             -------------
+                                            ---------------           ---------------
                                                    |                         |
                                           --------------------      --------------------
                                           |  pcie-root-port  |      |  pcie-root-port  |
                                           --------------------      --------------------
                                                    |                         |
-                                             -------------             -------------
+                                            ---------------           ---------------
                                             | PCIe Device |           | PCIe Device |
                                             |  (GPU/NIC)  |           |  (GPU/NIC)  |
-                                             -------------             -------------
+                                            ---------------           ---------------
 ```
 
 ### Scope
