@@ -35,7 +35,7 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 
 ## Non Goals
 
-- Deliver a full implementation of any specific new hypervisor backend.
+- Support multiple hypervisors/accelerators on the same KubeVirt deployment.
 - Redesign the VirtualMachineInstance API schema beyond additive fields.
 - Replace existing Hyper-V enlightenment features or other architecture-specific helpers.
 - Mandate new observability requirements; telemetry hooks remain optional.
