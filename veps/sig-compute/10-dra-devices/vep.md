@@ -211,7 +211,7 @@ The first section vmi.spec.resourceClaims will have a list of devices needed to 
 available as a list will allow users to use the device from this list in GPU section or HostDevices section of the
 DomainSpec API.
 
-In v1beta1 version of [DRA API](https://pkg.go.dev/k8s.io/api@v0.32.0/resource/v1beta1#DeviceClaim), multiple drivers
+In v1 version of [DRA API](https://pkg.go.dev/k8s.io/api@v0.34.0/resource/v1#DeviceClaim), multiple drivers
 could potentially provision devices that are part of a single claim. For this reason, a separate list of claims required
 for the VMI (section 1) is needed instead of mentioning the resource claim in devices section
 [see Alternate Designs](#alternative-1)
@@ -268,7 +268,7 @@ status:
   - name: gpu-resource-claim
     resourceClaimName: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28
 ---
-apiVersion: resource.k8s.io/v1alpha3
+apiVersion: resource.k8s.io/v1
 kind: ResourceClaim
 metadata:
   annotations:
@@ -285,10 +285,11 @@ metadata:
 spec:
   devices:
     requests:
-    - allocationMode: ExactCount
-      count: 1
-      deviceClassName: gpu.example.com
-      name: gpu
+    - name: gpu
+      exactly:
+        allocationMode: ExactCount
+        count: 1
+        deviceClassName: gpu.example.com
 status:
   allocation:
     devices:
@@ -309,7 +310,7 @@ status:
     resource: pods
     uid: 8ffb7e04-6c4b-4fc7-bbaa-c60d9a1e0eaa
 ---
-apiVersion: resource.k8s.io/v1alpha3
+apiVersion: resource.k8s.io/v1
 kind: ResourceSlice
 metadata:
   generateName: kind-1.31-dra-control-plane-gpu.example.com-
@@ -380,7 +381,7 @@ Note: The feature gate verification when VMI requesting DRA device will either b
 ```
 ---
 # this is a cluster scoped resource
-apiVersion: resource.k8s.io/v1alpha3
+apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
   name: gpu.example.com
@@ -389,7 +390,7 @@ spec:
   - cel:
       expression: device.driver == 'gpu.example.com'
 ---
-apiVersion: resource.k8s.io/v1alpha3
+apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
 metadata:
   name: pgpu-claim-template
@@ -397,7 +398,8 @@ spec:
   spec:
     devices:
       requests:
-        - name: pgpu-request-name
+      - name: pgpu-request-name
+        exactly:
           deviceClassName: gpu.example.com
 ---
 apiVersion: kubevirt.io/v1
@@ -453,7 +455,7 @@ status:
 In the case of device plugins, a pre-defined status resource which is usually identified by a device model, e.g.
 `nvidia.com/GP102GL_Tesla_P40` is configured. Users consume this device via the following spec:
 ```yaml
-apiVersion: kubevirt.io/v1alpha3
+apiVersion: kubevirt.io/v1
 kind: VirtualMachineInstance
 metadata:
   labels:
@@ -469,7 +471,7 @@ spec:
 In the case of DRA there is a level of indirection, where the information about what device is allocated to the VMI
 could be lost in the resource claim object. For example, consider a ResourceClaimTemplate:
 ```yaml
-apiVersion: resource.k8s.io/v1alpha3
+apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
 metadata:
   name: single-gpu
@@ -483,7 +485,7 @@ spec:
         deviceClassName: vfiopci.nvidia.com
         name: gpu
 ---
-apiVersion: resource.k8s.io/v1alpha3
+apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
   name: vfiopci.example.com
