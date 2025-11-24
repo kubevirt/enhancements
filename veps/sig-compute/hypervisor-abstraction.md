@@ -36,6 +36,7 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 ## Non Goals
 
 - Support multiple hypervisors/accelerators on the same KubeVirt deployment.
+- Extension of `VMI` CRD to introduce `Hypervisor` field. Since multiple hypervisors/accelerators in the same KubeVirt deployment is not in scope, VMIs do not need to explicitly specify the target hypervisor.
 - Redesign the VirtualMachineInstance API schema beyond additive fields.
 - Replace existing Hyper-V enlightenment features or other architecture-specific helpers.
 - Mandate new observability requirements; telemetry hooks remain optional.
@@ -511,13 +512,25 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
    ```
 
-### Alternative Design Considered: Plugin model
+### Alternative Designs Considered
+
+#### Plugin model for hypervisor backend integration
 
 The alternative design that we evaluated was a plugin model for hypervisor integration. In this approach, KubeVirt would define a set of core interfaces (similar to the ones described above), but instead of implementing these interfaces in-tree, KubeVirt would provide the mechanism for dynamically loading external implementations at runtime. Each hypervisor backend (e.g., KVM, MSHV, or future hypervisors) could supply its own plugin, packaged and maintained in a separate repository. These plugins would register with KubeVirt components (virt-launcher, virt-handler, etc.) through a well-defined contract.
 
 While the plugin-based approach offers strong decoupling and extensibility, it requires significant refactoring of the KubeVirt codebase. Hypervisor-specific logic is currently invoked from multiple components (e.g., virt-launcher, virt-handler, API), and introducing a dynamic plugin mechanism would involve redesigning these interactions and adding lifecycle management for external modules.
 
 For the initial implementation of multi-hypervisor support, we chose an in-tree design to achieve a working solution faster. This approach allows us to validate the abstraction layer, experiment with real-world scenarios, and identify what works and what does not. With these learnings, we will be better positioned to propose a robust plugin-based architecture for multi-hypervisor support in the future.
+
+#### Alternatives to KubeVirt CR API change
+
+This VEP proposes to add the `HypervisorConfiguration` field to the `KubevirtConfiguration` CRD. The rationale behind this choice was to allow the cluster admin to declare outright which hypervisor they want KubeVirt to target. Furthermore, it follows the `ArchConfiguration` field in `KubevirtConfiguration` CRD. In addition, we also considered the following alternatives to configure KubeVirt to target a specific hypervisor:
+
+- **Use a separate CRD**: Devise a `KubeVirtHypervisorConfiguration` CRD. If it is found in the `kubevirt` namespace, use it. If not, fall back to `KVM`. This is an approach that meets our requirements, but we prefer to add the `HypervisorConfiguration` field following the precedent of `ArchConfiguration`.
+
+- **Querying Worker Nodes**: Iterate over worker nodes and look for a telltale device. If no special devices are found, fall back to KVM. In this approach, since the target hypervisor is not declared outright for the cluster, it would require a `Hypervisor` field in the `VMI` CRD. In this VEP, we do not have extension of `VMI` CRD in scope.
+
+- **Build-time switch**: Use build-tags to compile KubeVirt with support for a particular hypervisor. We did not choose this approach because it would require KubeVirt to build multiple versions of its components to support different hypervisors. A runtime configuration is preferable, especially given the logic for multi-hypervisor support is already in-tree.
 
 ### Future Enhancements
 
