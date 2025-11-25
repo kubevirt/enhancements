@@ -1,7 +1,6 @@
 # VEP #97.1: Hypervisor Abstraction - Capability Registry for Hypervisor Feature Discovery
 
 ## Release Signoff Checklist
-
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements]
@@ -16,25 +15,30 @@ Introduce a centralized capability registry that provides a declarative matrix f
 
 ## Motivation
 
-- KubeVirt's current architecture-specific validation is scattered across multiple files (`arm64.go`, `s390x.go`), making it difficult to maintain consistency and add new hypervisors.
-- Test filtering logic is duplicated throughout the test suite, requiring manual maintenance when features are added or support changes.
+As KubeVirt expands to support multiple hypervisors (KVM and MSHV) on multiple architectures, not all features have equal support on different platforms. Some features are architecture-specific (e.g., AMD SEV workload encryption), while others may be specific to a certain hypervisor, while still others untested or have known compatibility issues on certain architectures. Currently, there is no systematic way to track and communicate hypervisor/architecture-specific feature support.
+
+- There is no mechanism for the selection of functional tests based on the capabilities supported by the platform, based on hypervisor /architecture combination.
 - Error messages for unsupported features lack context, documentation links, and version information.
-- Adding a new hypervisor requires touching validation logic across multiple components.
-- No clear mechanism to declare when features need explicit validation or blocking without creating scattered conditional code.
+- Adding a new hypervisor requires updating the validation logic for multiple VMI features.
+- No clear mechanism to declare when features need explicit validation or are unsupported without creating scattered conditional code.
+- Users are unsure whether a certain Feature Gate is supported on a particular hypervisor or architecture. The webhooks for validating feature gates changes only check for deprecation and not functionality support.
 
 ## Goals
 
-- Provide a mechanism to declare when features require validation or should be blocked on specific platforms.
-- Enable automatic validation by querying the capability registry instead of scattered conditional logic.
-- Support test filtering so tests only run on compatible infrastructure.
+- Provide a mechanism to declare when features/capabilities are fully supported, experimental or unsupported on specific platforms. It should be possible to declare feature support  for a certain hypervisor or architecture or their combination.
+
+- Enable automatic validation by querying the capability registry instead of scattered conditional logic. The registry-based validation should integrate easily into the validation webhooks logic to validate VMI specs on the target platform.
+
+- Enable test filtering so that the functional tests run on a given platform only test functionality that is supported on that platform.
+
 - Generate rich error messages with explanations, documentation links, and version information when features are unsupported.
-- Keep the registry focused on features that need explicit control—not an exhaustive feature catalog.
-- Make it simple to add validation points and hypervisor-specific constraints.
+
 
 ## Non Goals
 
-- Create an exhaustive catalog of all KubeVirt features (only register capabilities that need validation, blocking, or special metadata).
-- Require registering every feature as a capability (unregistered features are implicitly allowed and handled by normal code paths).
+- The registry is not meant to serve as a catalog of features offered by KubeVirt. Only those features that need explicit control (e.g., validation or are unsupported) are added to the registry. 
+
+- It should not be required to register every feature as a capability (unregistered features should be implicitly allowed and handled by normal code paths).
 
 ## Definition of Users
 
@@ -46,7 +50,7 @@ Introduce a centralized capability registry that provides a declarative matrix f
 ## User Stories
 
 1. As a contributor adding a new hypervisor, I can declare which features need validation or should be blocked, and have validation work automatically without scattered conditional logic.
-2. As a test maintainer, I can decorate tests with capability requirements for features that need platform-specific validation and have them automatically skip on unsupported platforms.
+2. As a test maintainer, I can decorate tests with capability requirements for features that need platform-specific validation. When testing on a particular platform, I can use label filters to run only those tests which invoke functionality  that is supported on that platform.
 3. As an end user, I receive clear error messages with documentation links when I request features that are explicitly unsupported on my platform.
 4. As a platform engineer, I can declare constraints (e.g., "VGA unsupported on ARM64") once and have validation, test filtering, and error messages handled automatically.
 
@@ -181,7 +185,7 @@ The capability registry is **opt-in for validation**. Only register capabilities
    - Helps communicate deprecation timeline
 
 4. **Enable test filtering**: Register to control which tests run on which platforms
-   - Tests for unsupported features automatically skip
+   - Only those tests run which are supported or experimental on the target platform
    - Reduces noise in CI for platform-specific features
 
 **What not to register**: Features where support is unknown or still being discovered. If a feature hasn't shown platform-specific issues and doesn't require explicit blocking, leave it unregistered. Let natural test failures and runtime errors reveal compatibility issues, then register capabilities as constraints are discovered. This keeps the registry focused on known validation needs rather than attempting to preemptively catalog all features.
@@ -247,7 +251,7 @@ The registry provides the data; consumers apply their own validation policy. Thi
 
 #### Test Filtering
 
-Tests use capability decorators to automatically skip on unsupported platforms:
+Tests use capability decorators to filter which tests to run on a given platform:
 
 ```go
 // tests/decorators/capabilities.go
@@ -259,11 +263,7 @@ It("should support VGA graphics", RequiresVGAGraphics, func() {
 })
 ```
 
-Behavior:
-- `Unregistered`: test runs (default for unregistered capabilities)
-- `Unsupported`: test skips with message from registry
-- `Experimental`: test runs only if feature gate enabled
-- `Deprecated`: test runs with warning (feature still works)
+Behavior: The test filtering mechanism should take as input the target hypervisor and architecture pair and return the set of capability-based test labels that should be used for  filtering tests for running. All tests requiring functionality that is `Unsupported` on the target platform would be marked as negative.
 
 Example: VGA tests run on KVM/amd64 (unregistered, implicitly allowed) but skip on KVM/arm64 (registered as unsupported).
 
@@ -286,7 +286,7 @@ This allows users and operators to query node capabilities without inspecting th
 - **Natural inheritance**: Hypervisor-wide constraints with architecture-specific overrides
 - **Type-safe**: Constants prevent typos, enable IDE autocomplete
 - **Rich error messages**: Automatic user-friendly messages with doc links
-- **Automatic test filtering**: Tests skip only when explicitly unsupported
+- **Automatic test filtering**: Filter out tests which invoke explicitly unsupported capabilities
 
 ## API Examples
 
