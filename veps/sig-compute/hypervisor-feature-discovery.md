@@ -64,23 +64,26 @@ As KubeVirt expands to support multiple hypervisors (KVM and MSHV) on multiple a
 ### Core Types
 
 ```go
-// Core types in pkg/capabilities/types.go
-type CapabilityKey string  // e.g., "graphics.vga", "firmware.secureboot.uefi"
+type CapabilityKey string // e.g., "graphics.vga", "firmware.secureboot.uefi"
 type SupportLevel int
 
 const (
-    Unregistered SupportLevel = iota  // Not registered (default zero value)
-    Unsupported                  // Explicitly blocked on this platform
-    Experimental                 // Requires feature gate
-    Deprecated                   // Supported but discouraged
+	Unregistered SupportLevel = iota // Not registered (default zero value)
+	Unsupported                      // Explicitly blocked on this platform
+	Experimental                     // Requires feature gate
+	Deprecated                       // Supported but discouraged
 )
 
 type Capability struct {
-    Level       SupportLevel
-    Message     string   // User-facing explanation
-    Since       string   // Version when constraint registered
-    DocLink     string   // Link to documentation
-    GatedBy     string   // Optional: feature gate name
+	// function to check if this capability is required by a given VMI
+	IsRequiredBy func(vmi *v1.VirtualMachineInstanceSpec) bool
+}
+
+// struct to store the extent to which a given capability is supported
+type CapabilitySupport struct {
+	Level   SupportLevel
+	Message string // User-facing explanation
+	GatedBy string // Optional: feature gate name
 }
 ```
 
@@ -89,29 +92,45 @@ type Capability struct {
 All capabilities are defined once as typed constants in `pkg/capabilities/definitions.go`:
 
 ```go
-// pkg/capabilities/definitions.go
-type CapabilityKey string
-
 // Capability constants - each represents a feature that may need validation or blocking
 const (
-    CapGraphicsVGA       CapabilityKey = "graphics.vga"
-    CapGraphicsVirtIO    CapabilityKey = "graphics.virtio"
-    CapSecureBootUEFI    CapabilityKey = "firmware.secureboot.uefi"
-    CapCPUHotplug        CapabilityKey = "cpu.hotplug"
-    // ... all capabilities declared as constants
+	CapVsock        CapabilityKey = "domain.devices.vsock"
+	CapPanicDevices CapabilityKey = "domain.devices.panicDevices"
+	// ... all capabilities declared as constants
 )
+
+// Define CapVsock capability
+var CapVsockDef = Capability{
+	IsRequiredBy: func(vmiSpec *v1.VirtualMachineInstanceSpec) bool {
+		return vmiSpec.Domain.Devices.AutoattachVSOCK != nil && *vmiSpec.Domain.Devices.AutoattachVSOCK
+	},
+}
+
+// Define PanicDevices capability
+var CapPanicDevicesDef = Capability{
+	IsRequiredBy: func(vmiSpec *v1.VirtualMachineInstanceSpec) bool {
+		return len(vmiSpec.Domain.Devices.PanicDevices) > 0
+	},
+}
+
+// Define a struct to hold a map from capability keys to their definitions
+var CapabilityDefinitions = map[CapabilityKey]Capability{
+	CapVsock:        CapVsockDef,
+	CapPanicDevices: CapPanicDevicesDef,
+	// Add other capabilities here as they are defined
+}
 ```
 
 ### Registration Pattern
 
-Capabilities are fully defined when hypervisors register their constraints via a builder pattern. The `Capability` struct populated by the builder contains all necessary metadata (level, message, since, docLink, gatedBy).
+Capabilities are fully defined when hypervisors register their constraints via a builder pattern. The `Capability` struct populated by the builder contains all necessary metadata (`Level`, `Message`, `GatedBy`).
 
 Hypervisor+architecture combinations register their constraints using a fluent builder API:
 
 ```go
 // pkg/capabilities/registry.go - Matrix registration with builder pattern
 type Capabilities struct {
-    matrix map[string]map[CapabilityKey]Capability // "hypervisor/arch" or "hypervisor" -> capabilities
+    matrix map[string]map[CapabilityKey]CapabilitySupport // "hypervisor/arch" or "hypervisor" -> capabilities
 }
 
 type CapabilitiesBuilder struct {
@@ -236,6 +255,7 @@ Resolution precedence (most specific wins):
 2. **Hypervisor-wide** (e.g., `kvm`) - applies to all architectures unless overridden
 3. **Not registered** - returns zero-value `Capability{}` (where `Level` is 0, which equals `Unregistered`)
 
+
 ### Integration Points
 
 #### Validation Webhooks
@@ -267,6 +287,21 @@ Behavior: The test filtering mechanism should take as input the target hyperviso
 
 Example: VGA tests run on KVM/amd64 (unregistered, implicitly allowed) but skip on KVM/arm64 (registered as unsupported).
 
+For determining the names of the unsupported capabilities on the target platform, we introduce a binary under `cmd/` named `kubevirt-capability-check`, which has the following usage:
+
+```bash
+$ ./_out/cmd/kubevirt-capability-check/kubevirt-capability-check --help
+Usage of ./_out/cmd/kubevirt-capability-check/kubevirt-capability-check:
+      --arch string            Target architecture (e.g., 'amd64', 'arm64', 's390x')
+      --hypervisor string      Target hypervisor (e.g., 'kvm', 'mshv')
+      --list-all               List all capabilities regardless of support level
+      --output string          Output format: 'keys' (capability keys only), 'detailed' (keys with messages), 'json' (default "keys")
+      --support-level string   Support level to filter by (Unsupported, Experimental, Deprecated, Unregistered) (default "Unsupported")
+  -v, --v int                  log level for V logs (default 2)
+```
+
+This binary queries the same capability registry as the validation logic does.
+
 #### Node Labeling
 
 The node labeller can optionally expose capability labels on nodes for scheduling and audit purposes:
@@ -290,33 +325,65 @@ This allows users and operators to query node capabilities without inspecting th
 
 ## API Examples
 
-### Querying Capabilities
+### Querying Capabilities to Validate VMI spec
 
 ```go
-// Check if a capability has constraints
-cap := capabilities.Get("kvm", "amd64", capabilities.CapGraphicsVGA)
-if cap.Level == capabilities.Unsupported {
-    // Explicitly blocked on this platform
-    return fmt.Errorf("%s: %s", capabilities.CapGraphicsVGA, cap.Message)
-}
-if cap.Level == capabilities.Experimental && !featureGateEnabled(cap.GatedBy) {
-    return fmt.Errorf("%s requires feature gate %s", capabilities.CapGraphicsVGA, cap.GatedBy)
-}
-// Unregistered: allow (normal code paths handle it)
+// Retrieve the capability support information for the given hypervisor and architecture
+supports := capabilities.GetAll(hypervisor, arch)
 
-// Get all registered capabilities for a platform (only those explicitly declared)
-caps := capabilities.GetAll("kvm", "amd64")
-for key, cap := range caps {
-    log.Printf("%s: %s (since %s)", key, cap.Level, cap.Since)
+// Validate the capabilities in the spec against the supported capabilities
+for capKey, capSupport := range supports {
+  capabilityDef := capabilities.CapabilityDefinitions[capKey]
+
+  // Only trigger validation logic if the capability is used by the VMI
+  if capabilityDef.IsRequiredBy(vmiSpec) {
+    switch capSupport.Level {
+    case capabilities.Unsupported:
+      // Unsupported capabilities are straightaway rejected
+      causes = append(causes, metav1.StatusCause{
+        Type:    metav1.CauseTypeFieldValueNotSupported,
+        Message: capSupport.Message,
+        Field:   field.String(),
+      })
+    case capabilities.Experimental:
+      // For Experimental capabilities,
+      // check if the corresponding feature gate is enabled
+      if capSupport.GatedBy != "" && !config.IsFeatureGateEnabled(capSupport.GatedBy) {
+        causes = append(causes, metav1.StatusCause{
+          Type:    metav1.CauseTypeFieldValueNotSupported,
+          Message: capSupport.Message + fmt.Sprintf(". But feature gate '%s' is not enabled", capSupport.GatedBy),
+          Field:   field.String(),
+        })
+      }
+    }
+  }
 }
 ```
 
 ### Error Message Example
 
 ```
-VGA graphics not supported on ARM64 architecture
-Capability: graphics.vga
-See: https://kubevirt.io/user-guide/graphics#compatibility
+VGA graphics not supported on this platform. See: https://kubevirt.io/user-guide/graphics#compatibility
+```
+
+### Filtering tests for running on a given platform
+
+Run the `kubevirt-capability-check` binary to compute which capabilities are unsupported on the target platform so that those tests that require those unsupported capabilities are not run.
+
+```bash
+$ unsupportedCaps=$()./_out/cmd/kubevirt-capability-check/kubevirt-capability-check \
+    --arch s390x \
+    --hypervisor kvm)
+$ echo $unsupportedCaps
+domain.devices.panicDevices
+$ set +H
+$ for cap in $unsupportedCaps; do
+    labelFilter="${labelFilter}&&(!requires-capability-${cap})"
+    done
+$ echo $labelFilter
+&&(!requires-capability-domain.devices.panicDevices)
+$ set -H
+
 ```
 
 ## Undesired alternatives
