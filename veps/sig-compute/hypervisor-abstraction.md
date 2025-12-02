@@ -91,13 +91,14 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration`) declares th
     }
    ```
    Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
-- **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, and `GetMemoryOverhead`.
+- **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, `GetMemoryOverhead` and `GetHypervFeatures`.
 
   ```go
   type HypervisorRuntime interface {
     AdjustResources(vmi *v1.VirtualMachineInstance, additionalOverheadRatio *string) error
     HandleHousekeeping(vmi *v1.VirtualMachineInstance, domain *api.Domain) error
     GetMemoryOverhead(vmi *v1.VirtualMachineInstance, arch string, additionalOverheadRatio *string) resource.Quantity
+    GetHypervFeatures() []string
   }
   ```
 
@@ -111,7 +112,7 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration`) declares th
 
   The `BaseConverter` struct that implements the above interface would contain common functionality for VMI to domain conversion. Each hypervisor will be able to implement their own converter, e.g., `MshvConverter`, embed the `BaseConverter` and override certain functions of the `BaseConverter` with their own.
 
-- **Node labeller (`pkg/virt-handler/node-labeller/hypervisor/`)** – Adds a lightweight hook so each hypervisor can declare the devices to probe, the preferred libvirt `virt-type`, and optional feature discovery (such as Hyper-V enlightenments for KVM on amd64).
+- **Node labeller** – Adds parameters `--virt-type` and `--hypervisor-device` to the `cmd/virt-launcher/node-labeller/node-labeller.sh` script, so that it can correctly query Libvirt for node and domain capabilities.
 
 This split preserves the “implement once, reuse everywhere” story without routing everything through a monolithic interface. New hypervisors can land incrementally—start with defaults and webhooks, add converter support, then extend node labelling—while keeping the contract for each area explicit and testable.
 
@@ -128,6 +129,8 @@ This split preserves the “implement once, reuse everywhere” story without ro
       configuration:
         hypervisorConfiguration:
         - name: kvm
+          hypervisorDevice: kvm
+          virtType: kvm
         developerConfiguration:
           featureGates:
             - ConfigurableHypervisor
@@ -386,8 +389,7 @@ The following directory will be created to host the `Validator` interface and th
 
 - `virt-controller` reads the `DeviceRequests` declared by the defaults extension to determine the device plugin resources (for example, `devices.kubevirt.io/mshv` plus an auxiliary firmware device) to request. Kubernetes schedules VMI pods only on nodes that advertise the required quantities; entries flagged `Optional: true` may be skipped when the resource is absent.
 - `virt-handler`'s device manager uses the same list when spawning its permanent `GenericDevicePlugin` instances, so the existing lifecycle for `/dev/kvm` seamlessly extends to `/dev/mshv` or composite requirements.
-- The node-labeller sidecar in `virt-handler` is seeded with the resolved hypervisor. It probes only the devices declared by the active implementation and sets libvirt's preferred `virt-type` before querying capabilities, so downstream hypervisors can surface their own CPU/memory traits without patching the container image.
-- Node labelling remains optional telemetry. Operators can surface informative labels, but functionality relies solely on allocatable resources. When the hypervisor/architecture combination implies additional feature discovery (for example, Hyper-V enlightenments), the labeller defers to helper hooks exposed by the implementation. In the MVP we continue to evaluate Hyper-V enlightenments only when the hypervisor is `kvm` and the architecture is `amd64`, matching the current behaviour while providing a seam for future backends.
+- The node-labeller sidecar in `virt-handler` is invoked with the resolved hypervisor device and virt-type. It probes only the specific hypervisor device and sets the correct `virt-type` to query Libvirt capabilities. With this design, new hypervisors can add support for node-labeller without needing to update the container image.
 
 ### Observability Hooks
 
@@ -407,6 +409,8 @@ spec:
   configuration:
     hypervisorConfiguration:
     - name: mshv
+      hypervisorDevice: mshv
+      virtType: hyperv
     developerConfiguration:
       featureGates:
         - ConfigurableHypervisor
@@ -496,26 +500,6 @@ With this configuration in place, every VMI reconciled by the control plane inhe
     ```
 
 4. **Admission** – Create `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/sample.go` that exports `MutateVMI` and `Validate` functions and register them in the webhook registry.
-
-4. **Node labeller (optional for MVP)** – Provide `pkg/virt-handler/node-labeller/hypervisor/sample.go` declaring the devices and libvirt `virt-type` to probe. If the hypervisor relies on architecture-specific features, add the corresponding helper hooks.
-
-   ```go
-   type sampleLabeller struct{}
-
-   func (sampleLabeller) Devices() []DeviceProbe {
-     return []DeviceProbe{
-       {Path: "/dev/sample", ResourceName: "devices.kubevirt.io/sample"},
-     }
-   }
-
-   func (sampleLabeller) PreferredVirtType() string {
-     return "sample"
-   }
-
-   func init() {
-     RegisterHypervisorLabeller("sample", sampleLabeller{})
-   }
-   ```
 
 ### Alternative Designs Considered
 
