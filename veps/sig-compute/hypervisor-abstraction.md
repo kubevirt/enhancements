@@ -101,20 +101,15 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration`) declares th
   }
   ```
 
-- **Converter library (`pkg/virt-launcher/virtwrap/converter/hypervisor/`)** – Implements the new `HypervisorConverter` interface described below. Each hypervisor file focuses on XML/domain differences while `base.go` holds the shared helpers. The converter selects the correct implementation via a local registry keyed by hypervisor name.
+- **Converter library (`pkg/virt-launcher/virtwrap/converter/`)** – Adds a new `Converter` interface, which contains the main function to convert VMI to Libvirt domain.
 
   ```golang
-  // pkg/virt-launcher/virtwrap/converter/hypervisor/converter.go
-  type HypervisorConverter interface {
-      SetDomainType(domain *api.Domain, ctx *ConverterContext) error
-      ConvertWatchdog(source *v1.Watchdog, watchdog *api.Watchdog) error
-      ValidateDiskBus(bus v1.DiskBus) error
-      LaunchSecurity(vmi *v1.VirtualMachineInstance) *api.LaunchSecurity
-      SetIOThreads(vmi *v1.VirtualMachineInstance, domain *api.Domain, vcpus uint) error
-      ConvertClock(source *v1.Clock, clock *api.Clock) error
-      ConvertFeatures(source *v1.Features, features *api.Features, ctx *ConverterContext) error
+  type Converter interface {
+    Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) (err error)
   }
   ```
+
+  The `BaseConverter` struct that implements the above interface would contain common functionality for VMI to domain conversion. Each hypervisor will be able to implement their own converter, e.g., `MshvConverter`, embed the `BaseConverter` and override certain functions of the `BaseConverter` with their own.
 
 - **Node labeller (`pkg/virt-handler/node-labeller/hypervisor/`)** – Adds a lightweight hook so each hypervisor can declare the devices to probe, the preferred libvirt `virt-type`, and optional feature discovery (such as Hyper-V enlightenments for KVM on amd64).
 
@@ -147,7 +142,7 @@ This split preserves the “implement once, reuse everywhere” story without ro
 2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI and set the appropriate default values for the specific hypervisor supported on the cluster.
 3. `virt-controller` reads the configured hypervisor from `ClusterConfig`, and adds a K8s device request for the appropriate hypervisor device to the `virt-launcher` pod definition so that it can be scheduled on the node with that hypervisor device. Furthermore, it adds the hypervisor information to the command-line of the `virt-launcher`, which the `virt-launcher` pod then uses to instantiate the right implementation of the `HypervisorConverter` for converting VMI spec to Libvirt domain XML.
 4. The `virt-controller` resolves the `HypervisorRuntime` implementation to run `GetMemoryOverhead`, keeping pod-level resource calculations in sync with the mutated spec. The same runtime contract is used by virt-handler to run the `AdjustResources` function for memlock sizing and ancillary bookkeeping.
-5. When virt-launcher converts the VMI, it instantiates both the `HypervisorConverter` and the `HypervisorRuntime`. The converter stamps baseline domain defaults and interleaves its edits with the existing architecture helpers.
+5. When virt-launcher converts the VMI, it instantiates both the `Converter` and the `HypervisorRuntime`. The hypervisor-specific instance of the `Converter` interface leverages common conversion functions as well as hypervisor-specific functions to convert VMI to Libvirt domain.
 6. The virt-launcher component will continue to leverage existing helpers for common functionality, such as setLaunchSecurity, disk configuration, and network setup. Hypervisor-specific extensions to the converter logic will extend the base implementation of these helpers to introduce specialized logic.
 
 
@@ -155,56 +150,64 @@ This split preserves the “implement once, reuse everywhere” story without ro
 
 - The existing `pkg/virt-launcher/virtwrap/converter` package becomes a reusable library with a new `hypervisor` subpackage. Introduce a new interface named `HypervisorConverter` that exposes the main functions for converting VMI spec to Libvirt domain XML.
 
-```golang
-// pkg/virt-launcher/virtwrap/converter/hypervisor/converter.go
-type HypervisorConverter interface {
-    SetDomainType(domain *api.Domain, ctx *ConverterContext) error
-    ConvertWatchdog(source *v1.Watchdog, watchdog *api.Watchdog) error
-    ValidateDiskBus(bus v1.DiskBus) error
-    LaunchSecurity(vmi *v1.VirtualMachineInstance) *api.LaunchSecurity
-    SetIOThreads(vmi *v1.VirtualMachineInstance, domain *api.Domain, vcpus uint) error
-    ConvertClock(source *v1.Clock, clock *api.Clock) error
-    ConvertFeatures(source *v1.Features, features *api.Features, ctx *ConverterContext) error
-}
-```
+  ```golang
+  type Converter interface {
+    Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) (err error)
+  }
+  ```
 
-- Shared translation helpers for disks, NICs, CPU topology, and security settings live in `converter/hypervisor/base.go` as `BaseHypervisorConverter` utilities.
+- Shared translation helpers for disks, NICs, CPU topology, and security settings live in `converter/base-converter.go` as part of the `BaseConverter`.
 
-```go
-type BaseHypervisorConverter struct{} // Shared logic, e.g., generic disk mappings
+  ```go
+  type BaseConverter struct {
+    // common configurators
+    domainConfigurator  configurator
+    networkConfigurator configurator
+    tpmConfigurator     configurator
+    // list of extra configurators to be used
+    // by hypervisor-specific converters to extend BaseConverter
+    extraConfigurators []configurator
 
-func (c *BaseHypervisorConverter) SetDomainType(domain *api.Domain, ctx *ConverterContext) error {
-    domain.Spec.Type = "qemu" // Default for KVM
-    return nil
-}
-```
+    // converter functionality that is encapsulated in functions rather than configurators
+    serialDeviceConverter func(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) error
+  }
 
-- Implementation of the `HypervisorConverter` interface for specific hypervisor would leverage struct embedding to re-use common functions from the `BaseHypervisorConverter`, while custom functionality is achieved by overriding.
+  // Initialization of BaseConverter sets the configurators with 
+  // their default values
+  func NewBaseConverter(c *ConverterContext) *BaseConverter {
+    return &BaseConverter{
+      domainConfigurator: metadata.DomainConfigurator{},
+      networkConfigurator: network.NewDomainConfigurator(
+        network.WithDomainAttachmentByInterfaceName(c.DomainAttachmentByInterfaceName),
+        network.WithUseLaunchSecuritySEV(c.UseLaunchSecuritySEV),
+        network.WithUseLaunchSecurityPV(c.UseLaunchSecurityPV),
+      ),
+      tpmConfigurator: compute.TPMDomainConfigurator{},
 
-```go
-type MshvHypervisorConverter struct {
-    BaseHypervisorConverter
-}
-
-func (c *MshvHypervisorConverter) SetDomainType(domain *api.Domain, ctx *ConverterContext) error {
-    domain.Spec.Type = "future" 
-    return nil
-}
-```
-
-- A new function `NewHypervisorConverter(name string)` returns the correct implementation based on the resolved hypervisor name, mirroring the runtime factory used across the control plane.
-
-```go
-func NewHypervisorConverter(name string) HypervisorConverter {
-    base := BaseHypervisorConverter{}
-    switch name {
-    case "mshv":
-        return &MshvHypervisorConverter{BaseHypervisorConverter: base}
-    default:
-        return &KvmHypervisorConverter{BaseHypervisorConverter: base}
+      serialDeviceConverter: baseSerialDeviceConverter,
     }
-}
-```
+  }
+  ```
+
+  When instantiating a hypervisor-specific converter, the base configurators can be overridden or extended. Furthermore, conversion logic that lives in a function and not in a configurator can also be overridden.
+
+  ```go
+  func NewMshvConverter(c *ConverterContext) *MshvConverter {
+    baseConverter := NewBaseConverter(c)
+
+    // Override the base domain configurator
+    baseConverter.domainConfigurator = MshvDomainConfigurator{}
+    // Add an extra configurator
+    baseConverter.extraConfigurators = append(baseConverter.extraConfigurators, ExtraMshvConfigurator{})
+
+    // Custom serial attachment function to override the base
+    baseConverter.serialDeviceConverter = customMshvSerialDeviceConverter
+
+    return &MshvConverter{
+      baseConverter: baseConverter,
+    }
+  }
+  ```
 
 ### Hypervisor-Specific Defaults
 
@@ -468,27 +471,29 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
    ```
 
-3. **Converter** – Add `pkg/virt-launcher/virtwrap/converter/hypervisor/sample.go` implementing the `HypervisorConverter` interface (overriding only the methods that differ from the base helper).
+3. **Converter** – Add `pkg/virt-launcher/virtwrap/converter/sample.go` implementing the `Converter` interface embedding the BaseConverter (overriding only the methods that differ from the `BaseConverter`).
 
-   ```go
-   type sampleConverter struct {
-     *BaseHypervisorConverter
-   }
+    ```go
+    type SampleConverter struct {
+      baseConverter *BaseConverter
+    }
 
-   func newSampleConverter() HypervisorConverter {
-     return &sampleConverter{
-       BaseHypervisorConverter: NewBaseHypervisorConverter(),
-     }
-   }
+    func NewSampleConverter(c *ConverterContext) *SampleConverter {
+      baseConverter := NewBaseConverter(c)
 
-   func (c *sampleConverter) SetDomainType(dom *api.Domain) {
-     dom.Spec.Type = "sample"
-   }
+      // Override the base domain configurator
+      baseConverter.domainConfigurator = SampleDomainConfigurator{}
+      // Add an extra configurator
+      baseConverter.extraConfigurators = append(baseConverter.extraConfigurators, ExtraSampleConfigurator{})
 
-   func init() {
-     RegisterHypervisorConverter("sample", newSampleConverter)
-   }
-   ```
+      // Custom serial attachment function
+      baseConverter.serialDeviceConverter = customSampleSerialDeviceConverter
+
+      return &SampleConverter{
+        baseConverter: baseConverter,
+      }
+    }
+    ```
 
 4. **Admission** – Create `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/sample.go` that exports `MutateVMI` and `Validate` functions and register them in the webhook registry.
 
