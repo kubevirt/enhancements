@@ -85,9 +85,9 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration`) declares th
  - **Defaults provider registry (`pkg/defaults/providers/`)** – Introduces a single `DefaultsProvider` interface applied in layered order (Base → Hypervisor → Architecture → Hypervisor+Architecture → Finalization). Providers are registered under composite keys like `kvm/amd64` or `mshv/arm64`. Each provider implements:
    ```go
     type DefaultsProvider interface {
-      ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient)
-      ApplyVMISpecDefaults(spec *v1.VirtualMachineInstanceSpec, cc *virtconfig.ClusterConfig) error
-      FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error
+        SetVirtualMachineDefaults(vm *v1.VirtualMachine, clusterConfig *virtconfig.ClusterConfig, virtClient kubecli.KubevirtClient)
+        SetDefaultVirtualMachineInstance(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) error
+        SetDefaultVirtualMachineInstanceSpec(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec) error
     }
    ```
    Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
@@ -214,80 +214,63 @@ This split preserves the “implement once, reuse everywhere” story without ro
 
 ### Hypervisor-Specific Defaults
 
-The defaults system is refactored to support multi-axis overrides (hypervisor, architecture, combined) without expanding large `switch` statements.
-
-Precedence (least → most specific):
-1. Base defaults (generic cluster configuration driven)
-2. Hypervisor layer (e.g. kvm-wide adjustments)
-3. Architecture layer (generic amd64, arm64, s390x adjustments)
-4. Hypervisor+Architecture layer (fine-grained divergence)
-5. Finalization (derived/status + feature dependency resolution)
-
-Rules:
-* User-specified values are never overridden.
-* Finalization runs once after all mutation layers.
+The defaults system is refactored to support multi-axis overrides (hypervisor, architecture, combined) without expanding large `switch` statements. The goals of the refactoring are to ensure that the custom defaults provider for a specific hypervisor should be able to re-use as much of the common defaults provider functionality as possible, while still being able to override certain parts of the common defaults provider.
 
 Interface (single contract):
 ```go
 type DefaultsProvider interface {
-  ApplyVMDefaults(vm *v1.VirtualMachine, cc *virtconfig.ClusterConfig, client kubecli.KubevirtClient)
-  ApplyVMISpecDefaults(spec *v1.VirtualMachineInstanceSpec, cc *virtconfig.ClusterConfig) error
-  FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error
+  SetVirtualMachineDefaults(vm *v1.VirtualMachine, clusterConfig *virtconfig.ClusterConfig, virtClient kubecli.KubevirtClient)
+	SetDefaultVirtualMachineInstance(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) error
+	SetDefaultVirtualMachineInstanceSpec(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec) error
 }
 ```
 
-Embedding hierarchy examples:
+The `BaseDefaults` implementation of the `DefaultsProvider` interface contains the common (base) implementation of each of the above interface functions. The `BaseDefaults` struct has several function-type fields, with each field meant to store the logic for setting the default value of a particular section of VMI spec.
+
 ```go
-type BaseDefaults struct{}
-type KVMDefaults struct { *BaseDefaults }
-type MSHVDefaults struct { *BaseDefaults }
-type ArchAMD64Defaults struct { *BaseDefaults }
-type ArchArm64Defaults struct { *BaseDefaults }
-type ArchS390XDefaults struct { *BaseDefaults }
-// Combined
-type KVMAmd64Defaults struct { *KVMDefaults }
-type KVMArm64Defaults struct { *KVMDefaults }
-type KVMS390XDefaults struct { *KVMDefaults }
-type MSHVAmd64Defaults struct { *MSHVDefaults }
+type BaseDefaults struct {
+  // Architecture-specific Defaults Setter 
+	amd64DefaultsSetter   arch_defaults.ArchDefaults
+	arm64DefaultsSetter   arch_defaults.ArchDefaults
+	s390x64DefaultsSetter arch_defaults.ArchDefaults
+
+  // Function-type fields for setting default vals for parts of the VMI/VM
+	defaultVMMachineTypeSetter                func(vm *v1.VirtualMachine, clusterConfig *virtconfig.ClusterConfig)
+	defaultVMIMachineTypeSetter               func(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstanceSpec)
+	currentCPUTopologyStatusSetter            func(vmi *v1.VirtualMachineInstance)
+	guestMemoryStatusSetter                   func(vmi *v1.VirtualMachineInstance)
+	defaultHypervFeatureDependenciesSetter    func(spec *v1.VirtualMachineInstanceSpec)
+	defaultEvictionStrategySetter             func(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec)
+  ...
+}
 ```
 
-Resolution map (composite key):
+When an instance of the `BaseDefaults` struct is created, each function field for setting default values is initialized with its default implementation.
+
+A hypervisor-specific implementation of `DefaultsProvider` interface would leverage struct embedding to override specific functions in the default implementation, while reusing the rest. 
+
 ```go
-var providers = map[string]DefaultsProvider{
-  "kvm/amd64":  &KVMAmd64Defaults{&KVMDefaults{&BaseDefaults{}}},
-  "kvm/arm64":  &KVMArm64Defaults{&KVMDefaults{&BaseDefaults{}}},
-  "kvm/s390x":  &KVMS390XDefaults{&KVMDefaults{&BaseDefaults{}}},
-  "mshv/amd64": &MSHVAmd64Defaults{&MSHVDefaults{&BaseDefaults{}}},
-  "kvm":        &KVMDefaults{&BaseDefaults{}},
-  "mshv":       &MSHVDefaults{&BaseDefaults{}},
-  "amd64":      &ArchAMD64Defaults{&BaseDefaults{}}, // optional generic arch layer
-  "arm64":      &ArchArm64Defaults{&BaseDefaults{}},
-  "s390x":      &ArchS390XDefaults{&BaseDefaults{}},
-  "":           &BaseDefaults{},
+type MSHVDefaults struct {
+	base_defaults.BaseDefaults
 }
 
-func ResolveDefaultsProvider(hypervisor, arch string) DefaultsProvider {
-  if p, ok := providers[hypervisor+"/"+arch]; ok { return p }
-  if p, ok := providers[hypervisor]; ok { return p }
-  if p, ok := providers[arch]; ok { return p }
-  return providers[""]
-}
+// To instantiate the MSHVDefaults struct
+baseDefaults := base_defaults.NewBaseDefaults(
+  arch_defaults.NewAmd64ArchDefaults(),
+  arch_defaults.NewArm64ArchDefaults(),
+  arch_defaults.NewS390xArchDefaults(),
+)
 
-// RegisterDefaultsProvider allows hypervisor or arch-specific packages to register
-// their implementations at init time. Not concurrency-safe by design; all
-// registrations occur during Go init sequencing before any controller threads
-// resolve providers.
-func RegisterDefaultsProvider(key string, p DefaultsProvider) {
-  providers[key] = p
+// Override the default provider function for a specific VMI field
+baseDefaults.defaultEvictionStrategySetter = MshvCustomDefaultEvictionStrategySetter
+
+// Create MSHVDefaults with the overridden BaseDefaults
+mshvDefaults := mshv_defaults.MSHVDefaults{
+  *baseDefaults
 }
 ```
 
-Invocation flow (webhook / controller):
-```go
-provider := ResolveDefaultsProvider(detectedHypervisor, detectedArch)
-provider.ApplyVMISpecDefaults(&vmi.Spec, clusterConfig)
-provider.FinalizeVMI(vmi, clusterConfig)
-```
+Similarly, if a particular hypervisor-specific defaults provider, e.g., `MSHVDefaults` needs to override an architecture-specific default provider, it can do it in the same way as above.
 
 Migration steps:
 1. Introduce interface + base provider wrapping existing logic (no behavior change).
@@ -439,15 +422,21 @@ With this configuration in place, every VMI reconciled by the control plane inhe
        return nil
    }
 
-   func (d *SampleDefaults) FinalizeVMI(vmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) error {
-       // derived/status adjustments after all layers
-       return d.BaseDefaults.FinalizeVMI(vmi, cc)
-   }
+   func NewSampleDefaults() *SampleDefaults {
+      // Create the base defaults
+      baseDefaults := base_defaults.NewBaseDefaults(
+        arch_defaults.NewAmd64ArchDefaults(),
+        arch_defaults.NewArm64ArchDefaults(),
+        arch_defaults.NewS390xArchDefaults(),
+      )
 
-   func init() {
-       RegisterDefaultsProvider("sample", &SampleDefaults{&BaseDefaults{}})
-       // Example arch-specific divergence:
-       // RegisterDefaultsProvider("sample/amd64", &SampleAmd64Defaults{SampleDefaults: &SampleDefaults{&BaseDefaults{}}})
+      // Override the default provider function for a specific VMI field
+      baseDefaults.defaultEvictionStrategySetter = SampleCustomDefaultEvictionStrategySetter
+
+      // Create custom defaults provider with the overridden BaseDefaults
+      sampleDefaults := SampleDefaults{
+        *baseDefaults
+      }
    }
    ```
 
