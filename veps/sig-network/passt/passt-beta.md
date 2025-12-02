@@ -4,7 +4,7 @@
 Following [the initial proposal](./passt-migration-proposal.md), this part extends the `passt` KubeVirt integration to the Beta phase.
 The `passt` network binding is currently implemented as a [network binding plugin](https://kubevirt.io/user-guide/network/network_binding_plugins) and is in Alpha phase.
 This change migrates the passt binding into the KubeVirt core and exposes it in the API, it will also promote the feature phase from Alpha to Beta and will be conditioned by a new feature gate.
-The aim is to target KubeVirt release 1.7; however, that depends on having sufficient feedback for the Alpha phase.
+The aim is to target KubeVirt release 1.8; however, that depends on having sufficient feedback for the Alpha phase.
 The core passt binding will enable the seamless migration functionality that was introduced in the Alpha phase.
  
 The seamless migration functionality will be discontinued for passt binding plugin's users, but the plugin itself will continue to be supported.
@@ -97,7 +97,7 @@ This condition will be modified such that passt-repair would only be called if t
 
 The `passt` network binding plugin will be deprecated once the feature is GA.
 Once deprecated, it'll still be maintained for another 3 releases, per KubeVirt's deprecation policy.
-This means that the plugin code will continue to work at least until release 1.10 (assuming GA at 1.8).
+This means that the plugin code will continue to work at least until release 1.11 (assuming GA at 1.9).
 Existing users may retain existing passt plugin based VMs until then.
 Seamless migration functionality will be discontinued for `passt` binding plugin users, following the introduction of the `passt` core network binding.
 Users of the `passt` binding plugin will be encouraged to move to the core passt binding in order to enjoy the benefits of the seamless migration feature.
@@ -109,5 +109,5 @@ Users of the `passt` binding plugin will be encouraged to move to the core passt
 
 The current e2e `passt` tests will be duplicated so that, in addition to the existing set that runs with the `passt` plugin, a second variant will run VMs configured with the core `passt` binding. 
 The existing set will be labeled to control execution as follows:
-- For the first release (1.7), both sets will run as part of presubmits.
+- For the first release (1.8), both sets will run as part of presubmits.
 - In subsequent releases the plugin tests will run in the SIG Network periodic job to monitor regressions.
