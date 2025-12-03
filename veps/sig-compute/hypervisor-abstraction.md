@@ -545,9 +545,16 @@ To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) 
 - Enhance the Prow provisioner to support provisioning Azure-based Kubernetes clusters, enabling deployment and testing of KubeVirt distributions backed by MSHV.
 - Optimize CI resource usage by scheduling non-KVM hypervisor tests during the second phase of CI execution—triggered after the /lgtm label is applied—when comprehensive validation runs are performed.
 
-## Implementation History
+## Implementation Phases
 
-- 2025-Oct-7: Initial VEP draft.
+1. Refactor KubeVirt to introduce the above interfaces for the Hypervisor extension points. Implement the interface for KVM only, such that KubeVirt continues to be able to create and manage KubeVirt VMs.
+
+2. Add the `HypervisorConfiguration` CR to KubeVirt API and the `hypervisorConfiguration` field to the `KubevirtConfiguration` CR. Add the `ConfigurableHypervisor` feature gate.
+
+3. For each interface, add the MSHV implementation that is gated by the `ConfigurableHypervisor` feature gate.
+
+4. Add testing scripts to enable testing KubeVirt on an MSHV platform.
+
 
 ## Graduation Requirements
 
