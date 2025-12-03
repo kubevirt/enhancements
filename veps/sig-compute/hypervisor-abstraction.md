@@ -91,16 +91,31 @@ Cluster configuration (`spec.configuration.hypervisorConfiguration`) declares th
     }
    ```
    Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
-- **Runtime interface (`pkg/hypervisor/runtime/`)** – Provides a shared `HypervisorRuntime` contract for runtime-specific behavior such as `AdjustResources`, `HandleHousekeeping`, `GetMemoryOverhead` and `GetHypervFeatures`.
+- **Runtime interfaces (`pkg/hypervisor/runtime/`)** – Provides interfaces for tuning a running VM or interacting with the virtualization stack outside of Libvirt. 
+  1.  `DomainTuner` interface for tuning a running virtual machine.
+      ```go
+      type DomainTuner interface {
+          // Adjust memlock limit for QEMU process
+          AdjustResources(vmi *v1.VirtualMachineInstance, additionalOverheadRatio *string) error
+          // Assign housekeeping CPU threads to housekeeping cgroup
+          HandleHousekeeping(vmi *v1.VirtualMachineInstance, domain *api.Domain) error
+      }
+      ```
 
-  ```go
-  type HypervisorRuntime interface {
-    AdjustResources(vmi *v1.VirtualMachineInstance, additionalOverheadRatio *string) error
-    HandleHousekeeping(vmi *v1.VirtualMachineInstance, domain *api.Domain) error
-    GetMemoryOverhead(vmi *v1.VirtualMachineInstance, arch string, additionalOverheadRatio *string) resource.Quantity
-    GetHypervFeatures() []string
-  }
-  ```
+  2. `HypervisorCapabilityExtractor` interface for querying the hypervisor device for its capabilities.
+      ```go
+      type HypervisorCapabilityExtractor interface {
+        GetHypervFeatures() []string
+      }
+      ```
+
+  3. `VirtLauncherResourceRenderer` for computing resource requirement of the `virt-launcher` pod.
+      ```go
+      type VirtLauncherResourceRenderer interface {
+        GetMemoryOverhead(vmi *v1.VirtualMachineInstance, arch string, additionalOverheadRatio *string) resource.Quantity
+      }
+      ```
+          
 
 - **Converter library (`pkg/virt-launcher/virtwrap/converter/`)** – Adds a new `Converter` interface, which contains the main function to convert VMI to Libvirt domain.
 
@@ -144,8 +159,8 @@ This split preserves the “implement once, reuse everywhere” story without ro
 1. The proposed `Validator` interface's hypervisor-specific implementation would be resolved and invoked from within the `Admit` function of the concerned `Admitter` implementations - e.g., `VMsAdmitter`, `VMICreateAdmitter`, `VMIUpdateAdmitter`, `VMIRSAdmitter`, etc.
 2. `pkg/defaults` pulls the `DefaultsExtension` associated with the configured hypervisor to mutate the VMI and set the appropriate default values for the specific hypervisor supported on the cluster.
 3. `virt-controller` reads the configured hypervisor from `ClusterConfig`, and adds a K8s device request for the appropriate hypervisor device to the `virt-launcher` pod definition so that it can be scheduled on the node with that hypervisor device. Furthermore, it adds the hypervisor information to the command-line of the `virt-launcher`, which the `virt-launcher` pod then uses to instantiate the right implementation of the `HypervisorConverter` for converting VMI spec to Libvirt domain XML.
-4. The `virt-controller` resolves the `HypervisorRuntime` implementation to run `GetMemoryOverhead`, keeping pod-level resource calculations in sync with the mutated spec. The same runtime contract is used by virt-handler to run the `AdjustResources` function for memlock sizing and ancillary bookkeeping.
-5. When virt-launcher converts the VMI, it instantiates both the `Converter` and the `HypervisorRuntime`. The hypervisor-specific instance of the `Converter` interface leverages common conversion functions as well as hypervisor-specific functions to convert VMI to Libvirt domain.
+4. The `virt-controller` resolves the `VirtLauncherResourceRenderer` implementation to run `GetMemoryOverhead`, keeping pod-level resource calculations in sync with the mutated spec. The `DomainTuner` interface is used by virt-handler to run the `AdjustResources` function for memlock sizing and ancillary bookkeeping.
+5. When virt-launcher converts the VMI, it instantiates both the `Converter` and the Hypervisor Runtime interfaces. The hypervisor-specific instance of the `Converter` interface leverages common conversion functions as well as hypervisor-specific functions to convert VMI to Libvirt domain.
 6. The virt-launcher component will continue to leverage existing helpers for common functionality, such as setLaunchSecurity, disk configuration, and network setup. Hypervisor-specific extensions to the converter logic will extend the base implementation of these helpers to introduce specialized logic.
 
 
@@ -440,7 +455,7 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
    ```
 
-2. **Runtime** – Add `pkg/hypervisor/runtime/sample.go` implementing the `HypervisorRuntime` interface so controllers, handlers, and virt-launcher share runtime hooks.
+2. **Runtime** – Add `pkg/hypervisor/runtime/sample.go` implementing the hypervisor runtime interfaces interface so controllers, handlers, and virt-launcher share runtime hooks.
 
    ```go
    type sampleRuntime struct{}
@@ -457,10 +472,6 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    func (sampleRuntime) HandleHousekeeping(_ *v1.VirtualMachineInstance, dom *api.Domain) error {
      // assign housekeeping CPU threads to appropriate cgroup
      return nil
-   }
-
-   func init() {
-     RegisterHypervisorRuntime("sample", sampleRuntime{})
    }
    ```
 
