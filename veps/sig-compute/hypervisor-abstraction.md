@@ -151,6 +151,8 @@ This split preserves the “implement once, reuse everywhere” story without ro
             - ConfigurableHypervisor
     ```
 
+  **Backwards compability:** If the list of `hypervisorConfiguration` is empty or is not specified at all in the `KubevirtConfiguration` CR, the cluster will fallback to the default KVM hypervisor for all VMIs. The same fallback behavior will be enforced if the feature gate `ConfigurableHypervisor` is not active.
+
 - `virt-controller` reads the configured hypervisor from `ClusterConfig` when generating launcher manifests and threads that ID through the `ConverterContext` so downstream components can act consistently.
 - Each package's registry uses the configured name to locate its implementation, avoiding a monolithic factory while keeping selection logic consistent.
 
