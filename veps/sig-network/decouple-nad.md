@@ -1,0 +1,213 @@
+# VEP 106: Decouple net-attach-def from KubeVirt
+
+## Release Signoff Checklist
+
+Items marked with (R) are required *prior to targeting to a milestone / release*.
+
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [x] (R) Target version is explicitly mentioned and approved
+- [x] (R) Graduation criteria filled
+
+## Overview
+
+KubeVirt utilizes Network Attachment Definition (NAD) annotations to enforce node-level network resource requirements. When a NAD is annotated with a resource name, KubeVirt automatically adds its value as a resource request to the virtual machine's virt-launcher pod. This mechanism ensures the Kubernetes scheduler only places the VM on nodes that can provide the required network.
+Common use cases include SR-IOV, bridge network when [bridge-marker](https://github.com/kubevirt/bridge-marker) is used and [macvtap](https://github.com/kubevirt/macvtap-cni).
+
+Currently, virt-controller queries the NAD CR for every secondary network in every VM. It does so by querying the API server each time it templates a new virt-launcher pod, which occurs during initial VM startup and every migration.
+`NetworkAttachmentDefinition` is an external CRD maintained by the [k8s network plumbing WG](https://github.com/k8snetworkplumbingwg). The mentioned query is the only direct dependency that KubeVirt production code has on this external project.
+This proposal aims to eventually remove that query, in favor of an external replacement that will map the custom resources to the virt-launcher pod instead.  
+In addition, the virt-controller and virt-operator ClusterRole that currently allow it to access the NAD will eventually be removed.
+
+## Motivation
+
+- This replacement provides the architectural advantage of decoupling KubeVirt from an external dependency and simplifying code maintenance.
+- The query is currently a performance bottleneck that has been [observed](https://github.com/kubevirt/kubevirt/issues/14615) in mass VM activations. It can be alleviated by caching NAD data, thus reducing direct API calls.
+- Security will be improved by removing access permissions to the external CRD from KubeVirt's control plane components.
+
+
+## Goals
+
+- KubeVirt will no longer be aware of NetworkAttachmentDefinition objects.
+- Decrease the number of API calls required to spin-up and migrate a VM
+
+## Non Goals
+
+Removal of other multus related dependencies
+
+## Definition of Users
+
+This enhancement is intended for:
+
+- VM owners
+- Cluster Admins
+
+## User Stories
+
+- As a VM owner, I want to make sure that my VM keeps running following the upgrade. There is no change of VM spec.
+
+- As a Cluster Admin I want to reduce the scope of ClusterRoles as much as possible, so that my system would use the principle of least privilege.
+
+## Repos
+
+- https://github.com/kubevirt/kubevirt
+- https://github.com/kubevirt/kubevirtci
+
+## Design
+
+### Current Architecture
+
+KubeVirt currently has a tight coupling with NetworkAttachmentDefinition (NAD) resources. When a VM with secondary networks is launched, the virt-controller directly queries NAD CRs to extract custom resource requirements (`k8s.v1.cni.cncf.io/resourceName` annotation) and injects them into the virt-launcher pod specification, as resource requests and limits.
+
+### Proposed Architecture
+
+Instead of [querying the NAD directly](https://github.com/kubevirt/kubevirt/blob/v1.7.0-rc.0/pkg/network/multus/nad.go#L52) and [processing it in the VMI controller](https://github.com/kubevirt/kubevirt/blob/v1.7.0-rc.0/pkg/virt-controller/services/template.go#L370), an existing external component, [network-resources-injector](https://github.com/k8snetworkplumbingwg/network-resources-injector), can perform the same operation.
+This component includes a mutating webhook that automatically mutates Pods, upon creation, to inject network resource requirements from NetworkAttachmentDefinition annotations into pod resource requests and limits.
+network-resources-injector, although a standalone project, is also part of the [sriov network operator](https://github.com/k8snetworkplumbingwg/sriov-network-operator/tree/v1.6.0/bindata/manifests/webhook). It is known to run successfully in KubeVirt clusters that already include the `sriov network operator`, 
+even though it does not mutate virt-launcher pods, since the existing KubeVirt code pre-populates the pod template with the resource requests before the admission webhook operates.
+This architecture decouples KubeVirt from NAD resources, creating a cleaner separation of concerns where KubeVirt focuses on VM lifecycle management while the admission controller handles network resource injection.
+
+After 2-3 releases, the code that executes NAD querying will be removed along with the code that deploys associated RBAC rules (applies to both options below).
+
+### Deployment alternatives
+
+#### Option 1: Deprecate existing injection code and require manual deployment of network-resources-injector
+
+A new Feature Gate will be introduced named `DisableNADResourceInjection`, in preparation for NAD query code removal.
+If the FG is enabled, the VMI controller code that queries NADs and populates custom resources in the virt-launcher pod template, will be skipped.
+
+Documentation will indicate that network-resources-injector is a required dependency for KubeVirt installations that use secondary networks, and will refer users to the github repo for installation instructions.
+Documentation will provide configuration instructions for MutatingWebhookConfiguration to optimize performance, by limiting pod interception to only pods that have the `k8s.v1.cni.cncf.io/networks`.
+In addition, a deprecation notice has been [published](https://groups.google.com/g/kubevirt-dev/c/5AvvhNYAtqU) in the kubevirt-dev mailing list to let users prepare and respond.
+Relevant CI lanes will be enhanced to perform the deployment, using [official image](https://ghcr.io/k8snetworkplumbingwg/network-resources-injector:v1.8.0) clones. This approach is equivalent to KubeVirt's dependency on Multus and how it is currently deployed.
+Other deployment systems in the KubeVirt ecosystem can be considered to assist users in deployment, such as [CNAO](https://github.com/kubevirt/cluster-network-addons-operator) or [HCO](https://github.com/kubevirt/hyperconverged-cluster-operator), however this proposal's scope is limited to KubeVirt/KubeVirt only.
+
+##### Pros
+
+- Easiest option to implement and maintain
+- Does not add any code or build steps to current repo
+
+##### Cons
+
+- Breaks backward compatibility 
+
+#### Option 2: Use virt-operator to deploy network-resources-injector
+
+The network-resources-injector repo includes all the source code, build infrastructure and deployment yamls required for successful deployment of the operator.
+Built server images are available in ghcr.io, e.g. ghcr.io/k8snetworkplumbingwg/network-resources-injector:v1.8.0
+The image will be cloned and published to the official kubevirt public registry.
+Virt-operator will be enhanced to deploy and reconcile the network-resources-injector along with its deployment, service, MutatingWebhookConfiguration and RBAC.
+The manifests will be copied from the original repo and converted to go code.
+Enabling the FG (the one mentioned in option 1) will enable the following:
+
+- Skip NAD query in VMI Controller, and ClusterRole permissions in virt-operator
+- Deploy/reconcile NRI in virt-operator  
+
+##### Pros
+
+- No backward compatibility breach
+- Synchronized upgrade, where removed code is replaced with added code in a controlled manner 
+- Allows for opinionated configuration, e.g. optimize to process only virt-launcher pods. 
+
+##### Cons
+
+- Virt-operator currently only deploys internal components and does not reconcile 3rd party tools. Letting it deal with external components may architecturally be a slippery slope that may furthermore contribute to blurring responsibilities between KubeVirt, [CNAO](https://github.com/kubevirt/cluster-network-addons-operator) and [HCO](https://github.com/kubevirt/hyperconverged-cluster-operator).
+It will be hard to reason why virt-operator should deploy network-resources-injector, but not other network dependencies such as multus, sriov-operator/device-plugin, various CNIs etc.
+- Adds a significant maintenance burden to KubeVirt project.
+- NAD related RBAC rules remain in virt-operator though bound to network-resources-injector.
+- The objective of decoupling is not achieved.
+
+> [!NOTE] The rest of this document assumes Option #1
+
+## API Examples
+
+### NetworkAttachmentDefinitions
+
+**SR-IOV Network:**
+
+```yaml
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: sriov-net-attach-def
+  annotations:
+    k8s.v1.cni.cncf.io/resourceName: intel.com/sriov_net
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "sriov",
+      "vlan": 100
+    }
+```
+
+
+### Expected virt-launcher Pod (After network-resources-injector)
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: virt-launcher-testvm-xxxxx
+  annotations:
+    # KubeVirt applied annotation
+    k8s.v1.cni.cncf.io/networks: '[{"name":"sriov-net-attach-def","namespace":"default"}]'
+spec:
+  containers:
+  - name: compute
+    resources:
+      requests:
+        # network-resources-injector applied request
+        intel.com/sriov_net: "1"
+      limits:
+        # network-resources-injector applied limit
+        intel.com/sriov_net: "1"
+```
+
+## Scalability
+
+The network-resources-injector approach provides several scalability advantages over the current implementation:
+
+- Caching of NADs avoids redundant API calls.
+- By default runs in 2 replicas, but can be scaled to run in multiple replicas, thus highly available.
+
+## Update/Rollback Compatibility
+
+Existing VMs in clusters opting in with the feature gate will have to deploy network-resources-injector before upgrade, so that new VMs and migrated VMs will be able to consume custom network resources.
+
+Note that since the mechanism is replaced. There will be minor changes in the manner in which errors are handled. For example, if a referenced NAD is missing,
+The emitted error event will indicate:   
+```
+    Message: failed to create virtual machine pod: admission webhook "network-resources-injector-mutating-config.k8s.cni.cncf.io" denied the request
+```
+Whereas it currently indicates:
+```
+    Message: failed to render launch manifest: failed to locate network attachment definition default/ptp-conf
+```
+
+## Functional Testing Approach
+
+Existing e2e tests already rely on mapping of custom resources and thus will validate regression.
+
+## Implementation History
+
+<!--
+For example:
+01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
+03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
+-->
+
+## Deprecation Requirements
+
+### Alpha
+
+  Will be introduced in KubeVirt v1.8, protected by the `DisableNADResourceInjection` FG. If the FG is set, KubeVirt will **not** map custom-resources.
+  Documentation will introduce the FG, highlight the deprecation and reference the network-resources-injector installation instructions.
+  A warning will be issued by the VM/VMI API in case secondary networks exist and FG is not enabled.
+
+### Beta
+
+  Assuming option 1 is selected, Beta stage will be skipped as it entails no associated code changes.
+
+### Final Deprecation 
+
+  In release 1.10 or 1.11, if there's no significant negative feedback from users, the NAD query and RBAC code will be removed, and the FG discontinued.
