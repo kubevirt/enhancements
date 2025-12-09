@@ -57,7 +57,7 @@ Current limitations:
 - **Machine Type**: Requires q35 architecture.
 - **Device Support**: PCIe devices only, configured with VFIO passthrough.
 - **NUMA Inheritance**: VFs and mdevs inherit NUMA affinity from parent devices.
-- **Platform**: Requires KVM/QEMU version supporting `pcie-expander-bus` controller.
+- **Platform**: Requires QEMU 2.6 version that includes support for `pcie-expander-bus` controllers.
 
 ## Definition of Users
 
