@@ -193,8 +193,7 @@ type Controller struct {
 ```
 
 BusNr values for `pcie-expander-bus` controllers can be assigned starting from `254` and decrementing
-to avoid conflicts with existing controllers. `pcie-root-port` controllers can use bus numbers
-`1` through `14` per NUMA node, supporting up to 14 devices each.
+to avoid conflicts with existing controllers.
 
 According to the libvirt [documentation](https://libvirt.org/formatdomain.html#controllers):
 > pci-expander-bus and pcie-expander-bus controllers can have an optional busNr attribute (1-254).
