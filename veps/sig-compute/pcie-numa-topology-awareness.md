@@ -46,8 +46,10 @@ Current limitations:
 
 ## Non Goals
 
-- Changes in Kubernetes device/resource allocation to guarantee NUMA-aligned device assignment.
-  This VEP focuses solely on guest PCIe topology generation.
+- This VEP focuses solely on ensuring optimal guest PCIe topology generation
+  when devices are locally available. It does not address changes to Kubernetes
+  device/resource allocation for guaranteeing NUMA-aligned device allocation.
+  Dynamic Resource Allocation (DRA) will help address that in the near future.
 - Hot-plug support, as `pcie-expander-bus` controllers are [not hot-pluggable](https://github.com/qemu/qemu/blob/711a1ddf899bef577907a10db77475c8834da52f/docs/pcie.txt#L222-L228).
   This feature only applies during VM creation.
 - Support for non-PCIe devices (e.g. USB host devices).
