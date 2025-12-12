@@ -577,11 +577,13 @@ To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) 
 - Validation webhook for KubeVirt CR enforce that hypervisor configuration contains at most 1 entry, thereby enforcing only 1 supported hypervisor in the cluster.
 - Cluster-wide hypervisor configuration implemented and consumed by defaults, converter, and webhooks.
 - Basic functional tests for alternative hypervisor scheduling and domain generation.
+- Update of the `HypervisorConfiguration` value in KubeVirt CR after a KubeVirt deployment is running will not result in any change to the deployment. This setting is only to be used at the deployment time.
 
 ### Beta
 
 - Monitoring and observability hooks consumed by community dashboards.
 - Upgrade/rollback testing executed in CI.
+- Updating `HypervisorConfiguration` value in the KubeVirt CR should trigger a restart of the `virt-handler` and should allow VM management with the new hypervisor.
 
 ### GA
 
