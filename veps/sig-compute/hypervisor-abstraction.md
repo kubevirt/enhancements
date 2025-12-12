@@ -65,7 +65,7 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 
 ### Hypervisor Extension Points
 
-Cluster configuration (`spec.configuration.hypervisorConfiguration`) declares the list of supported hypervisors for the KubeVirt installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
+Cluster configuration (`spec.configuration.hypervisor`) declares the list of supported hypervisors for the KubeVirt installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
 
 - **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – We introduce a Validator interface that will define validation functions for core KubeVirt resources that have hypervisor-specific constraints, namely VM and VMI. Each hypervisor will provide its own concrete Validator to enforce rules and constraints relevant to its capabilities.
 
@@ -133,7 +133,7 @@ This split preserves the “implement once, reuse everywhere” story without ro
 
 ### Selection
 
-- `virt-config` loads cluster-wide defaults from an additive `hypervisorConfiguration` field on the `KubeVirt` CR. The `hypervisorConfiguration` field is a list of hypervisors that can be supported on the cluster. 
+- `virt-config` loads cluster-wide defaults from an additive `hypervisor` field on the `KubeVirt` CR. The `hypervisor` field is a list of hypervisors that can be supported on the cluster. 
 
   **Single-hypervisor Constraint:** In the current VEP, we will enforce that the number of elements in this list is less than or equal to 1, i.e., to enforce only a single hypervisor for the entire cluster. A future VEP will consider adding support for multiple hypervisors on the same cluster. The `name` in each hypervisor configuration entry selects the cluster-wide hypervisor implementation. Supporting multiple hypervisors in the same cluster will also necessitate the addition of a per-VMI field `hypervisor` to denote on which hypervisor the VMI has to be created.
   
@@ -142,7 +142,7 @@ This split preserves the “implement once, reuse everywhere” story without ro
     ```yaml
     spec:
       configuration:
-        hypervisorConfiguration:
+        hypervisor:
         - name: kvm
           hypervisorDevice: kvm
           virtType: kvm
@@ -151,7 +151,7 @@ This split preserves the “implement once, reuse everywhere” story without ro
             - ConfigurableHypervisor
     ```
 
-  **Backwards compability:** If the list of `hypervisorConfiguration` is empty or is not specified at all in the `KubevirtConfiguration` CR, the cluster will fallback to the default KVM hypervisor for all VMIs. The same fallback behavior will be enforced if the feature gate `ConfigurableHypervisor` is not active.
+  **Backwards compability:** If the list of `hypervisor` is empty or is not specified at all in the `KubevirtConfiguration` CR, the cluster will fallback to the default KVM hypervisor for all VMIs. The same fallback behavior will be enforced if the feature gate `ConfigurableHypervisor` is not active.
 
 - `virt-controller` reads the configured hypervisor from `ClusterConfig` when generating launcher manifests and threads that ID through the `ConverterContext` so downstream components can act consistently.
 - Each package's registry uses the configured name to locate its implementation, avoiding a monolithic factory while keeping selection logic consistent.
@@ -407,7 +407,7 @@ metadata:
   namespace: kubevirt
 spec:
   configuration:
-    hypervisorConfiguration:
+    hypervisor:
     - name: mshv
       hypervisorDevice: mshv
       virtType: hyperv
@@ -562,7 +562,7 @@ To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) 
 
 1. Refactor KubeVirt to introduce the above interfaces for the Hypervisor extension points. Implement the interface for KVM only, such that KubeVirt continues to be able to create and manage KubeVirt VMs.
 
-2. Add the `HypervisorConfiguration` CR to KubeVirt API and the `hypervisorConfiguration` field to the `KubevirtConfiguration` CR. Add the `ConfigurableHypervisor` feature gate.
+2. Add the `HypervisorConfiguration` CR to KubeVirt API and the `hypervisor` field to the `KubevirtConfiguration` CR. Add the `ConfigurableHypervisor` feature gate.
 
 3. For each interface, add the MSHV implementation that is gated by the `ConfigurableHypervisor` feature gate.
 
