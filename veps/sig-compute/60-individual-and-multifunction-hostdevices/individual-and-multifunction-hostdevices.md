@@ -110,7 +110,9 @@ spec:
         string: "mellanox.com/MT27710_FAMILY_CONNECTX4_LX"
       mdevUuid:
         string: "6fd37ed6-7ed3-49c8-a757-6c5ffaa62bf4"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:01"
+      resource.kubernetes.io/pciBusID:
         string: "0000:01:00.0"
       # Note that basePciDevice is identical in both 0000:01:00.0 and 0000:01:00.1 but different from 0000:02:00.0 and 0000:02:00.1
       basePciDevice:
@@ -121,7 +123,9 @@ spec:
         string: "mellanox.com/MT27710_FAMILY_CONNECTX4_LX"
       mdevUuid:
         string: "a83918e9-4054-491d-a233-e96f2bc57449"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:01"
+      resource.kubernetes.io/pciBusID:
         string: "0000:01:00.1"
       basePciDevice:
         string: "0000:01:00"
@@ -134,7 +138,9 @@ spec:
         string: "mellanox.com/MT27710_FAMILY_CONNECTX4_LX"
       mdevUuid:
         string: "e51f4754-192c-4f22-8972-986674f74a4b"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:02"
+      resource.kubernetes.io/pciBusID:
         string: "0000:02:00.0"
       # Note that basePciDevice is identical in both 0000:02:00.0 and 0000:02:00.1 but different from 0000:01:00.0 and 0000:01:00.1
       basePciDevice:
@@ -145,7 +151,9 @@ spec:
         string: "mellanox.com/MT27710_FAMILY_CONNECTX4_LX"
       mdevUuid:
         string: "f76501af-25f1-4a43-a007-b29203ec783e"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:02"
+      resource.kubernetes.io/pciBusID:
         string: "0000:02:00.1"
       basePciDevice:
         string: "0000:02:00"
@@ -158,7 +166,9 @@ spec:
         string: "nvidia.com/TU116_GEFORCE_GTX_1660"
       mdevUuid:
         string: "dedb11ad-c481-4c94-b985-b3bedcc513b6"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:03"
+      resource.kubernetes.io/pciBusID:
         string: "0000:03:00.0"
       basePciDevice:
         string: "0000:03:00"
@@ -168,7 +178,9 @@ spec:
         string: "nvidia.com/TU116_HIGH_DEFINITION_AUDIO_CONTROLLER"
       mdevUuid:
         string: "48fb3e3c-4e3f-40c9-811b-1130c55c53a9"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:03"
+      resource.kubernetes.io/pciBusID:
         string: "0000:03:00.1"
       basePciDevice:
         string: "0000:03:00"
@@ -178,7 +190,9 @@ spec:
         string: "nvidia.com/TU116_USB_3_1_HOST_CONTROLLER"
       mdevUuid:
         string: "6826e1cf-532f-40c7-9622-cb6a85e2928c"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:03"
+      resource.kubernetes.io/pciBusID:
         string: "0000:03:00.2"
       basePciDevice:
         string: "0000:03:00"
@@ -188,7 +202,9 @@ spec:
         string: "nvidia.com/TU116_USB_TYPEC_USCI_CONTROLLER"
       mdevUuid:
         string: "f37c55d2-80c5-4d40-a2f5-346672815088"
-      pciAddress:
+      resource.kubernetes.io/pcieRoot:
+        string: "0000:03"
+      resource.kubernetes.io/pciBusID:
         string: "0000:03:00.3"
       basePciDevice:
         string: "0000:03:00"
