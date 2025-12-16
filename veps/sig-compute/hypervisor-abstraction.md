@@ -573,18 +573,23 @@ To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) 
 
 ### Alpha
 
-- Feature gate covers configurable hypervisor
+- Feature gate protects the configurable hypervisor functionality.
 - Validation webhook for KubeVirt CR enforce that hypervisor configuration contains at most 1 entry, thereby enforcing only 1 supported hypervisor in the cluster.
-- Cluster-wide hypervisor configuration implemented and consumed by defaults, converter, and webhooks.
-- Basic functional tests for alternative hypervisor scheduling and domain generation.
 - Update of the `HypervisorConfiguration` value in KubeVirt CR after a KubeVirt deployment is running will not result in any change to the deployment. This setting is only to be used at the deployment time.
+- Cluster-wide hypervisor configuration implemented and consumed by the different KubeVirt components - admission webhooks, virt-handler and converter.
+- Basic functional tests for VMI scheduling, domain creation and lifecycle should be added for MSHV hypervisor.
+- All existing test lanes that run test cases against KVM hypervisor should pass, ensuring backwards compatibility.
 
 ### Beta
 
-- Monitoring and observability hooks consumed by community dashboards.
-- Upgrade/rollback testing executed in CI.
-- Updating `HypervisorConfiguration` value in the KubeVirt CR should trigger a restart of the `virt-handler` and should allow VM management with the new hypervisor.
+- Basic VM lifecycle should be working correctly on the MSHV hypervisor.
+- We should have an explicit list of KubeVirt features that are working correctly with the MSHV hypervisor, and a list of features that are not. The feature support on MSHV should be well documented as well as registered in the Feature Discovery mechanism proposed by the VEP [VEP 97.1 hypervisor feature discovery](https://github.com/kubevirt/enhancements/pull/122).
+- KubeVirt should support multiple hypervisors in the same cluster. A VMI-level hypervisor field should be introduced to let the user choose which hypervisor to use for creating the VMI.
+- The KubeVirt CI/CD infrastructure should already be running test lanes against the MSHV hypervisor and tests should be passing.
+- Upgrade and rollback testing should be successfully executed in CI.
+
 
 ### GA
 
-- Documentation reflects hypervisor lifecycle and contributor workflow.
+- Clear documentation should exists that describes the architecture of multi-hypervisor support in KubeVirt and walks through the contributor workflow for adding support for a new hypervisor.
+- The API change introduced to KubeVirt for multi-hypervisor support would be compatible with an out-of-tree model. Even if multi-hypervisor support is released as GA with the in-tree model, transitioning to an out-of-tree (aka plugin) model should not require further API changes.
