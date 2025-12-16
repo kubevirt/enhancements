@@ -10,7 +10,9 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-This proposal introduces a Hypervisor Abstraction Layer for KubeVirt, enabling the platform to integrate multiple hypervisor backends through a set of consistent, well-defined interfaces—while preserving the current KVM-first behavior as the default. The initial scope focuses on key areas critical to hypervisor integration, including:
+This proposal introduces a Hypervisor Abstraction Layer for KubeVirt, enabling the platform to integrate multiple hypervisor backends through a set of consistent, well-defined interfaces—while preserving the current KVM-first behavior as the default. In this VEP, the term “Hypervisor” denotes the hardware‑level virtualization engine—such as KVM or any component offering similar functionality—that provides CPU, memory, and interrupt virtualization beneath the VMM layer (e.g., QEMU).
+
+The initial scope focuses on key areas critical to hypervisor integration, including:
 
 - Device exposition and selection
 - Adjustments to Libvirt domain XML
@@ -51,7 +53,7 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 
 ## User Stories
 
-1. As a cluster administrator, I can I would like to deploy KubeVirt on a cluster with non-KVM hypervisor nodes, and have non-KVM VMs schedule only on nodes that expose its required devices.
+1. As a cluster administrator, I would like to deploy KubeVirt on a cluster with non-KVM hypervisor nodes, and have non-KVM VMs schedule only on nodes that expose its required devices.
 2. As a platform engineer, I can supply hypervisor-specific VMI spec mutations and libvirt domain adjustments without forking the virt-launcher converter.
 3. As a core maintainer, I can maintain and develop the core of KubeVirt without deep knowledge of all specific hypervisors. 
 4. As a hypervisor-specific expert I know exactly where to add hypervisor-specific validation, testing and documentation when a new hypervisor is introduced, letting me develop quickly and independently.
@@ -67,7 +69,7 @@ By limiting the scope to these foundational aspects, the design provides a flexi
 
 Cluster configuration (`spec.configuration.hypervisor`) declares the list of supported hypervisors for the KubeVirt installation, and each control-plane package exposes focused extension contracts so downstream implementations only touch the areas they actually need:
 
-- **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – We introduce a Validator interface that will define validation functions for core KubeVirt resources that have hypervisor-specific constraints, namely VM and VMI. Each hypervisor will provide its own concrete Validator to enforce rules and constraints relevant to its capabilities.
+- **Validation webhooks (`pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/`)** – We introduce a Validator interface that will define validation functions for core KubeVirt resources that have hypervisor-specific constraints, namely VM and VMI. Each hypervisor will provide its own concrete Validator to enforce rules and constraints relevant to its capabilities. Because much of the VM/VMI validation logic applies is expected to be hypervisor-agnostic, we will extract this shared logic into a base validation layer, making it available to all hypervisor‑specific validators.
 
   ```go
   type Validator interface {
@@ -91,7 +93,7 @@ Cluster configuration (`spec.configuration.hypervisor`) declares the list of sup
     }
    ```
    Only zero-value fields are set at each layer; `FinalizeVMI` handles derived/status data (CPU topology snapshot, memory status, hotplug sizing, feature dependency resolution). Existing public functions delegate to the resolved provider for backwards compatibility.
-- **Runtime interfaces (`pkg/hypervisor/runtime/`)** – Provides interfaces for tuning a running VM or interacting with the virtualization stack outside of Libvirt. 
+- **Runtime interfaces (`pkg/virt-handler/runtime/`)** – Provides interfaces for tuning a running VM or interacting with the virtualization stack outside of Libvirt. 
   1.  `DomainTuner` interface for tuning a running virtual machine.
       ```go
       type DomainTuner interface {
@@ -457,7 +459,7 @@ With this configuration in place, every VMI reconciled by the control plane inhe
    }
    ```
 
-2. **Runtime** – Add `pkg/hypervisor/runtime/sample.go` implementing the hypervisor runtime interfaces interface so controllers, handlers, and virt-launcher share runtime hooks.
+2. **Runtime** – Add `pkg/virt-handler/runtime/sample.go` implementing the hypervisor runtime interfaces interface so controllers, handlers, and virt-launcher share runtime hooks.
 
    ```go
    type sampleRuntime struct{}
