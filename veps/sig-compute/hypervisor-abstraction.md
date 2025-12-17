@@ -167,10 +167,38 @@ This split preserves the “implement once, reuse everywhere” story without ro
 5. When virt-launcher converts the VMI, it instantiates both the `Converter` and the Hypervisor Runtime interfaces. The hypervisor-specific instance of the `Converter` interface leverages common conversion functions as well as hypervisor-specific functions to convert VMI to Libvirt domain.
 6. The virt-launcher component will continue to leverage existing helpers for common functionality, such as setLaunchSecurity, disk configuration, and network setup. Hypervisor-specific extensions to the converter logic will extend the base implementation of these helpers to introduce specialized logic.
 
+## API Examples
 
-### Converter Restructuring Inside Virt-launcher
+### Cluster Configuration
 
-- The existing `pkg/virt-launcher/virtwrap/converter` package becomes a reusable library with a new `hypervisor` subpackage. Introduce a new interface named `HypervisorConverter` that exposes the main functions for converting VMI spec to Libvirt domain XML.
+```yaml
+apiVersion: kubevirt.io/v1
+kind: KubeVirt
+metadata:
+  name: kubevirt
+  namespace: kubevirt
+spec:
+  configuration:
+    hypervisor:
+    - name: mshv
+      hypervisorDevice: mshv
+      virtType: hyperv
+    developerConfiguration:
+      featureGates:
+        - ConfigurableHypervisor
+    imagePullPolicy: Always
+  imagePullPolicy: Always
+```
+
+With this configuration in place, every VMI reconciled by the control plane inherits the `mshv` behavior automatically — no per-object annotations are required.
+
+## Reference Implementation
+
+This section presents a reference implementation of how the aforementioned interfaces will be implemented for different hypervisors. The core design principle used in the reference implementations is to provide a **base implementation** for each interface - which would contain hypervisor-agnostic logic - while providing hooks to specify hypervisor-specific logic for that interface's functions. The implementation examples provided are subject to change and should not be interpreted as binding. Their purpose is to facilitate early discussion and gather feedback on the proposed design direction.
+
+### Reference Implementation of Multi-Hypervisor support in Converter
+
+- The existing `pkg/virt-launcher/virtwrap/converter` package becomes a reusable library with a new `hypervisor` subpackage. This contains the aforementioned `HypervisorConverter` interface that exposes the main functions for converting VMI spec to Libvirt domain XML.
 
   ```golang
   type Converter interface {
@@ -241,11 +269,11 @@ The `BaseConverter` module of KubeVirt was introduced to do two important things
 
 Therefore the use of a `BaseConverter` implementation with explicit configurators would make the life of a hypervisor contributor much simpler when it comes to implementing the `Converter` interface. We propose the same pattern in the `Defaults` and `Validation` modules, we will be discussed below.
 
-### Hypervisor-Specific Defaults
+### Reference Implementation of Hypervisor-Specific Defaults
 
 The defaults system is refactored to support multi-axis overrides (hypervisor, architecture, combined) without expanding large `switch` statements. The goals of the refactoring are to ensure that the custom defaults provider for a specific hypervisor should be able to re-use as much of the common defaults provider functionality as possible, while still being able to override certain parts of the common defaults provider.
 
-Interface (single contract):
+Following is the `DefaultsProvider` interface as discussed earlier in the design.
 ```go
 type DefaultsProvider interface {
   SetVirtualMachineDefaults(vm *v1.VirtualMachine, clusterConfig *virtconfig.ClusterConfig, virtClient kubecli.KubevirtClient)
@@ -314,20 +342,7 @@ Similarly, if a particular hypervisor-specific defaults provider, e.g., `MSHVDef
 
 #### Proposed Code Structure
 
-```go
-type Validator interface {
-    // Validate spec of VirtualMachine
-    ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
-
-    // Validate spec of VirtualMachineInstance
-    ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause
-    
-    // Validate hot-plug updates to VMI. For example, this would encapsulate functionality in the ValidateHotplugDiskConfiguration function.
-    ValidateHotplug(oldVmi *v1.VirtualMachineInstance, newVmi *v1.VirtualMachineInstance, cc *virtconfig.ClusterConfig) []metav1.StatusCause
-}
-```
-
-The above `Validator` interface would be implemented by the `BaseValidator` that contains validation functionality common across hypervisors and architectures.
+The aforementioned `Validator` interface would be implemented by the `BaseValidator` that contains validation functionality common across hypervisors and architectures.
 
 ```go
 type BaseValidator struct {}
@@ -400,30 +415,6 @@ The following directory will be created to host the `Validator` interface and th
 
 - Monitoring can leverage existing metrics that expose allocatable device resources (e.g., `devices_kubevirt_io_*`). No new mandatory metrics are introduced.
 
-## API Examples
-
-### Cluster Configuration
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: KubeVirt
-metadata:
-  name: kubevirt
-  namespace: kubevirt
-spec:
-  configuration:
-    hypervisor:
-    - name: mshv
-      hypervisorDevice: mshv
-      virtType: hyperv
-    developerConfiguration:
-      featureGates:
-        - ConfigurableHypervisor
-    imagePullPolicy: Always
-  imagePullPolicy: Always
-```
-
-With this configuration in place, every VMI reconciled by the control plane inherits the `mshv` behavior automatically — no per-object annotations are required.
 
 ### Adding a Hypervisor Implementation
 
@@ -508,9 +499,9 @@ With this configuration in place, every VMI reconciled by the control plane inhe
 
 4. **Admission** – Create `pkg/virt-api/webhooks/validating-webhook/admitters/hypervisor/sample.go` that exports `MutateVMI` and `Validate` functions and register them in the webhook registry.
 
-### Alternative Designs Considered
+## Alternative Designs Considered
 
-#### Plugin model for hypervisor backend integration
+### Plugin model for hypervisor backend integration
 
 The alternative design that we evaluated was a plugin model for hypervisor integration. In this approach, KubeVirt would define a set of core interfaces (similar to the ones described above), but instead of implementing these interfaces in-tree, KubeVirt would provide the mechanism for dynamically loading external implementations at runtime. Each hypervisor backend (e.g., KVM, MSHV, or future hypervisors) could supply its own plugin, packaged and maintained in a separate repository. These plugins would register with KubeVirt components (virt-launcher, virt-handler, etc.) through a well-defined contract.
 
@@ -518,7 +509,7 @@ While the plugin-based approach offers strong decoupling and extensibility, it r
 
 For the initial implementation of multi-hypervisor support, we chose an in-tree design to achieve a working solution faster. This approach allows us to validate the abstraction layer, experiment with real-world scenarios, and identify what works and what does not. With these learnings, we will be better positioned to propose a robust plugin-based architecture for multi-hypervisor support in the future.
 
-#### Alternatives to KubeVirt CR API change
+### Alternatives to KubeVirt CR API change
 
 This VEP proposes to add the `HypervisorConfiguration` field to the `KubevirtConfiguration` CRD. The rationale behind this choice was to allow the cluster admin to declare outright which hypervisor they want KubeVirt to target. Furthermore, it follows the `ArchConfiguration` field in `KubevirtConfiguration` CRD. In addition, we also considered the following alternatives to configure KubeVirt to target a specific hypervisor:
 
@@ -528,7 +519,7 @@ This VEP proposes to add the `HypervisorConfiguration` field to the `KubevirtCon
 
 - **Build-time switch**: Use build-tags to compile KubeVirt with support for a particular hypervisor. We did not choose this approach because it would require KubeVirt to build multiple versions of its components to support different hypervisors. A runtime configuration is preferable, especially given the logic for multi-hypervisor support is already in-tree.
 
-### Future Enhancements
+## Future Enhancements
 
 Full abstraction with—multi-device descriptors, richer domain defaults, hypervisor-driven validation, and alternate libvirt transports.
 
