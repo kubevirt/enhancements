@@ -231,6 +231,16 @@ This split preserves the “implement once, reuse everywhere” story without ro
   }
   ```
 
+#### Rationale behind the use of a `BaseConverter` struct
+
+The `BaseConverter` module of KubeVirt was introduced to do two important things:
+
+- Provide the common steps for building a Domain XML from VMI spec. We expect the implementation of the `Convert_v1_VirtualMachineInstance_To_api_Domain` function would live within the `BaseConverter` implementation, with all the configurators necessary to create different parts of the Domain XML as its fields. That way, when Converter is being written for a new hypervisor, the contributor not need to know all the necessary conversions needed to build a Domain XML, just which ones to override.
+
+- Provide the common (hypervisor-agnostic) implementation for each configurator. For hypervisor-specific logic, the hypervisor contributor would have to specify custom configurator implementations only for specific configurators of the `BaseConverter`.  
+
+Therefore the use of a `BaseConverter` implementation with explicit configurators would make the life of a hypervisor contributor much simpler when it comes to implementing the `Converter` interface. We propose the same pattern in the `Defaults` and `Validation` modules, we will be discussed below.
+
 ### Hypervisor-Specific Defaults
 
 The defaults system is refactored to support multi-axis overrides (hypervisor, architecture, combined) without expanding large `switch` statements. The goals of the refactoring are to ensure that the custom defaults provider for a specific hypervisor should be able to re-use as much of the common defaults provider functionality as possible, while still being able to override certain parts of the common defaults provider.
@@ -291,13 +301,6 @@ mshvDefaults := mshv_defaults.MSHVDefaults{
 
 Similarly, if a particular hypervisor-specific defaults provider, e.g., `MSHVDefaults` needs to override an architecture-specific default provider, it can do it in the same way as above.
 
-Migration steps:
-1. Introduce interface + base provider wrapping existing logic (no behavior change).
-2. Move architecture-specific functions into provider structs; keep old functions as thin wrappers (marked deprecated).
-3. Enable hypervisor resolution (defaulting to "kvm" until hypervisor config is set).
-4. Add combined providers only when divergence appears.
-5. Remove deprecated wrappers after grace period.
-
 
 ### Hypervisor-Specific Validations
 
@@ -307,7 +310,7 @@ Migration steps:
 
 - Validation is distinct from defaulting: validators never set user-facing defaults (that is handled by `DefaultsProvider`).
 - Hypervisor-specific rejection messages surface early (webhook) instead of deferring to runtime/libvirt errors.
-- Tests cover both acceptance of valid specs and explicit rejection of incompatible feature / device combos.
+- Unit tests cover both acceptance of valid specs and explicit rejection of incompatible feature / device combos.
 
 #### Proposed Code Structure
 
@@ -562,13 +565,13 @@ To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) 
 
 ## Implementation Phases
 
-1. Refactor KubeVirt to introduce the above interfaces for the Hypervisor extension points. Implement the interface for KVM only, such that KubeVirt continues to be able to create and manage KubeVirt VMs.
+1. Refactor KubeVirt to introduce the above interfaces for the Hypervisor extension points. Implement the interface for KVM only, such that KubeVirt continues to be able to create and manage KVM-based VMs.
 
 2. Add the `HypervisorConfiguration` CR to KubeVirt API and the `hypervisor` field to the `KubevirtConfiguration` CR. Add the `ConfigurableHypervisor` feature gate.
 
-3. For each interface, add the MSHV implementation that is gated by the `ConfigurableHypervisor` feature gate.
+3. For each interface, add the MSHV implementation that is gated by the `ConfigurableHypervisor` feature gate. Test the MSHV implementation of interfaces using unit tests, and basic VM lifecycle management testing using functional tests.
 
-4. Add testing scripts to enable testing KubeVirt on an MSHV platform.
+4. Expand functional tests for MSHV to cover all supported features. Integrate testing lanes for MSHV platform into KubeVirt CI/CD infrastructure and ensure that the MSHV implementation is regularly tested.
 
 
 ## Graduation Requirements
