@@ -47,10 +47,9 @@ control of their devices using Virtual Machines and Containers.
 
 ### Supported Usecases
 
-1. Devices where the DRA driver sets agreed upon attributes for resources in ResourceSlice.
-    1. PCIe Bus address for pGPU.
-    2. Mediated device uuid for vGPU.
-1. Devices have to either be of the type GPU or HostDevices.
+1. GPU Passthrough where the DRA driver publishes required attributes in device metadata files:
+   - `resources.kubernetes.io/pciBusID` for passthrough GPU (e.g., "0000:65:00.0")
+2. DRA driver must mount metadata files at `/var/run/dra-device-attributes/{claimNamespace}-{claimName}.json`
 
 ### Future Usecases
 1. NVMe devices https://github.com/kubevirt/community/issues/254
@@ -154,58 +153,11 @@ type ClaimRequest struct {
 	// device is requested
 	DeviceRequestName string `json:"deviceRequestName"`
 }
-
-type VirtualMachineInstanceStatus struct {
-	..
-	..
-	// DeviceStatus reflects the state of devices requested in spec.domain.devices.
-	// This is an optional field available only when DRA feature gate is enabled
-	// +optional
-	DeviceStatus *DeviceStatus `json:"deviceStatus,omitempty"`
-}
-
-// DeviceStatus has the information of all devices allocated spec.domain.devices
-type DeviceStatus struct {
-	// GPUStatuses reflects the state of GPUs requested in spec.domain.devices.gpus
-	// +listType=atomic
-	// +optional
-	GPUStatuses []DeviceStatusInfo `json:"gpuStatuses,omitempty"`
-	// HostDeviceStatuses reflects the state of GPUs requested in spec.domain.devices.hostDevices
-	// +listType=atomic
-	// +optional
-	HostDeviceStatuses []DeviceStatusInfo `json:"hostDeviceStatuses,omitempty"`
-}
-
-type DeviceStatusInfo struct {
-	// Name of the device as specified in spec.domain.devices.gpus.name or spec.domain.devices.hostDevices.name
-	Name string `json:"name"`
-	// DeviceResourceClaimStatus reflects the DRA related information for the device
-	DeviceResourceClaimStatus *DeviceResourceClaimStatus `json:"deviceResourceClaimStatus,omitempty"`
-}
-
-type DeviceResourceClaimStatus struct {
-	// Name is the name of actual device on the host provisioned by the driver as reflected in
-	// resourceclaim.status
-	// +optional
-	Name string `json:"name"`
-	// Attributes are the attributes for the allocated device. This information is published by the driver
-	// running on the node in resourceslice.spec.devices.basic.attributes for the allocated device.
-	// +optional
-	Attributes *DeviceAttributes `json:"attributes,omitempty"`
-	// ResourceClaimName is the name of the resource claim object used to provision this resource
-	// +optional
-	ResourceClaimName *string `json:"resourceClaimName,omitempty"`
-}
-
-type DeviceAttributes struct {
-	// PCIAddress is the PCIe bus address of the allocated device
-	// +optional
-	PCIAddress *string `json:"pciAddress,omitempty"`
-	// MDevUUID is the mediated device uuid of the allocated device
-	// +optional
-	MDevUUID *string `json:"mdevUUID,omitempty"`
-}
 ```
+
+Note: VMI status does not include device attributes as in the alpha version. Virt-launcher reads device metadata directly from files mounted
+by the DRA driver at `/var/run/dra-device-attributes/`. This avoids the need for virt-controller to watch and reconcile
+DRA objects (ResourceClaims, ResourceSlices) to populate VMI status.
 
 The first section vmi.spec.resourceClaims will have a list of devices needed to be allocated for the VM. Having this
 available as a list will allow users to use the device from this list in GPU section or HostDevices section of the
@@ -216,132 +168,78 @@ could potentially provision devices that are part of a single claim. For this re
 for the VMI (section 1) is needed instead of mentioning the resource claim in devices section
 [see Alternate Designs](#alternative-1)
 
-The second sections allows for the resource claim to be used in the spec.domain.devices section. The two uses cases
+The second section allows for the resource claim to be used in the spec.domain.devices section. The two use cases
 currently handled by the design are:
 
 1. allowing the devices to be used as a gpu device (spec.domain.devices.gpu)
 2. allowing the devices to be used as a host device (spec.domain.device.hostDevices)
 
-The status section of the VMI will contain information of the allocated devices for the VMI when the information is
-available in DRA APIs. The same information will be accessible in virt-handler and virt-launcher. This allows for device
-information to flow from DRA APIs into KubeVirt stack.
-
 Taking a GPU as an example, we can either have a passthrough-GPU as a PCI device or a virtual-GPU as a mediated device.
-The `DeviceAttributes` object will distinguish between these 2 types by populating the appropriate `PCIAddress`/`MDevUUID`
-field for the device identifier. While we haven't mentioned any other device attributes here, this object can be extended
-to hold other device information that may be relevant.
+The DRA driver publishes device attributes (e.g., `resource.kubernetes.io/pciBusID` for passthrough, `mdevUUID` for
+mediated devices) in the metadata file mounted into the virt-launcher pod.
 
 The virt-launcher will have the logic of converting a GPU device into its corresponding domain xml. For device-plugins, it
-will continue to look for env variables (current approach). For DRA devices, it will use the vmi status section to
-generate the domain xml.
+will continue to look for env variables (current approach). For DRA devices, it reads the metadata file from the
+well-known path `/var/run/dra-device-attributes/` to get device attributes and generate the domain xml.
 
-### DRA API for reading device related information
+### Device Metadata via Downward API
 
-The examples below shows the APIs used to generate the vmi.status.deviceStatuses section:
-1. the pod status has reference to the resourceClaimName, `pod.status.resourceClaimStatuses[].resourceClaimName` where
-   the name of the claim is same as `vmi.spec.resourceClaims[].Name`
-1. pod spec has node name, `pod.spec.nodeName`
-1. the resourceclaim status has device name and driver use for allocating the device,
-   `resourceclaim.status.allocation.devices[].deviceName` and `resourceclaim.status.allocation.devices[].driver`, where
-   `resourceclaim.status.allocation.devices[].request` is same as `vmi.spec.domain.devices[].gpus[].claim.request`
-1. Using node name and driver name, the resource slice for that node could be found. Using device name, the attributes
-   of the device could be found
+DRA drivers expose device attributes to workloads by mounting metadata files into pods at well-known locations. This
+allows virt-launcher to read device information directly from the filesystem without requiring virt-controller to watch
+and reconcile ResourceClaim/ResourceSlice objects.
+
+#### File Location and Format
+
+Device metadata is available at a well-known path inside the virt-launcher pod:
 
 ```
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: virt-launcher-vmi-fedora-9bjwb
-  namespace: gpu-test1
-spec:
-  containers:
-  - name: compute
-    resources:
-      claims:
-      - name: gpu-resource-claim
-  resourceClaims:
-  - name: gpu-resource-claim
-    resourceClaimTemplateName: single-gpu
-status:
-  resourceClaimStatuses:
-  - name: gpu-resource-claim
-    resourceClaimName: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28
----
-apiVersion: resource.k8s.io/v1alpha3
-kind: ResourceClaim
-metadata:
-  annotations:
-    resource.kubernetes.io/pod-claim-name: gpu-resource-claim
-  generateName: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-
-  name: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28
-  namespace: gpu-test1
-  ownerReferences:
-  - apiVersion: v1
-    blockOwnerDeletion: true
-    controller: true
-    kind: Pod
-    name: virt-launcher-vmi-fedora-9bjwb
-spec:
-  devices:
-    requests:
-    - allocationMode: ExactCount
-      count: 1
-      deviceClassName: gpu.example.com
-      name: gpu
-status:
-  allocation:
-    devices:
-      results:
-      - device: pgpu-0
-        driver: gpu.example.com
-        pool: kind-1.31-dra-control-plane
-        request: gpu
-    nodeSelector:
-      nodeSelectorTerms:
-      - matchFields:
-        - key: metadata.name
-          operator: In
-          values:
-          - kind-1.31-dra-control-plane
-  reservedFor:
-  - name: virt-launcher-vmi-fedora-9bjwb
-    resource: pods
-    uid: 8ffb7e04-6c4b-4fc7-bbaa-c60d9a1e0eaa
----
-apiVersion: resource.k8s.io/v1alpha3
-kind: ResourceSlice
-metadata:
-  generateName: kind-1.31-dra-control-plane-gpu.example.com-
-  name: kind-1.31-dra-control-plane-gpu.example.com-drr27
-  ownerReferences:
-  - apiVersion: v1
-    controller: true
-    kind: Node
-    name: kind-1.31-dra-control-plane
-spec:
-  devices:
-  - basic:
-      attributes:
-        driverVersion:
-          version: 1.0.0
-        index:
-          int: 0
-        model:
-          string: LATEST-GPU-MODEL
-        uuid:
-          string: gpu-8e942949-f10b-d871-09b0-ee0657e28f90
-        pciAddress:
-          string: 0000:01:00.0 
-    name: pgpu-0
-  driver: gpu.example.com
-  nodeName: kind-1.31-dra-control-plane
-  pool:
-    generation: 0
-    name: kind-1.31-dra-control-plane
-    resourceSliceCount: 1
----
+/var/run/dra-device-attributes/{claimNamespace}-{claimName}.json
 ```
+
+For example, for a GPU claim named `pgpu-claim` in namespace `gpu-test1`:
+
+```
+/var/run/dra-device-attributes/gpu-test1-pgpu-claim.json
+```
+
+#### Metadata File Format
+
+The metadata file contains a JSON structure with device attributes. The exact format may evolve, but the key information
+virt-launcher needs is available under `bestEffortData.attributes`. Example:
+
+```json
+{
+  "requests": [
+    {
+      "name": "pgpu-request",
+      "devices": [
+        {
+          "name": "pgpu-0",
+          "driver": "gpu.example.com",
+          "pool": "node-1-gpus",
+          "bestEffortData": {
+            "attributes": {
+              "resources.kubernetes.io/pciBusID": "0000:65:00.0",
+              "model": "A100",
+              "memory": "80Gi"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### Required Attributes for KubeVirt
+
+DRA drivers that want to support KubeVirt must publish the following attributes:
+
+| Device Type | Required Attribute | Description |
+|-------------|-------------------|-------------|
+| Passthrough GPU | `resources.kubernetes.io/pciBusID` | PCIe bus address (e.g., "0000:65:00.0") |
+
+Virt-launcher will read the metadata file and extract the appropriate attribute to generate the libvirt domain XML.
 
 ### Webhook changes
 
@@ -354,24 +252,18 @@ Note: The feature gate verification when VMI requesting DRA device will either b
 
 1. If devices are requested using DRA, virt controller needs to render the virt-launcher manifest such that
    `pod.spec.resourceClaims` and `pod.spec.containers.resources.claim` sections are filled out.
-1. virt-controller needs a mechanism to watch for virt-launcher pods, resourceclaims and resourceslices to populate the
-   `vmi.status.deviceStatus` using the steps mentioned in above section that has all the attributes (for example the
-   pciAddress for the gpu device):
-    1. The pod status has information about the allocated/reserved resourceClaim.
-    1. The resourceClaim has information about the individual requests in the claim and their allocated device names.
-    1. The resourceslice corresponding to the node running the VMI has information about the allocated device.
+2. Virt-controller does NOT need to watch ResourceClaims or ResourceSlices. Device attributes are made available to
+   virt-launcher via the downward API (metadata files mounted by the DRA driver).
 
 ### Virt launcher changes
 
-1. For devices generated using DRA, virt-launcher needs to use the vmi.status.deviceStatus to generate the domain xml
-   instead of environment variables as in the case of device-plugins
-1. The standard env variables `PCI_RESOURCE_<deviceName>` and `MDEV_PCI_RESOURCE_<deviceName>` may continue to be set
-   as fallback mechanisms but the focus here is to ensure we can consume the device PCIe bus address attribute from the
-   allocated devices in virt-launcher to generate the domain xml.
-1. Both GPU and HostDevice devices requested in the domain spec will have corresponding entries in the VMI status
-   at `status.deviceStatus.gpuStatuses[*]`/`status.deviceStatus.hostDeviceStatuses[*]`. From here, the relevant
-   device attributes can be inferred by virt-launcher (`pcieAddress` attr) to generate the domain xml with the appropriate
-   gpu/hostdev spec.
+1. For devices allocated using DRA, virt-launcher reads device attributes from metadata files mounted at the well-known
+   path `/var/run/dra-device-attributes/`. This replaces the need to read from VMI status or environment variables.
+2. Virt-launcher parses the JSON metadata file to extract the required attributes:
+   - For passthrough GPU: `bestEffortData.attributes.resources.kubernetes.io/pciBusID`
+3. Using the extracted attributes, virt-launcher generates the appropriate libvirt domain XML for GPU passthrough.
+4. For device-plugins (non-DRA), virt-launcher continues to use environment variables (`PCI_RESOURCE_<deviceName>`)
+   as in the current implementation.
 
 ## API Examples
 
@@ -416,16 +308,7 @@ spec:
       - name: pgpu
         claimName: pgpu-claim-name
         deviceRequestName: pgpu-request-name
-status:
-  deviceStatus:
-    gpuStatuses:
-    - name: pgpu
-      deviceResourceClaimStatus:
-        name: gpu-0
-        resourceClaimName: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28
-        attributes:
-          pciAddress: 0000:65:00.0
-–--
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -520,34 +403,9 @@ spec:
       name: example-pgpu
 ```
 
-The user will then wait for devices to be allocated. The device made available to the VMI will be available in the
-status:
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachineInstance
-metadata:
-  name: vmi-fedora
-  namespace: gpu-test1
-spec:
-  resourceClaims:
-  - name: gpu-resource-claim
-    resourceClaimTemplateName: single-gpu
-  domain:
-    gpus:
-    - claimName: gpu-resource-claim
-      deviceRequestName: gpu
-      name: example-pgpu
-status:
-  deviceStatus:
-    gpuStatuses:
-    - name: example-pgpu
-      deviceResourceClaimStatus:
-        name: gpu-0
-        resourceClaimName: virt-launcher-vmi-fedora-hhzgn-gpu-resource-claim-c26kh
-        attributes:
-          pciAddress: 0000:01:00.0
-```
+The user will then wait for devices to be allocated. Once the virt-launcher pod is running, it will read the device
+metadata from the mounted JSON file at `/var/run/dra-device-attributes/` and use the attributes (e.g.,
+`resources.kubernetes.io/pciBusID`) to generate the domain XML.
 
 ## Alternatives
 
@@ -643,79 +501,59 @@ to look up the env variable: `PCI_RESOURCE_<RESOURCE-CLAIM-NAME>_<REQUEST-NAME>`
 
 ## Handling Future usecase of Live Migration
 
-For the purposes of this document, live migrating a VMI with GPU design is currently out-of-scope as it is not currently
-supported in KubeVirt. However, in the future this usecase could be supported. The following are two ways in which it
-could be handled
+For the purposes of this document, live migrating a VMI with DRA devices is currently out-of-scope as it is not currently
+supported in KubeVirt. However, the downward API approach simplifies future live migration support:
 
-### Alternative 1
+1. The target virt-launcher pod will have its own DRA device allocations with corresponding metadata files mounted.
+2. The target virt-launcher reads device attributes directly from its mounted metadata files at
+   `/var/run/dra-device-attributes/`.
+3. No additional VMI status fields or virt-controller logic is required for the target pod to discover its allocated
+   devices.
 
-1. The status section of VMI has a field called MigrationState. A new field called TargetDeviceStatus will be added to
-   MigrationState struct.
-2. MigrationState struct will be populated by target virt-handler
-3. When target virt-launcher generates the domxml it will use `vmi.status.migrationState.targetDeviceStatus` to generate
-   domxml
-
-```go
-type MigrationState struct {
-    ..
-	..	
-    // DeviceStatus reflects the state of devices requested in spec.domain.devices from the 
-	// target virt-launcher pod.
-    // This is an optional field available only when DRA feature gate is enabled
-    // +optional
-    TargetDeviceStatus *DeviceStatus `json:"targetDeviceStatus,omitempty"`
-}
-```
-
-
-### Alternative 2
-
-In order to handle the live-migration usecase, the following changes are required to the VMI API:
-```go
-// DeviceStatus has the information of all devices allocated spec.domain.devices
-type DeviceStatus struct {
-    // PodName is the name of the virt-launcher that these devices belong to
-	// In case of live-migration there could be more than one pods in which case
-	// dra controller will look at the target pod and update its information
-	// the source pod information will be lost. At any give time, there should only be 
-	// one pod reflected here and true holder of device resources
-	PodName *string `json:"gpuStatuses,omitempty"`
-	// GPUStatuses reflects the state of GPUs requested in spec.domain.devices.gpus
-	// +listType=atomic
-	// +optional
-	GPUStatuses []DeviceStatusInfo `json:"gpuStatuses,omitempty"`
-	// HostDeviceStatuses reflects the state of GPUs requested in spec.domain.devices.hostDevices
-	// +listType=atomic
-	// +optional
-	HostDeviceStatuses []DeviceStatusInfo `json:"hostDeviceStatuses,omitempty"`
-}
-
-type DeviceStatusInfo struct {
-	// Name of the device as specified in spec.domain.devices.gpus.name or spec.domain.devices.hostDevices.name
-	Name string `json:"name"`
-	// DeviceResourceClaimStatus reflects the DRA related information for the device
-	DeviceResourceClaimStatus *DeviceResourceClaimStatus `json:"deviceResourceClaimStatus,omitempty"`
-}
-```
-
-Steps to make live migration work:
-1. DRA Status controller will include looking at target pods updating the above fields with device information
-2. Migration Controller currently, moves the migration from Scheduling to Scheduled when the target pod is running. At
-   this point the dra controller should have update the target pod information. Migration Controller should assert that
-   DRA status it sees is from the target pod by comparing the target pod name with podName in the status. The changes
-   should go here: https://github.com/kubevirt/kubevirt/blob/ada65cb7d99033baa3c096820027d08532e25c1e/pkg/virt-controller/watch/migration/migration.go#L624
-3. Once the above is asserted, the migration will continue to flow in the same way as it does today. When target
-   virt-handler will call SyncVMI on the virt-launcher, the virt-launcher will use the same code to convert the
-   deviceStatus into domxml.
+This design eliminates the need for complex coordination between virt-controller and virt-launcher during migration,
+as each virt-launcher pod independently reads its own device metadata.
 
 
 ## Scalability
 
-1. virt-controller will have an additional control loop, however this will use the same shared informers of virt-controller
-   resulting in 0 additional watch calls
-1. virt-controller watch events will be properly filtered such that only changes to relevant status sections of pod and
-   vmi will trigger reconcile loop. Additional metrics for the workqueue of this control loop will be exposed
-1. At max virt-controller should generate 2 additional patch calls to vmi status in a happy path
+1. Virt-controller does NOT watch ResourceClaims or ResourceSlices, avoiding additional API server load.
+2. Device attributes are read locally by virt-launcher from mounted metadata files, requiring no additional API calls.
+3. This approach scales well as the device metadata lookup is a local filesystem read operation.
+
+## Documentation
+
+The following documentation will be provided for beta:
+
+### User Guide: Consuming DRA Devices in KubeVirt VMs
+
+- Prerequisites (Kubernetes version, DRA feature gates, CRI runtime requirements)
+- Creating DeviceClass resources
+- Creating ResourceClaimTemplates
+- Configuring VirtualMachineInstance with `spec.resourceClaims`
+- Mapping claims to GPU specifications
+
+### Driver Author Guide: Making DRA Drivers KubeVirt-Compatible
+
+DRA driver authors who want their drivers to work with KubeVirt must:
+
+1. Mount device metadata files at the well-known path:
+   ```
+   /var/run/dra-device-attributes/{claimNamespace}-{claimName}.json
+   ```
+
+2. Publish the following attributes in the metadata file:
+
+   | Device Type | Required Attribute | Example Value |
+   |-------------|-------------------|---------------|
+   | Passthrough GPU | `resources.kubernetes.io/pciBusID` | `0000:65:00.0` |
+
+3. Follow the JSON structure with `bestEffortData.attributes` containing the required attributes.
+
+### Troubleshooting Guide
+
+- How to verify metadata files are mounted in virt-launcher
+- Common issues (missing attributes, file not found)
+- Debug commands for inspecting mounted files
 
 ## Update/Rollback Compatibility
 
@@ -729,25 +567,46 @@ Steps to make live migration work:
 <!--
 An overview on the approaches used to functional test this design)
 -->
-- Unit tests, new code added will have optimum unit test coverage
-- An e2e test will be added that checks for the following:
-  - API fields are only populated if feature gate is enabled
-  - Once a VMI is created with DRA devices, the right spec values are set by virt-controller in virt-launcher pod
-  - Once the resourceclaims are created and allocated, the correct status values are set
-  - deletion of VMI will lead to release of resources
-  - If GPU clusters are available in CI then e2e tests will be real with a real driver installed
-  - If GPU clusters are not available the e2e tests will be mocked
+
+### Unit Tests
+
+New code added will have optimum unit test coverage including:
+- Metadata file parsing logic
+- Attribute extraction from JSON structure
+- Domain XML generation with DRA device attributes
+
+### E2E Tests
+
+#### Alpha E2E Tests (Mock)
+- API fields are only populated if feature gate is enabled
+- Once a VMI is created with DRA devices, the right spec values are set by virt-controller in virt-launcher pod
+- Deletion of VMI will lead to release of resources
+
+#### Beta E2E Tests
+
+For beta, real driver integration is required. Either of the following drivers will be used:
+
+- **dra-example-driver**: https://github.com/kubernetes-sigs/dra-example-driver
+- **NVIDIA DRA driver**: https://github.com/NVIDIA/k8s-dra-driver
 
 ## Implementation Phases
 
+### Alpha
 1. API changes
-1. Webhook verification
-1. virt-controller changes for virt-launcher spec and VMI status fields
-1. virt-launcher changes to read from device information from vmi status
-1. Unit tests
-1. e2e tests
-1. upgrade downgrade tests
-1. scale tests
+2. Webhook verification
+3. virt-controller changes for virt-launcher pod spec (resourceClaims)
+4. virt-launcher changes to read device information from metadata files
+5. Unit tests
+6. Mock e2e tests
+
+### Beta
+7. Integrate dra-example-driver or NVIDIA DRA driver for e2e testing
+8. Create user documentation
+9. Create driver author documentation
+
+### GA
+12. Upgrade/downgrade tests
+13. Scale tests
 
 ## Feature lifecycle Phases
 
@@ -770,13 +629,25 @@ real driver is outside the scope of alpha and will be handled in beta.
 
 ### Beta
 
-- evaluate user and driver authors experience
-- feature gate turned on by default
-- e2e tests with 1 real driver implementation
-- consider additional usecases if any
-- work with kubernetes community to:
-  - find a generic solution for supporting device-plugins styles strings
-  - support discoverable pcie address and mdev UUID attributes
+**Design Changes:**
+- Use device metadata files instead of ResourceSlice lookups
+- Virt-launcher reads attributes directly from `/var/run/dra-device-attributes/`
+- Remove virt-controller dependency on ResourceClaim/ResourceSlice watching
+
+**Documentation:**
+- User guide for consuming DRA devices in KubeVirt VMs
+- Driver author guide with required attributes and file format
+- Troubleshooting guide
+
+**Testing:**
+- E2E tests with dra-example-driver or NVIDIA DRA driver
+
+**Feature Gate:**
+- Feature gate turned on by default
+
+**Evaluation:**
+- Evaluate user and driver authors experience
+- Consider additional usecases if any
 
 ### GA
 - upgrade/downgrade testing 
