@@ -522,7 +522,7 @@ For the initial implementation of multi-hypervisor support, we chose an in-tree 
 
 This VEP proposes to add the `HypervisorConfiguration` field to the `KubevirtConfiguration` CRD. The rationale behind this choice was to allow the cluster admin to declare outright which hypervisor they want KubeVirt to target. Furthermore, it follows the `ArchConfiguration` field in `KubevirtConfiguration` CRD. In addition, we also considered the following alternatives to configure KubeVirt to target a specific hypervisor:
 
-- **Use a separate CRD**: Devise a `KubeVirtHypervisorConfiguration` CRD. If it is found in the `kubevirt` namespace, use it. If not, fall back to `KVM`. This is an approach that meets our requirements, but we prefer to add the `HypervisorConfiguration` field following the precedent of `ArchConfiguration`.
+- **Use a separate CRD**: Devise a `KubeVirtHypervisorConfiguration` CRD. If it is found in the `kubevirt` namespace, use it. If not, fall back to `KVM`. This is an approach that meets our requirements, but we prefer to add the `HypervisorConfiguration` field following the precedent of `ArchConfiguration`. Adding a new CRD would also require us to introduce a new controller for it, which will not be needed when the hypervisor configuration is a part of the `KubevirtConfiguration` CRD as we can reuse its existing controller.
 
 - **Querying Worker Nodes**: Iterate over worker nodes and look for a telltale device. If no special devices are found, fall back to KVM. In this approach, since the target hypervisor is not declared outright for the cluster, it would require a `Hypervisor` field in the `VMI` CRD. In this VEP, we do not have extension of `VMI` CRD in scope.
 
