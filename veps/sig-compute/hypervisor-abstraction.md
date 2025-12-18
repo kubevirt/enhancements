@@ -579,7 +579,7 @@ To ensure robust validation of the proposed in-tree Microsoft Hypervisor (MSHV) 
 ### Beta
 
 - Basic VM lifecycle should be working correctly on the MSHV hypervisor.
-- The hypervisor configuration API should be stable and extensible, should support multiple hypervisor backends in the same cluster and be fully compatible with the long‑term goal of moving hypervisor integrations to an out‑of‑tree, pluggable model.
+- The hypervisor configuration API should be revisited and refined to ensure that it (1) is stable and extensible, (2) supports multiple hypervisor backends in the same cluster, and (3) is fully compatible with the long‑term goal of moving hypervisor integrations to an out‑of‑tree, pluggable model.
 - We should have an explicit list of KubeVirt features that are working correctly with the MSHV hypervisor, and a list of features that are not. The feature support on MSHV should be well documented as well as registered in the Feature Discovery mechanism proposed by the VEP [VEP 97.1 hypervisor feature discovery](https://github.com/kubevirt/enhancements/pull/122).
 - KubeVirt should support multiple hypervisors in the same cluster. A VMI-level hypervisor field should be introduced to let the user choose which hypervisor to use for creating the VMI.
 - The KubeVirt CI/CD infrastructure should already be running test lanes against the MSHV hypervisor and tests should be passing.
