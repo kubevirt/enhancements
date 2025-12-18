@@ -217,11 +217,11 @@ graph LR
 * Provide import/export of VirtualMachine templates in a standardized format
   (OVA/OVF)
 
-Apart from the import and export of VirtualMachine templates, these goals
-should be implemented in the 1.7.0 development cycle.
+Most of these goals should be implemented in the 1.7.0 and 1.8.0 development
+cycles, apart from the import and export of VirtualMachine templates, which
+is still kept optional.
 See [Implementation phases](#implementation-phases-for-v1alpha1-in-v170)
-and [Feature
-lifecycle phases](#feature-lifecycle-phases) for more.
+and [Feature lifecycle phases](#feature-lifecycle-phases) for more.
 
 ## Non Goals
 
@@ -232,46 +232,51 @@ lifecycle phases](#feature-lifecycle-phases) for more.
   used to break dependencies in the future)
 * Factoring out resource settings or runtime preferences (consume instance
   types and preferences in templates instead)
+* Providing a way to turn `ClusterRole` aggregation on or off
 
 ## Definition of users
 
-* Cluster admin: Manages the cluster and should be able to provide templates
-  that can be consumed by VM owners
 * VM owners: Users on the cluster which should be able to create VMs in freeform
-  or from templates. They should also be able to create templates from their
-  existing VMs or import templates from a standardized format
+  or from templates.
+* VM template owners: Users on the cluster which should be able to create
+  templates freeform or from existing VMs. They should also be able to import
+  or export templates from or to a standardized format.
+* Cluster admin: Manages the cluster and should be able to provide RBAC that
+  enables users to manage templates or restrict users to only create VMs
+  from approved templates.
 
 ## User Stories
 
-* As a VM owner, I want the ability to create a templated VirtualMachines
-  referencing a golden image
-* As a VM owner, I want the ability to create a templated VirtualMachines from
-  an existing VirtualMachine
-* As a VM owner, I want the ability to create a VirtualMachine from a templated
+* As a VM owner, I want to create a templated VirtualMachine referencing a
+  golden image
+* As a VM owner, I want to create a templated VirtualMachine from an existing
+  VirtualMachine I am allowed to access
+* As a VM owner, I want to create a VirtualMachine from a templated
   VirtualMachine that is stored in a different namespace
-* As a VM template owner, I want the ability to import templates from a
-  standardized format (OVA/OVF)
-* As a VM template owner, I want the ability to export templates to a
-  standardized format (OVA/OVF)
-* As a VM template owner or cluster admin, I want the ability to provide
-  templates that can be accessed cluster wide.
+* As a VM template owner, I want to import templates from a standardized
+  format (OVA/OVF)
+* As a VM template owner, I want to export templates to a standardized
+  format (OVA/OVF)
+* As a VM template owner, I want to provide templates that can be accessed
+  cluster wide given that a cluster admin provided the necessary RBAC
 * As a cluster admin, I want to restrict users via RBAC to only create VMs
   from approved templates
 
 ## Repos
 
+* [kubevirt/virt-template](https://github.com/kubevirt/virt-template)
 * [kubevirt/kubevirt](https://github.com/kubevirt/kubevirt)
 * [kubevirt/common-templates](https://github.com/kubevirt/common-templates)
 * [kubevirt/common-instancetypes](https://github.com/kubevirt/common-instancetypes)
 
 ## Design
 
-### Development and deployment of this feature
+### Development and deployment of this feature (v1.7.0)
 
 This design suggests developing this feature outside the core
-`kubevirt/kubevirt` repository, allowing to better organize the new code and to
-keep it separate from the core KubeVirt implementation. This means the feature
-will have its own API server and controller.
+`kubevirt/kubevirt` repository, allowing for better organization of the new code
+and to keep it separate from the core KubeVirt implementation. This means the
+feature will have its own API server and controller.
 
 This design proposes using a new `kubevirt/virt-template` repository. The
 components in this shall be named `virt-template-controller`,
@@ -293,17 +298,96 @@ currently no plugin mechanism we could use to extend the binary from outside the
 core kubevirt codebase. This also means that this feature must correspond to the
 KubeVirt release cycle.
 
-The following changes to the main repository are required:
+### Deployment through virt-operator (v1.8.0)
 
-* Add FeatureGate and/or configurable for the feature to the `KubeVirt` CRD
-* Extend `virt-operator` to allow deployment of the feature (pulling in
-  `virt-template` manifests so that it can deploy the feature.)
-* Extend `virtctl` with the commands described below (pulling in
-  dependencies and not using a plugin mechanism.)
+From a top level point of view the following changes to the kubevirt core
+repository are required:
+
+* Add `Template` FeatureGate to the `KubeVirt` CRD (deployment of the feature
+  by `virt-operator` will be guarded by this FeatureGate)
+* Add deployment-level configurable in form of an environment variable or flag
+  to `virt-operator` so deployment of the feature can be turned off, even after
+  graduating it.
+* Add periodic Prow job that vendors manifest bundles into `kubevirt/kubevirt`
+* Extend `virt-operator` to allow deployment of the feature from
+  `virt-template` manifest bundles
+
+#### Changes to virt-operator
+
+A new component under `pkg/virt-operator/resource/generate/components` needs to
+be added, which reads in the vendored manifest bundle, which is embedded
+into the `virt-operator` binary (similar to `common-instancetypes`). The
+manifest bundle should be vendored to
+`pkg/virt-operator/resource/generate/components/data` by a periodic Prow job.
+
+The new component then has to be added to `GenerateCurrentInstallStrategy`
+found in `pkg/virt-operator/resource/generate/install/strategy.go`,
+so all of its resources become part of `virt-operator`'s install strategy.
+
+Furthermore, new `Secrets` need to be added to
+`pkg/virt-operator/resource/generate/components/secrets.go`, so
+virt-operator generates the certificates required to deploy the feature.
+
+The following secrets with well known names will be required:
+
+```go
+const (
+    VirtTemplateApiCertSecretName               = "kubevirt-virt-template-api-certs"
+    VirtTemplateWebhooksCertSecretName          = "kubevirt-virt-template-webhook-certs"
+    VirtTemplateControllerMetricsCertSecretName = "kubevirt-virt-template-controller-metrics-certs"
+)
+```
+
+To honor the `Template` FeatureGate, calls to the new component and the
+creation of additional `Secrets` need to be guarded appropriately.
+
+#### Changes to virt-template
+
+A new set of Kustomization configurations and a new `Makefile` target called
+`build-installer-virt-operator` have to be added to the
+`virt-template` repository.
+
+The Kustomization configurations shall not include any actual certificates, but
+use the well known names of certificate secrets found above in the created
+`Deployments`.
+
+The following resources may be included in a manifest bundle:
+
+- `APIService`
+- `ClusterRole`
+- `ClusterRoleBinding`
+- `CustomResourceDefinition`
+- `Deployment`
+- `NetworkPolicy`
+- `Role`
+- `RoleBinding`
+- `Service`
+- `ServiceAccount`
+- `ValidatingAdmissionPolicy`
+- `ValidatingAdmissionPolicyBinding`
+- `ValidatingWebhookConfiguration`
+
+The `ClusterRoles` for `admin`, `editor`, and `viewer` aggregate to the
+default Kubernetes `admin`, `edit`, and `view` roles respectively, as other
+`ClusterRoles` provided by KubeVirt do.
+
+#### Injection of CA bundles into APIServices and ValidatingWebhookConfigurations
+
+By adding `APIServices` and `ValidatingWebhookConfigurations` from a
+manifest bundle to the installation strategy of `virt-operator`, the
+existing facilities to inject CA bundles into these resources can be reused.
+
+#### Handling of NetworkPolicies
+
+Since NetworkPolicy requirements vary across cluster configurations,
+`NetworkPolicies` included in a vendored manifest bundle should
+not be deployed by `virt-operator`. If a CSV is created through
+`csv-generator`, the vendored `NetworkPolicies` should be dumped if the
+`--dump-network-policies` flag is set.
 
 ### template.kubevirt.io/v1alpha1
 
-#### VirtualMachineTemplate
+#### VirtualMachineTemplate (v1.7.0)
 
 A new `template.kubevirt.io` APIGroup will be introduced with an initial
 `v1alpha1` version being provided. The APIGroup will provide the
@@ -316,9 +400,6 @@ All features supported by the `VirtualMachine` CRD will be supported in the
 template, i.e. you can also consume instance types and preferences in a
 template. Placeholders, such as `${NAME}`, are replaced with specific values
 when the template is processed.
-
-Deployment of the whole template feature will sit behind the `Template`
-FeatureGate in core KubeVirt.
 
 This initial version focuses on the use cases described above of the simple VM
 template based on a golden image and the creation of templates from existing
@@ -419,7 +500,7 @@ spec:
     generate: expression
 ```
 
-#### process subresource API
+#### process subresource API (v1.7.0)
 
 A new` /process` subresource API will be implemented on
 `VirtualMachineTemplates` to allow simple server-side processing of templates.
@@ -430,14 +511,14 @@ through lightweight clients such as the console UI found on OKD and OpenShift.
 To provide this and other subresource APIs a `virt-template-api` service needs
 to be deployed and registered accordingly.
 
-#### create subresource API
+#### create subresource API (v1.7.0)
 
 A new` /create` subresource API will be implemented on `VirtualMachineTemplates`
 to enable easy server-side creation of VMs from templates. By adding this
 subresource API, cluster admins can restrict users via RBAC to only create VMs
 from approved templates.
 
-#### virtctl template process ${VirtualMachineTemplateName}
+#### virtctl template process (v1.7.0)
 
 A new process subcommand will be introduced to the `virtctl` binary, again very
 much influenced by the `oc process` command provided downstream by OKD and
@@ -459,7 +540,22 @@ achieved by vendoring the logic that is hosted in the external
 `kubevirt/virt-template` repository into `kubevirt/kubevirt` for use within
 `virtctl`.
 
-#### VirtualMachineTemplateRequest
+#### virtctl template convert (v1.7.0)
+
+A new `convert` subcommand will be introduced to the `virtctl` binary below
+the `template` root command. This will allow users to convert an existing
+OpenShift `Template` into a `VirtualMachineTemplate`.
+
+```shell
+$ virtctl convert mytemplate
+$ virtctl template process my-template -p NAME=my-new-vm | kubectl create -f -
+```
+
+This command works by moving a single object, which has to be a
+`VirtualMachine`, from an OpenShift `Template` into a native
+`VirtualMachineTemplate`. Parameters are transferred as-is.
+
+#### VirtualMachineTemplateRequest (v1.7.0)
 
 A `VirtualMachineTemplateRequest` CRD will be introduced in the
 `template.kubevirt.io` APIGroup. This CRD will allow for an existing
@@ -506,10 +602,10 @@ At a later stage (presumably v1beta1), this CRD could also be used to control
 the import of templates from standardized storage formats (such as OVA/OVF) into
 a cluster.
 
-**Important note**: The `v1alpha1` implementation does not address sealing VMs
-or removing sensitive information such as SSH host keys, machine ID files or
-user data. It is the user's responsibility to remove sensitive information from
-a VM before creating a template from it.
+**Important note**: The `v1alpha1` (v1.7.0 and v1.8.0) implementation does not
+address sealing VMs or removing sensitive information such as SSH host keys,
+machine ID files or user data. It is the user's responsibility to remove
+sensitive information from a VM before creating a template from it.
 
 ##### Sequence diagram
 
@@ -624,7 +720,7 @@ status:
       type: Ready
 ```
 
-#### virtctl template create
+#### virtctl template create (v1.7.0)
 
 A new `create` subcommand will be introduced to the `virtctl` binary below
 the `template` root command. This will allow users to generate an
@@ -642,7 +738,7 @@ triggers the controller. This asynchronous process ensures that complex
 operations like snapshotting and cloning are handled robustly by the cluster
 rather than by a client-side command.
 
-#### common-templates - Preview branch
+#### common-templates - Preview branch (v1.7.0)
 
 The proposed feature will be prototyped by adapting the existing
 `kubevirt/common-templates` project to use the new `VirtualMachineTemplate` CRD,
@@ -661,20 +757,35 @@ If this proposal is successful, the `kubevirt/common-templates` project would
 eventually be adapted to the `VirtualMachineTemplates` found in the new
 `kubevirt/virt-template` repository.
 
-### template.kubevirt.io/v1beta1
+See [WIP: Convert to KubeVirt VirtualMachineTemplates](https://github.com/kubevirt/common-templates/pull/696)
+for the work that was done during the v1.7.0 cycle.
 
-#### Extended status in VirtualMachineTemplates
+#### Extended status in VirtualMachineTemplates (v1.8.0)
 
-To better keep track of the resources associated with a `VirtualMachineTemplate`
-the status of the CRD could be extended with a list of volumes on which the
-template is dependent. The list should also contain the
-`Ready` condition of the volumes.
+To better keep track of the resources associated with a `VirtualMachineTemplate`,
+the status of the CRD should be extended with a list of volumes that the
+template depends on. The list should also contain the `Ready` condition of
+the volumes.
 
 This function requires that the `VirtualMachineTemplate` controller evaluates
 all `DataVolumeTemplates` in a specific template and constructs the status from
 all volumes that it can resolve.
 
-#### Import/Export of VirtualMachineTemplates in standardized format
+Furthermore, the controller can dry-run process and create a
+`VirtualMachine` from a `VirtualMachineTemplate`, to verify that processing
+of the template will result in a valid `VirtualMachine` definition. To reflect
+a failing dry-run, the `Ready` condition of the template can be set to `False`.
+
+#### Import of subcommands into `virtctl` (v1.8.0)
+
+In the v1.7.0 development cycle, several `virtctl` commands were implemented
+in an additional binary called `virttemplatectl`. This binary uses the same
+internal structure as `virtctl`, so in the v1.8.0 cycle, these new commands
+can be imported into `virtctl`.
+
+### template.kubevirt.io/v1beta1
+
+#### Import/Export of VirtualMachineTemplates in standardized format (optional in v1.8.0, full support in v1.9.0)
 
 As previously mentioned, to make VM templates reusable, an import and export
 mechanism is required. Ideally, this mechanism should use a common and
@@ -764,7 +875,9 @@ Functional tests for the proposed feature should be carried out in its separate
 repository, covering all important functional aspects.
 
 In the core KubeVirt repository, functional tests are only required for the
-feature's deployment by `virt-operator`.
+feature's deployment by `virt-operator`. This comprises a basic test of the
+`virt-template` feature after it was deployed by `virt-operator` to ensure
+that the deployment was successful.
 
 This approach helps to keep the number of functional tests added to the core
 repository to a minimum.
@@ -776,25 +889,46 @@ repository to a minimum.
 * Phase 2: Port over existing `common-templates` to the new
   `VirtualMachineTemplate` CRD
 * Phase 3: Implementation of the `VirtualMachineTemplateRequest` feature
-* Phase 4: Implementation of the new `virtctl` commands (Optional, may not
-  be merged yet)
+* Phase 4: Implementation of the new `virtctl` commands (as
+  `virttemplatectl` outside `virtctl` first)
 
-## Implementation Phases (for v1beta1 in v1.8.0)
+## Implementation Phases (for v1alpha1 in v1.8.0)
 
 * Phase 1: Implementation of the new `virtctl` commands (Continued)
-* Phase 2: Integration of the feature within the core KubeVirt repository
-* Phase 3: Implementation of the import and export feature (OVA/OVF)
+* Phase 2: Extended status tracking in `VirtualMachineTemplates`
+* Phase 3: Integration of the feature within the core KubeVirt repository
+  into `virt-operator`
+* Phase 4: Optional implementation of the import and export feature (OVA/OVF)
+
+## Implementation Phases (for v1beta1 in v1.9.0)
+
+* Phase 1: Continued implementation of the import and export feature (OVA/OVF)
+* Phase 2: Enabling the `Template` FeatureGate by default
+
+## Implementation history
+
+### v1.7.0
+- Set up new [subproject](https://github.com/kubevirt/virt-template) with
+  kubebuilder and bootstrapped the `VirtualMachineTemplate` CRD
+- [Implemented](https://github.com/kubevirt/virt-template/pull/11) the
+  `VirtualMachineTemplateRequest` feature
+- Implemented the `process`, `convert` and [`create`](https://github.com/kubevirt/virt-template/pull/20)
+  commands in `virttemplatectl`
+- Created the first [`v0.1.0`](https://github.com/kubevirt/virt-template/releases/tag/v0.1.0)
+  release of kubevirt/virt-template
+- Created [draft PR](https://github.com/kubevirt/common-templates/pull/696) to
+  port `common-templates` to `VirtualMachineTemplates`:
 
 ## Feature lifecycle Phases
 
 ### Alpha
 
-template.kubevirt.io/v1alpha1 in v1.7.0
+template.kubevirt.io/v1alpha1 in v1.7.0 and v1.8.0
 
 ### Beta
 
-template.kubevirt.io/v1beta1 in >=v1.8.0
+template.kubevirt.io/v1beta1 in >=v1.9.0
 
 ### GA
 
-template.kubevirt.io/v1 in >=v1.9.0
+template.kubevirt.io/v1 in >=v1.10.0
