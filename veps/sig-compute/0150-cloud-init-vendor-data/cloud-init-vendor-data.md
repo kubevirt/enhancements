@@ -3,7 +3,6 @@
 ## Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
-
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements](https://github.com/kubevirt/enhancements/issues/150)
 - [ ] (R) Target version is explicitly mentioned and approved
 - [ ] (R) Graduation criteria filled
@@ -20,7 +19,7 @@ The cloud-init NoCloud datasource supports four types of data:
 - **network-data**: Network configuration (already supported)
 - **vendor-data**: Vendor/operator-provided configuration (**not yet supported**)
 
-Currently, Currently, KubeVirt exposes user-data, network-data, and auto-generates meta-data. Only vendor-data remains unsupported, which limits the ability of cloud providers and platform operators to inject their own configuration without modifying user-data.
+KubeVirt currently supports user-data and network-data and auto-generates meta-data. However, vendor-data is not supported, limiting cloud providers and platform operators from injecting custom configuration without modifying user-data.
 
 Cloud-init is designed to merge vendor-data with user-data, allowing operators to provide defaults that users can override. Without vendor-data support, operators must either:
 1. Ask users to include platform-specific configuration in their user-data
@@ -36,20 +35,25 @@ Both alternatives are suboptimal and go against cloud-init's design philosophy.
   - Base64 encoded (`vendorDataBase64`)
   - Kubernetes Secret reference (`vendorDataSecretRef`)
 - Include vendor-data file in the generated NoCloud ISO
+- Implement resource limits (maximum entry counts and value lengths) to prevent abuse
 - Maintain full backward compatibility
 
 ## Non Goals
 
-- Adding vendor-data support to ConfigDrive datasource (can be done in a separate VEP)
+- Adding vendor-data support to ConfigDrive datasource. ConfigDrive support can be added in a separate VEP if there is demand. The NoCloud datasource is more commonly used in KubeVirt environments, and keeping this VEP focused on NoCloud allows for a simpler, more targeted implementation.
 - Merging vendor-data with user-data at the KubeVirt level (cloud-init handles this internally)
 - Validating vendor-data content format
 - Supporting vendor-data for other cloud-init datasources
 
 ## Definition of Users
 
-- **Platform operators**: Organizations running KubeVirt clusters who need to inject baseline configuration across all VMs (monitoring agents, security policies, SSH keys, etc.)
-- **Cloud providers**: Providers offering KubeVirt-based virtualization services who need to provide cloud-specific defaults
-- **End users**: VM owners who continue using user-data for their application-specific configuration
+- **Platform operators**: Organizations running KubeVirt clusters who need to inject baseline configuration across all VMs (monitoring agents, security policies, SSH keys, etc.). These operators control the cluster infrastructure and use vendor-data to provide platform-level defaults.
+
+- **Cloud providers**: Providers offering KubeVirt-based virtualization services who need to provide cloud-specific defaults. Similar to platform operators, they control the service infrastructure and use vendor-data to integrate VMs with platform services.
+
+- **End users**: VM owners who create and manage VirtualMachine resources. End users typically do not directly interact with vendor-data; instead, they benefit from platform-level configuration provided by operators through vendor-data while focusing their user-data on application-specific needs. In multi-tenant scenarios, namespace-level secrets can allow controlled vendor-data injection.
+
+The typical relationship is: platform operators/providers define vendor-data that applies to VMs, while end users define user-data for their applications. Cloud-init merges these configurations with user-data taking precedence for conflicts.
 
 ## User Stories
 
@@ -100,6 +104,19 @@ type CloudInitNoCloudSource struct {
 3. **Secret mounting**: Update `pkg/virt-controller/services/rendervolumes.go` to mount `VendorDataSecretRef` as a volume in the virt-launcher pod
 
 4. **ISO generation**: When generating the NoCloud ISO, include `vendor-data` file alongside existing `user-data`, `meta-data`, and `network-config` files
+
+### Entry Limits and Validation
+
+Following the design pattern established in VEP #100 (custom metadata support), this VEP implements resource limits to protect cluster resources and prevent abuse:
+
+- **Content size limit**: Maximum total size of vendor-data content is **256 KB** (262,144 bytes)
+- **Enforcement**: Limits are enforced during API validation, preventing VMI creation if vendor-data exceeds the threshold
+- **Limit scope**: 
+  - Applies to the raw content size of vendor-data (inline string, base64-decoded content, or secret value)
+  - Measured after base64 decoding but before ISO generation
+  - Consistent with user-data size limits already enforced in KubeVirt
+
+**Rationale**: Unlike VEP #100's metadata fields which use a key-value map structure (hence the 16-key limit), vendor-data is free-form YAML/text content similar to user-data. Therefore, a content size limit (matching existing user-data limits) is more appropriate than key-count limits. This provides resource protection while allowing operators flexibility to provide comprehensive platform configuration.
 
 ## API Examples
 
@@ -241,10 +258,16 @@ Platform configuration could be applied after VM boot using external tools.
 
 ## Scalability
 
-No scalability concerns. The vendor-data is processed identically to user-data, which is already proven at scale in production KubeVirt deployments. The data is:
-- Stored in etcd as part of the VM spec (same as user-data)
-- Mounted in virt-launcher pod (same as user-data secrets)
-- Written to ISO at VM start time (same as user-data)
+The vendor-data feature has minimal scalability impact and includes resource protection mechanisms:
+
+- **Content size limits**: The 256 KB maximum size for vendor-data prevents resource exhaustion from excessively large payloads. This matches existing user-data size limits in KubeVirt.
+- **API validation**: Size limits are enforced during API validation, preventing VMI creation if vendor-data exceeds the threshold.
+- **Processing overhead**: Vendor-data is processed identically to user-data, which is already proven at scale in production KubeVirt deployments. The data is:
+  - Stored in etcd as part of the VM spec (same as user-data)
+  - Mounted in virt-launcher pod (same as user-data secrets)
+  - Written to ISO at VM start time (same as user-data)
+- **Performance impact**: The 256 KB size limit ensures cloud-init processing remains performant and does not impact VM startup times.
+- **Resource protection**: Size limits protect against both accidental misconfiguration and intentional abuse of the vendor-data feature.
 
 ## Update/Rollback Compatibility
 
@@ -257,11 +280,23 @@ This change is fully backward compatible:
 
 ### Rollback Safety
 
-If KubeVirt is rolled back to a version without vendor-data support:
-- VMs with vendor-data specified will have those fields ignored
-- The vendor-data file will not be included in the ISO
-- VMs will still boot and function (just without vendor-data)
-- No data loss or VM failures
+Rolling back KubeVirt to a version without vendor-data support is safe and causes graceful degradation:
+
+**What happens on rollback:**
+- VMs with vendor-data specified in their spec will have those fields ignored by the older KubeVirt version
+- The vendor-data file will not be included in the generated NoCloud ISO
+- VMs will boot and function normally, but without vendor-data configuration applied
+- No VM failures, crashes, or data loss will occur
+
+**Why this is safe:**
+- vendor-data is optional configuration; its absence does not prevent VMs from starting
+- Cloud-init gracefully handles missing vendor-data (it simply skips that merge step)
+- VMs retain their user-data, network-data, and meta-data configuration
+- After upgrade back to a vendor-data-capable version, vendor-data will be processed again
+
+**Recommendation:**
+- Platform operators should be aware that vendor-data-dependent configuration (e.g., mandatory monitoring agents) will not be applied to VMs during rollback
+- Consider testing rollback scenarios if vendor-data provides critical platform functionality
 
 ### Upgrade Path
 
@@ -310,23 +345,29 @@ No special upgrade considerations. The feature is additive and optional.
 
 ## Graduation Requirements
 
-### Alpha
-
-- [x] Implementation complete with all three input methods (inline, base64, secret ref)
-- [x] Unit tests for vendor-data handling
-- [x] Unit tests pass
-- [ ] VEP approved and merged
-- [ ] Code PR approved and merged
-
-### Beta
-
-- [ ] Functional e2e tests added and passing
-- [ ] Documentation updated in kubevirt/user-guide
-- [ ] Used in production by at least one adopter
-- [ ] No breaking changes or bug fixes required since Alpha
-
 ### GA
 
+**Rationale for direct GA graduation:**
+
+Following the precedent set by VEP #100 (custom metadata support), this enhancement proposes direct GA graduation without an Alpha/Beta phase. The rationale includes:
+
+- **Simple, additive API changes**: Three optional fields (`VendorData`, `VendorDataBase64`, `VendorDataSecretRef`) following established patterns for user-data and network-data
+- **Built-in resource protection**: Content size limits (256 KB maximum) enforced through API validation
+- **Low risk nature**: 
+  - Optional fields with no impact on existing VMs
+  - Identical processing pattern to user-data (proven at scale)
+  - Graceful rollback behavior (VMs boot without vendor-data)
+- **Well-understood functionality**: Vendor-data is a standard cloud-init feature with established semantics
+- **No feature gate needed**: Simple extension of existing cloud-init support; no experimental behavior or complex interactions
+
+**GA Requirements:**
+- [x] Implementation complete with all three input methods (inline, base64, secret ref)
+- [x] Content size validation enforced in API (256 KB limit)
+- [x] Unit tests for vendor-data handling pass
+- [ ] VEP approved and merged
+- [ ] Code PR approved and merged
+- [ ] Functional e2e tests added and passing
+- [ ] Documentation updated in kubevirt/user-guide
 - [ ] Stable for at least 2 releases
 - [ ] No breaking changes required
 - [ ] Positive feedback from adopters
