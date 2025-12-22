@@ -18,7 +18,9 @@ Some users wish to shut down running machines to free up resources, but the virt
 
 ## Goals
 
-Add VM hibernation functionality to kubevirt
+- Add VM hibernation functionality to kubevirt(Using the save restore method while retain the possibility of using the suspendToDisk method)
+- Introduce a new runStrategy `Hibernate` to trigger vm Hibernate.
+- Use utility volume scheme to save memory data to a file system type PVC through a controller-managed approach
 
 ## Non Goals
 
@@ -26,11 +28,13 @@ Any modification to the hotplug and hotunplug volume process.
 
 ## Definition of Users
 
-End Users: these are people/programs that have permission to update Virtual Machine specifications
+**KubeVirt Controllers:** Primary users with appropriate service account permissions to trigger vm Hibernate.
+
+**Kubernetes Administrators/Operators:** Initiate operations through higher-level APIs that trigger Hibernate.
 
 ## User Stories
 
-A user can edit vm to Hibernate a vm which save memory to a pvc and stop vm. User can edit vm to restore vm form the pvc.
+A user who can edit vm object in k8s. They can edit vm runstrategy to Hibernate a vm which save memory to a pvc and stop vm. As will as user can restore vm form the pvc.
 
 ## Repos
 
@@ -60,35 +64,23 @@ Also we need some new `VirtualMachinePrintableStatus`:Hiberating, hiberated, Res
 
 ### Hibernation and Wake Strategy
 
-The hibernation configuration includes the method, timeout, and the PVC used.  Also we should have a
+The hibernation configuration includes the method, timeout, and the PVC used.  Also we should have a cluster-level default config.
 
-These should be at the VM level, so it is not suitable to be placed in the KubeVirt CR. There are two approaches: one is to add it to `vm.spec`, the other is to add it as annotations to the VM.
-
-**Method 1:** Add `HibernateStrategy` and `WakeStrategy` in `vm.spec` to specify hibernation-related configuration.
+Add `HibernateStrategy` and `StartStrategy` in `vm.spec` to specify hibernation-related configuration.
 
 ```yaml
 HibernateStrategy:
   mode: save
   timeoutSeconds: 500
   claimName: XXX-PVC
-WakeStrategy:
-  enabled: false 
-```
-
-**Method 2:** Add control annotations to the VM.
-
-```yaml
-kubevirt.io/hibernation-strategy: save
-kubevirt.io/hibernation-strategy-timeout-seconds: 500s
-kubevirt.io/hibernation-strategy-claim-name:
-kubevirt.io/WakeStrategy-strategy: enabled
+StartStrategy: restore
 ```
 
 If the `save` method is used and `claim name` is not set, KubeVirt will create a PVC based on the VM's memory size and render the corresponding strategy fields. If no `hibernation method` is set, the default is the `save` method.
 
-We need to consider scenarios where VM is hiberated but we want to start it directly using the start interface. Therefore, we hope to expose an interface to control this `WakeStrategy`. If `WakeStrategy` is not set, the default is the `restore` method. We need to set `WakeRategy.enabled` to false to trigger start a vm directly using the start interface.
+We need to consider scenarios where VM is hiberated but we want to start it directly using the start interface. Therefore, we hope to expose an interface to control this. We have found that there is already a StartStrategy interface available now, If `StartStrategy ` is not set, If we start vm, vm will directly using the start interface. We need to set `StartStrategy` to`restore` to trigger restore a vm  using the `restore`interface. 
 
-### cluster-level config
+#### cluster-level config
 
 We also need cluster-level config, which not only reduces the workload of additional configuration in each virtual machine, but also serves as a fallback mechanism to ensure that the Hibernate process always has a timeout period.
 
@@ -101,8 +93,7 @@ spec:
       HibernateStrategy:
         mode: save
         timeoutSeconds: 500
-      WakeStrategy:
-        enabled: false 
+      StartStrategy: restore
 ```
 
 ### VM Status
@@ -113,10 +104,11 @@ Just like memorydump add the `VirtualMachineHibernationStatuses` field to the VM
 VirtualMachineHibernationStatuses:
   Phase:
   Claim:
-  FileName:
+  filename:
   StartTimestamp:
   EndTimestamp:
-  Message:
+  // Empty if Hibernate succeed, contains reason otherwise
+  Reason:
 ```
 
 The `Phase` field references the `dumpmemory` package and includes:
@@ -124,35 +116,37 @@ The `Phase` field references the `dumpmemory` package and includes:
 ```go
 const (
     HibernationPhaseInitial              HibernationPhase = "Initial"
-    HibernationPhaseAssociating          HibernationPhase = "Associating"
+    HibernationPhasepvcCreate            HibernationPhase = "pvcCreate"
+    HibernationPhaseReadyToHotPlug       HibernationPhase = "ReadyToHotPlug"
+    HibernationPhaseHotPlugFinished      HibernationPhase = "HotPlugFinished"
     HibernationPhaseInProgress           HibernationPhase = "InProgress"
     HibernationPhaseCompleted            HibernationPhase = "Completed"
     HibernationPhaseFailed               HibernationPhase = "Failed"
 )
 ```
 
-Also we need resume from Hibernated(instead of restore already used). Add `VirtualMachineResumeStatuses`field to the VM's status:
+Also we need resume from Hibernated(instead of restore already used). Add `VirtualMachineRestoreStatuses`field to the VM's status:
 
 ```
-VirtualMachineResumeStatuses:
+VirtualMachineRestoreStatuses:
   Phase:
-  Claim:
-  FileName:
   StartTimestamp:
   EndTimestamp:
-  Message:
+  // Empty if restore succeed, contains reason otherwise
+  Reason:
 ```
 
 The `Phase` field is also references the `dumpmemory` package and includes:
 
-    const(
-        ResumePhaseRestoreAssociating   ResumePhase = "Associating"
-        ResumePhaseRestoreInProgress    ResumePhase = "InProgress"
-        ResumePhaseRestoreFailed        ResumePhase = "Failed"
-        ResumePhaseRestoreCompleted     ResumePhase = "Completed"
-        ResumePhaseRestoreUnmounting    ResumePhase = "Dissociating"
-        ResumePhaseClean                ResumePhase = "Cleaned"
-    )
+```go
+const(
+    ResumePhaseRestoreInitial       ResumePhase = "Initial"    
+    ResumePhaseRestoreInProgress    ResumePhase = "InProgress"
+    ResumePhaseRestoreFailed        ResumePhase = "Failed"
+    ResumePhaseRestoreCompleted     ResumePhase = "Completed"
+    ResumePhaseClean                ResumePhase = "Cleaned"
+)
+```
 
 ### VMI Status
 
@@ -160,79 +154,105 @@ In my opinion, we can talk about this later.
 
 ---
 
+### workflows
+
 ### 1. Hibernation
+
+VirtualMachineHibernationStatuses can convert with below workflow.
+
+![image-20251222104815082](image-20251222104815082-17663717006731.png)
 
 #### Step 1: Trigger & Initial Check
 
-1. The user triggers hibernation by setting `spec.runStrategy` of the VM to `Hibernate`.
+1. The user triggers hibernation by setting `spec.runStrategy` of the VM to `Hibernate`. vm.status.HibernationStatuses create whith phase `Initial`. and check pvc is ready to use, if pvc is not suitable for use, conntroller will create event.
 
-2. If PVC is not specified, create PVC.
+   > The pvc size should largger than vm memory size + 512MB (I think we can talk about how to define pvc size more deeper)
 
-3. Generate the corresponding `FileName`.
-
-4. Render `VirtualMachineHibernationStatuses` , FileName should related to the vmi, may FileName  hash(vmi.uuid):
-
-   ```yaml
-   HibernationStatuses:
-     Phase: Initial-->associating
-     Claim: PVCname
-     FileName: filename
-   ```
+   > If PVC is not specified in spec.HibernateStrategy, HibernationStatuses phase to `pvcCreate`.and create a pvc(vm memory size + 512MB). 
+   >
+   > virt-controller should set ownerReferences of PVC with vm.
+   
+2. Add StartStrategy `restore` on vm.spec.
 
 #### Step 2: Hot Mount PVC
 
-1. Use hot-plug logic (similar to current `dumpmemory`; in the future may use "[Utility Volumes](https://github.com/kubevirt/enhancements/pull/91)") to mount the PVC to the `fileName` location.
+1. While it is confirmed that PVC can be mounted, controller add utilityVolumes spec on vmi.
 
-   `VirtualMachineHibernationStatuses.phase` transitions from `associating` to `inprogress`.
+   ```
+     # NEW FIELD:
+     utilityVolumes:
+       - name: Hibernate-f35782b2bd8c578bea6caf2087efa7e8
+         persistentVolumeClaim:
+           claimName: data-pvc
+         type: Hibernate
+   ```
+   
+2. When pvc has hotpluged to launcher pod, virt-handler sync vmi and exec save domain.
 
 #### Step 3: Perform Hibernation (currently only supports `virsh save`)
 
-1. Use the `save` interface to write memory to fIie `VirtualMachineHibernationStatuses.FileName`.
+1. Use the `save` interface to write memory to fIie with name (restroe-vm.name-timestamp)  and save file name to HibernationStatuses.
 2. Record `Phase.StartTime` at the beginning.
-3. Upon successful hibernation, record `Phase.StartTime`, and update `Phase` to `Completed`. If failed, update phase to `Failed`.
+3. Upon successful hibernation, record `Phase.StartTime`, and update `Phase` to `Completed`. If failed, update phase to `Failed` and set failed reason.
 
 #### Step 4: Cleanup
 
-1. Sequentially clean up the launcher pod and VMI.
+1. Sequentially clean up the launcher pod and VMI. Keep VirtualMachineHibernationStatuses(include pvc info)  in vm status.
+1. If hibernate failed, just remove StartStrategy `restore` on vm.
 
 ---
 
 ### 2. Restore
 
+VirtualMachineRestoreStatuses  can convert with below workflow.
+
+![image-20251222154631247](image-20251222154631247.png)
+
 #### Step 1: Trigger
 
-1. The user sets VM `spec.runStrategy` to `always` or other, and `WakeStrategy.enabled` to `true` or .
+1. Set vm `spec.runStrategy` to `always` or other, and `WakeStrategy.mode` to `restore` .
 
-#### Step 2: Hot Mount PVC
+   > webhook: If  pvc name dosen't seva in vm.status.HibernationStatuses, virt-api should deny the update.
 
-1. Use hot-plug logic (similar to current `dumpmemory`; in the future may use "[Utility Volumes](https://github.com/kubevirt/enhancements/pull/91)") to mount the PVC to the `fileName` location.
-   `VirtualMachineHibernationStatuses.phase` transitions from `Associating` to `InProgress`.
+2. Set VirtualMachineRestoreStatuses on vm with phase `Initial`
+
+#### Step 2: Use utility volume to mount PVC
+
+1. Based on the existing vm start process,While render and create vmi, add utility volume to vmi with PVC store in vm.VirtualMachineHibernationStatuses.
+1. While pvc has mounted on launcher pod, just simple check the file(file name).
 
 #### Step 3: Execute Restore
 
-1. Use the restore interface to write memory state to `HibernationInfo.TargetFileName`.
-2. Record `VirtualMachineResumeStatuses.StartTime` at the beginning.
+1. After a simple check of mounted file, virt-handler exec `restore` grpc request with mounted file path.
+2. Record `VirtualMachineResumeStatuses.StartTime` at the beginning, phase to `InProgress`.
 3. Upon successful restore, record `VirtualMachineResumeStatuses.EndTime`, and update phase to `Completed`. If failed, update phase to `Failed`.
-3. If `Completed` `VirtualMachineResumeStatuses.phase` transitions from `InProgress` to `Dissociating`.
+4. Only clean when VirtualMachineResumeStatuses in `Completed` phase. if VirtualMachineResumeStatuses `Failed`, just set failed reason(timeout or something) in VirtualMachineResumeStatuses.Reason.
 
 #### Step 4: Cleanup
 
-1. Hot-unmount (`Dissociating`) and remove vm.status.HibernationStatuses (`Clean`).
-1. if pvc is automatically created, it will be automatically deleted as will as user specified pvc will not to delete.
+1. Remove utility volume on vmi.
+
+2. Remove VirtualMachineHibernationStatuses in vm.status.
+
+   > if pvc is automatically created, it will be automatically deleted as will as user specified pvc will not to delete.
 
 ---
 
 ### 3. Direct Start Without Restore
 
+In some cases, such as recovery failure or PVC disappeared due to other reasons. It is impossible to restore vm. 
+
 #### Step 1: Trigger
 
-1. The user sets VM `spec.runStrategy` to `always` or other, and `WakeStrategy.enabled` to `false` .
+1. The user sets VM `spec.runStrategy` to `always` or other, and remove `startStrategy` on vm .
+
+   > Dosen't add utility volume on vmi while creating vmi.
 
 #### Step 2: Cleanup
 
 1. remove vm.status.VirtualMachineHibernationStatuses(`Clean`).
 
-
+   > if pvc is automatically created, it will be automatically deleted as will as user specified pvc will not to delete.
 
 ## API Examples
 
@@ -278,6 +298,7 @@ spec:
     mode: save
     timeoutSeconds: 500
     claimName: XXX-PVC
+  StartStrategy: restore  
 ```
 
 ### start a hibernated vm
@@ -302,8 +323,6 @@ spec:
     mode: save
     timeoutSeconds: 500
     claimName: XXX-PVC
-  WakeStrategy:
-    enabled: false 
 ```
 
 ## Alternatives
