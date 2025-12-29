@@ -23,7 +23,7 @@ This proposal would support it without reboot and without a change in the guest 
 
 ## Goals
 
-- Change an existing NAD reference (spec.networks[].multus.networkName) of secondary networks using bridge binding on a running VM, and by extension the pod network plumbing.
+- Change an existing NAD reference (spec.networks[].multus.networkName) of secondary networks on a running VM, and by extension the pod network plumbing.
 
 ## Non Goals
 
@@ -64,7 +64,7 @@ and copies the interfaces specs from VM to VMI specs accordingly. This would be 
 During the updateStatus cycle, the VMI controller in virt-controller evaluates the automatic migration request. Changes to interfaces and networks can trigger 3 states - immediate/pending/no migration.
 In case of hotplug/unplug of interfaces with supported bindings it requests either immediate migration condition (for SR-IOV interfaces) or pending migration (which is a delayed migration - 
 providing enough time for the [Dynamic Networks Controller](https://github.com/k8snetworkplumbingwg/multus-dynamic-networks-controller), if present to do an `InPlace` hotplug). We would follow a similar approach for swapping the NAD reference.
-So, this would be updated to request an immediate migration in case the interface connected to the changed network uses bridge binding.
+So, this would be updated to request an immediate migration.
 In case the VMI is live-migratable, as before, the WorkloadUpdateController will initiate a migration. Since the new NAD reference is now present on the VMI specs, the target pod's multus annotation 
 will refer to the new NAD.
 
@@ -75,8 +75,10 @@ multus annotation of the pod based on the difference between the VMI interface s
 So trying to change the annotation from `'[{"name":"nad-with-vlan10","namespace":"default","mac":"02:87:f5:51:4c:5d","interface":"poda1363d52898"}]'` to `'[{"name":"nad-with-vlan20","namespace":"default","mac":"02:87:f5:51:4c:5d","interface":"poda1363d52898"}]'` will not work, as DNC will try to attach `nad-with-vlan20`
 without removing `nad-with-vlan10` causing a conflict in mac and interface id and thus failing the attachment.
 
-To prevent that, the reconciliation logic in virt-controller will be adjusted to not patch the annotation when only the NAD reference of an existing interface is updated, 
+To prevent that, the reconciliation logic in virt-controller will be adjusted to not patch the annotation when existing parameters of existing interface are edited, 
 in order to not break the existing hot-plug / hot-unplug flows.
+
+This is the preferred option as this lies within the scope of the project and can be changed to support In Place NAD swap if the relevant [issue](https://github.com/k8snetworkplumbingwg/multus-dynamic-networks-controller/issues/297) in DNC is resolved in the future.
 
 ##### Pros
 - Users can change the network of their VMs without a reboot, even on clusters with Dynamic Networks Controller installed.
@@ -90,7 +92,7 @@ The rest of the design changes remain the same.
 
 ##### Pros
 - In Place swapping of NAD referenced will be possible with Dynamic Networks Controller installed.
-- Changing the NAD reference of non-migratable VMs when bridge binding is used - would be possible.
+- Changing the NAD reference of non-migratable VMs - would be possible.
 
 ##### Cons
 - Dynamic Networks Controller is a third party component, so amending its logic requires additional effort. Also, not all deployments use this component
@@ -181,12 +183,18 @@ This enhancement relies on the existing KubeVirt capabilities and does not intro
 
 The following scenarios are to be added to the e2e tests:
 - Change the NAD reference on a VM and verify that the VM is now connected to the new network and has connectivity.
+- E2E testing will be done only with bridge binding. Additional bindings would be considered after GA.
 
 ## Graduation Requirements
 
+### Alpha
+This enhancement proposes starting at Beta stage, skipping Alpha, based on the following:
+- No API changes: It would modify low level logics concerning conditions for restart required and migration, copying selected items from VM to VMI and conditions for patching pod multus annotation. 
+- Low risk: It leverages live migration which already exists and would follow a similar workflow as hotplug/unplug of network interfaces, which has been stable in production.
+
 ### Beta v1.8
-- [X]  Implementation for bridge binding scenario 
-- [X]  E2E testing
+- [X]  Implementation  
+- [X]  E2E testing for bridge binding scenario
 - [X]  Upstream documentation
 
 ### GA v1.9
