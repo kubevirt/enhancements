@@ -1,4 +1,4 @@
-# VEP #145: Masquerade Port Ranges
+# VEP 168: Masquerade Port Ranges
 
 ## Release Signoff Checklist
 
@@ -13,8 +13,6 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 This document describes a mechanism for interfaces of type `masquerade` to forward contiguous port ranges to the VM guests.
 
 ## Motivation
-
-Additionally, it may be of use to host and expose services running inside the virt-launcher pod itself.
 
 Currently, when using an interface of type `masquerade`  all traffic gets forwarded by default to the VM guest running inside it. The only way to achieve a different behaviour is to configure specific ports in the VM/VMI template (`spec.domain.devices.interfaces.ports` field that gets evaluated when using the masquerade core network binding mentioned before). However, when using KubeVirt to host general purpose desktop VMs, you may not know a priori which ports to forward while still wanting to keep the flexibility of a large set of forwarded ports already available to use. This way we avoid the need to update the VM template and the required guest restart, with all the associated problems (e.g. losing the entire state when using ephemeral instances)
 
@@ -33,10 +31,6 @@ Currently, when using an interface of type `masquerade`  all traffic gets forwar
 ## Repos
 
 - [KubeVirt](https://github.com/kubevirt/kubevirt/)
-
-## Design
-
-The design introduces a new volume source type, `containerPath`, which can be used in the `spec.template.spec.volumes` section of a VirtualMachine or VirtualMachineInstance. This volume source references a path within the virt-launcher pod filesystem.
 
 ## API Design
 
@@ -170,11 +164,6 @@ The proposed modification poses no scalability problems: it can actually make fo
 
 - New API field `portRange` is additive and optional
 - Existing VMs are unaffected
-
-**Rollback:**
-- Rolling back to a version without `portRange` support will cause VMs using this feature to fail validation
-- Existing running VMs will continue to run but cannot be updated
-- Users must remove port ranges from VM specs before rollback to ensure VM lifecycle operations work
 
 ## Functional Testing Approach
 
