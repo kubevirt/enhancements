@@ -1,4 +1,4 @@
-# VEP #97.1: Hypervisor Abstraction - Capability Registry for Hypervisor Feature Discovery
+# VEP #97.1: Capability Registry for KubeVirt Feature Discovery across Hypervisors and Architectures
 
 ## Release Signoff Checklist
 Items marked with (R) are required *prior to targeting to a milestone / release*.
@@ -89,14 +89,14 @@ type CapabilitySupport struct {
 
 ### Capability Definitions
 
-All capabilities are defined once as typed constants in `pkg/capabilities/definitions.go`:
+The most common capabilities in KubeVirt based on top-level VMI API fields are defined as typed constants in `pkg/capabilities/definitions.go`:
 
 ```go
 // Capability constants - each represents a feature that may need validation or blocking
 const (
 	CapVsock        CapabilityKey = "domain.devices.vsock"
 	CapPanicDevices CapabilityKey = "domain.devices.panicDevices"
-	// ... all capabilities declared as constants
+	// ... all basic capabilities declared as constants
 )
 
 // Define CapVsock capability
@@ -119,73 +119,51 @@ var CapabilityDefinitions = map[CapabilityKey]Capability{
 	CapPanicDevices: CapPanicDevicesDef,
 	// Add other capabilities here as they are defined
 }
+
+func RegisterCapability(capKey CapabilityKey, capDev Capability) error {
+    // Register the capability in the CapabilityDefinitions map
+    // ONLY AFTER ensuring capability key uniqueness
+    // If a capability with key capKey already exists in CapabilityDefinitions,
+    // return error
+}
 ```
+
+#### Registration of custom capabilities by a specific platform
+
+The `pkg/capabilities/definitions.go` file contains the most common capabilities in KubeVirt based on top-level VMI API fields. However, a platform (hypervisor-architecture combination) can declare their own capabilities by using the `RegisterCapability` function described above. The code for registration of platform-specific capabilities would live in `pkg/capabilities/<hypervisor>/<arch>.go`.
+
+**IMPORTANT:** The capabilities infrastructure will ensure that no two capabilities are registered with the same key.
 
 ### Registration Pattern
 
-Capabilities are fully defined when hypervisors register their constraints via a builder pattern. The `Capability` struct populated by the builder contains all necessary metadata (`Level`, `Message`, `GatedBy`).
-
-Hypervisor+architecture combinations register their constraints using a fluent builder API:
+A capability is fully defined when platforms (hypervisor-architecture combinations) register the support level for the capability. The `PlatformCapabilitySupport` struct comprises the fields necessary to indicate the level of support on a given platform, the feature gate needed to invoke the capability, and a user-facing error message when the capability is not supported. The following API can be used to register platform-level support for each capability.
 
 ```go
-// pkg/capabilities/registry.go - Matrix registration with builder pattern
-type Capabilities struct {
-    matrix map[string]map[CapabilityKey]CapabilitySupport // "hypervisor/arch" or "hypervisor" -> capabilities
+// pkg/capabilities/registry.go - Registration of platform-specific support for capabilities
+
+// Platform string of the form <hypervisor>/<architecture>
+type Platform string
+
+// struct to store the extent to which a given capability is supported
+type CapabilitySupport struct {
+	Level   SupportLevel
+	Message string // User-facing explanation
+	GatedBy string // Optional: feature gate name
 }
 
-type CapabilitiesBuilder struct {
-    matrix      *Capabilities
-    platformKey string  // Composite key: "hypervisor/arch" or "hypervisor"
-}
+// Define a struct to hold a map from platform information to the support levels of capabilities
+var PlatformCapabilitySupport = map[Platform]map[CapabilityKey]CapabilitySupport{}
 
-type CapabilityBuilder struct {
-  builder *CapabilitiesBuilder
-  cap     CapabilityKey
-}
-
-func Register(hypervisor, arch string) *CapabilitiesBuilder {
-    // Returns builder for registering capabilities
-}
-
-// Fluent methods for registering capability constraints
-func (b *CapabilitiesBuilder) Experimental(cap CapabilityKey, gate string) *CapabilitiesBuilder {
-    // Mark capability as experimental with feature gate
-}
-
-func (b *CapabilitiesBuilder) Unsupported(caps ...CapabilityKey) *CapabilitiesBuilder {
-    // Explicitly mark as unsupported (for clarity/documentation)
-}
-
-// When richer metadata would otherwise repeat the capability key, `Cap(...)` returns a
-// capability-specific builder that keeps the fluent chain focused on a single key.
-func (b *CapabilitiesBuilder) Cap(cap CapabilityKey) *CapabilityBuilder {
-  // Start capability-specific fluent builder to avoid repeating the key
-}
-
-func (e *CapabilityBuilder) Experimental(gate string) *CapabilityBuilder {
-  // Mark capability as experimental with feature gate and continue chaining
-}
-
-func (e *CapabilityBuilder) Unsupported() *CapabilityBuilder {
-  // Explicitly mark capability as unsupported and continue chaining metadata helpers
-}
-
-func (e *CapabilityBuilder) WithMessage(msg string) *CapabilityBuilder {
-  // Attach custom message while staying on the capability-specific builder
-}
-
-func (e *CapabilityBuilder) WithDocLink(link string) *CapabilityBuilder {
-  // Attach documentation link without repeating the capability key
-}
-
-func (e *CapabilityBuilder) WithSince(version string) *CapabilityBuilder {
-  // Record the release where constraint was registered without repeating the key
-}
-
-func (e *CapabilityBuilder) Done() *CapabilitiesBuilder {
-  // Return to the parent builder after finishing metadata customization
+// Define a function to add support information for a specific capability key for a specific platform
+func RegisterPlatformCapabilitySupport(platform Platform, capabilityKey CapabilityKey, support CapabilitySupport) {
+	if PlatformCapabilitySupport[platform] == nil {
+		PlatformCapabilitySupport[platform] = make(map[CapabilityKey]CapabilitySupport)
+	}
+	PlatformCapabilitySupport[platform][capabilityKey] = support
 }
 ```
+
+The `RegisterPlatformCapabilitySupport` function would be invoked from platform-specific code that resides in `pkg/capabilities/<hypervisor>/<arch>.go`.
 
 ### When to Register Capabilities
 
@@ -217,16 +195,25 @@ Here are examples showing how hypervisors register capability constraints:
 // Usage in init() - hypervisor implementations register support:
 func init() {
     // Register base KVM constraints (applies to all KVM archs unless overridden)
-    Register("kvm", "").  // empty arch = hypervisor-wide default
-      Experimental(CapCPUHotplug)
+    RegisterPlatformCapabilitySupport(
+      PlatformKey("kvm", ""), // KVM with any architecture
+      CapPanicDevices,        // string "domain.devices.panicDevices"
+      CapabilitySupport{
+        Level: Experimental,
+        GatedBy: featuregates.PanicDevices,  // feature-gate
+        Message: "Panic Devices are only supported on KVM if PanicDevice FG is enabled", 
+      }
+    )
     
     // Architecture-specific constraints for KVM
-    Register("kvm", "arm64").
-      Cap(CapGraphicsVGA).
-        Unsupported().
-        WithMessage("VGA graphics not supported on ARM64 architecture").
-        WithDocLink("https://kubevirt.io/user-guide/graphics#compatibility").
-        Done()
+    RegisterPlatformCapabilitySupport(
+      PlatformKey("kvm", "arm64"), // KVM with ARM64 architecture
+      CapGraphicsVGA,        // string "domain.devices.panicDevices"
+      CapabilitySupport{
+        Level: Unsupported,
+        Message: "VGA graphics not supported on ARM64 architecture", 
+      }
+    )
     
     // VGA is unregistered on amd64/s390x - implicitly allowed
 }
