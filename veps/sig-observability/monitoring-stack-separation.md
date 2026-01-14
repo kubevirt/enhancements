@@ -1,4 +1,4 @@
-# VEP-81: Monitoring Stack Separation via Hybrid Architecture
+# VEP: Monitoring Stack Separation via Hybrid Architecture
 
 ## Release Signoff Checklist
 
@@ -10,942 +10,422 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-This VEP proposes separating KubeVirt's monitoring and metrics collection from
-core components through a **hybrid architecture** that combines efficient
-informer-based collection with selective sidecar containers.
+This proposal introduces a new `kubevirt-observability-controller` component
+that consolidates monitoring concerns currently scattered across
+`virt-controller`, `virt-handler`, and `virt-launcher`. The controller takes
+ownership of cluster-state metrics generation, recording rules/alerts
+management, and exposes a clear separation boundary between the KubeVirt control
+plane and its monitoring stack.
 
-This approach uses Kubernetes API informers for API-derived metrics (virt-controller,
-virt-api, virt-operator) while only deploying sidecars where direct system
-access is required (virt-handler for libvirt statistics).
-
-Additionally, this proposal includes migrating Prometheus recording rules and alerts to a
-unified external repository for independent lifecycle management.
-
-This enables independent monitoring stack management, reduces coupling between monitoring and core
-functionality, and provides better observability modularity with minimal resource overhead.
+To achieve this goal, this proposal refactors the gRPC interface between
+`virt-handler` and `virt-launcher` to consolidate the many separate monitoring
+RPCs into a unified, more flexible `GetMonitoringData` call, significantly
+reducing per-scrape round-trips and allowing more flexibility in what data is
+collected.
 
 ## Motivation
 
-### Current State
+KubeVirt's monitoring capabilities have grown organically inside core components.
+This creates several problems:
 
-KubeVirt components currently expose Prometheus metrics directly through
-their HTTP endpoints:
-- `virt-handler`: Exposes 60+ VMI runtime metrics via local libvirt domain
-  statistics
-- `virt-controller`: Exposes VM lifecycle and cluster-wide metrics
-- `virt-api`: Exposes API request and connection metrics
-- `virt-operator`: Exposes operator health and configuration metrics
+- **Tight coupling**: Metric registration, recording rules, and alerting logic are embedded
+  in `virt-controller` and `virt-handler`, making it impossible to evolve them independently
+  or ship monitoring fixes without a full KubeVirt release.
 
-### Problems with Current Approach
+- **Excessive gRPC round-trips**: Every Prometheus scrape triggers many individual gRPC calls
+  per VMI between `virt-handler` and `virt-launcher`, which hurts performance at scale and
+  increases latency for scrape targets.
 
-1. **Resource Overhead**: Metrics collection adds CPU/memory overhead to critical components
-2. **Coupling**: Metrics collection logic is tightly coupled with core component functionality
-3. **Limited Flexibility**: Difficult to customize metrics export formats, destinations, or processing
-4. **Scalability**: High-frequency metrics collection can impact component performance
-5. **Maintenance**: Metrics changes require core component updates and releases
-6. **Limited Backports**: New metrics, recording rules and alerts can't be backported to older versions
-8. **Limited Monitoring Configuration Options**: Recording rules and alerts are only available through KubeVirt releases,
-   limiting independent monitoring stack evolution
+- **Rigid data model**: Each existing RPC has a fixed request/response shape with its own
+  parsing logic, making it difficult to collect additional libvirt or guest agent fields.
 
-### Goals
+- **Unclear ownership**: Recording rules and alert definitions live alongside operational
+  controller logic, complicating code review, testing, and on-call responsibility boundaries.
 
-- **Decouple** metrics collection from core KubeVirt component logic
-- **Migrate Out** metrics, recording rules, and alerts from core components to external repositories for independent lifecycle management
-- **Maximize Efficiency** by providing optimized collection alternatives through hybrid architecture
-- **Improve Performance** by minimizing resource overhead through architectural optimization
-- **Enable Flexibility** in metrics export formats (Prometheus, OpenTelemetry, custom)
-- **Support Independent Lifecycle Management** for monitoring stack updates separate from KubeVirt releases
-- **Maintain Backward Compatibility** by keeping embedded monitoring in older versions while migrating to external approach in new versions
-- **Enable Flexible Backports** of new monitoring features to older KubeVirt versions through external repositories
+Separating monitoring into a dedicated component with a unified gRPC interface addresses
+all of these concerns, simplifying the overall approach, giving more flexibility to evolve
+what data is collected and how it is parsed, and preserving backward compatibility with
+existing deployments.
 
-### Non-Goals
+### Background
 
-- Changing existing metrics schemas or breaking Prometheus compatibility
-- Implementing new metrics not currently exposed by KubeVirt
-- Replacing KubeVirt's internal monitoring for health checks
-- **Breaking compatibility** with existing monitoring setups during migration
-- **Forced immediate migration** - older versions maintain embedded approach
+This proposal follows up on the monitoring code refactor introduced in
+[kubevirt/community#219](https://github.com/kubevirt/community/pull/219), which
+proposed a code refactor for the monitoring logic in all KubeVirt components. The
+goal was to have a consistent monitoring package, a code structure that is easy to
+maintain and evolve, while moving closer to the Kubernetes metric implementation style.
+
+That effort recognized it was important to separate monitoring logic from
+business logic to make the codebase more modular, readable, and maintainable,
+reducing complexity, lowering the risk of introducing errors, and allowing each
+component to be tested independently.
+
+With that foundation in place, the work proposed here becomes significantly
+simpler. The monitoring logic is already isolated in dedicated `pkg/monitoring`
+directories with consistent patterns, the shared library handles metric
+registration, documentation generation, and linting, and the monitoring code
+across components follows a uniform structure. This proposal builds on that
+foundation by taking the next logical step: extracting the already-separated
+monitoring code into its own independently deployable component and
+consolidating the gRPC data collection interface.
+
+## Goals
+
+- Introduce a `kubevirt-observability-controller` that generates cluster-state metrics from
+  VM/VMI resource specs and status using Kubernetes informers.
+- Move recording rules and alert management out of `virt-controller` into the new component.
+- Consolidate the many existing monitoring gRPC RPCs into a unified `GetMonitoringData` RPC
+  between `virt-handler` and `virt-launcher`, significantly reducing per-VMI round-trips.
+- Simplify the approach for collecting and parsing monitoring data so that adding new libvirt
+  domain fields or guest agent data does not require new RPCs or dedicated scrapers.
+- Provide flexibility to evolve the monitoring data model.
+- Maintain backward compatibility.
+
+## Non Goals
+
+- Replacing Prometheus as the metrics backend or introducing alternative monitoring systems.
+- Changing the metrics exposition format (still OpenMetrics / Prometheus text format).
+- Migrating non-monitoring concerns out of `virt-controller` or `virt-handler`.
 
 ## Definition of Users
 
-- **KubeVirt Operators**: System administrators managing KubeVirt clusters who need comprehensive monitoring and observability
-- **Platform Engineers**: Infrastructure teams responsible for monitoring stack configuration and maintenance
-- **Application Developers**: Users running VMs who need visibility into VM performance and resource usage
-- **Monitoring Tool Vendors**: Third-party monitoring solutions that integrate with KubeVirt metrics
-- **KubeVirt Contributors**: Developers working on KubeVirt who need decoupled monitoring for easier development and testing
+- **Cluster administrators**: configure and operate KubeVirt monitoring, set up alert routing,
+  and manage Prometheus scrape targets.
+- **Platform engineers**: integrate KubeVirt metrics into broader observability stacks
+  (Grafana dashboards, alerting pipelines, SLO frameworks).
+- **KubeVirt developers**: contribute to monitoring features without needing to modify core
+  control-plane components.
 
 ## User Stories
 
-- As a **KubeVirt operator**, I want to upgrade my monitoring stack independently from KubeVirt core components, so I can get new monitoring features without waiting for KubeVirt releases
-- As a **platform engineer**, I want to minimize resource overhead of monitoring, so I can run more VMs per node with the same hardware and I want to disable monitoring
-- As an **application developer**, I want consistent VM performance metrics regardless of KubeVirt version, so my monitoring dashboards work across upgrades
-- As a **KubeVirt operator**, I want to backport critical metrics to older KubeVirt versions, so I don't have to upgrade production clusters just for monitoring improvements
+- As a cluster administrator, I want monitoring changes to be shipped and updated independently
+  from the KubeVirt control plane so that I can receive monitoring fixes without a full
+  KubeVirt upgrade.
+- As a platform engineer, I want a single, well-documented source of cluster-state VM metrics
+  so that I can build reliable dashboards without depending on internal `virt-controller`
+  implementation details.
+- As a KubeVirt developer, I want monitoring code to live in a separate component with clear
+  interfaces so that I can contribute monitoring improvements without risk of breaking
+  control-plane logic.
 
 ## Repos
 
-- [kubevirt/kubevirt](https://github.com/kubevirt/kubevirt) - Core KubeVirt
-  modifications for hybrid architecture support
-- [kubevirt/monitoring](https://github.com/kubevirt/monitoring) - Existing repository to be extended with hybrid metrics collection implementation alongside current dashboards and monitoring guidelines
+- kubevirt/kubevirt
 
 ## Design
 
-### Hybrid Architecture Overview
+The proposal has three pillars:
 
-This proposal introduces a **hybrid monitoring architecture** that optimizes resource usage by using the most appropriate collection method for each type of metric:
+1. **kubevirt-observability-controller**: a new component for cluster-state metrics and rule
+   management.
+2. **Unified Monitoring gRPC**: a consolidated RPC that replaces the many per-VMI calls
+   with a simpler, more flexible approach.
+3. **Recording rules and alerts migration**: relocating rule/alert definitions and lifecycle
+   management to the new controller.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Hybrid Monitoring Architecture               │
-│                                                                 │
-│  ┌─────────────────┐    ┌─────────────────────────────────────┐ │
-│  │  Informer-Based │    │         Sidecar-Based               │ │
-│  │   Collection    │    │        Collection                   │ │
-│  │                 │    │                                     │ │
-│  │ ┌─────────────┐ │    │ ┌─────────────────────────────────┐ │ │
-│  │ │Central      │ │    │ │     virt-handler Pod            │ │ │
-│  │ │Metrics      │ │    │ │  ┌─────────────┐ ┌────────────┐ │ │ │
-│  │ │Collector    │ │    │ │  │virt-handler │ │libvirt-    │ │ │ │
-│  │ │             │ │    │ │  │             │ │metrics     │ │ │ │
-│  │ │:8080        │ │    │ │  └─────────────┘ │sidecar     │ │ │ │
-│  │ └─────────────┘ │    │ │                  │:9090       │ │ │ │
-│  │      │          │    │ │                  └────────────┘ │ │ │
-│  │      │ watches  │    │ └─────────────────────────────────┘ │ │
-│  │      ▼          │    │             │                       │ │
-│  │ ┌─────────────┐ │    │             │ Unix socket access    │ │
-│  │ │K8s API:     │ │    │             ▼                       │ │
-│  │ │- VMs        │ │    │ ┌─────────────────────────────────┐ │ │
-│  │ │- VMIs       │ │    │ │     /var/run/kubevirt-private   │ │ │
-│  │ │- Pods       │ │    │ │     (libvirt sockets)           │ │ │
-│  │ │- Services   │ │    │ └─────────────────────────────────┘ │ │
-│  │ └─────────────┘ │    │                                     │ │
-│  └─────────────────┘    └─────────────────────────────────────┘ │
-│                                                                 │
-│  Collects:                    Collects:                         │
-│  • virt-controller metrics    • VM runtime metrics              │
-│  • virt-api metrics          • libvirt domain statistics        │
-│  • virt-operator metrics     • Real-time performance data       │
-│  • Node capability metrics   • High-frequency VM metrics        │
-└─────────────────────────────────────────────────────────────────┘
-```
+### 1. kubevirt-observability-controller
 
-### Key Benefits of Hybrid Architecture
-
-1. **Optional Resource Efficiency**:
-   - **Current embedded approach**: Zero additional memory (baseline)
-   - **Hybrid collection**: ~200Mi additional memory when enabled
-   - **Single informer** more efficient than multiple component watchers
-   - **User choice**: Enable optimization when resource efficiency is prioritized
-
-2. **Operational Simplicity**:
-   - **One central deployment** to manage instead of multiple sidecars
-   - **Reduced complexity** in monitoring and troubleshooting
-   - **Easier scaling** with centralized collection logic
-
-3. **Architectural Correctness**:
-   - **Informers for API data**: Uses Kubernetes-native patterns efficiently
-   - **Sidecars only where needed**: Direct system access for libvirt metrics
-   - **Right tool for right job**: Optimal collection method per metric type
-
-4. **Performance Optimization**:
-   - **Reduced API load**: Single informer vs multiple watchers
-   - **Lower network overhead**: Centralized collection reduces traffic
-   - **Better resource utilization**: No unnecessary sidecar processes
-
-5. **Independent Monitoring Stack Management** (Major improvement over current
-state):
-- **Current limitation**: Recording rules/alerts tied to KubeVirt release cycle
-- **Hybrid benefit**: Update monitoring configurations without KubeVirt upgrades
-- **Flexible backports**: Deploy critical monitoring updates to older KubeVirt
-versions
-- **Version independence**: Monitoring configurations evolve separately from
-core platform
-
-6. **Gradual Migration Strategy**:
-   - **Older versions**: Continue with embedded metrics/alerts/rules
-   - **New versions**: Migrate to external repositories with hybrid collection
-   - **Cross-version compatibility**: External monitoring works across KubeVirt
-     versions
-   - **No breaking changes**: Migration happens over KubeVirt version lifecycle
-
-### Component-Specific Implementation
-
-#### 1. Central Informer-Based Metrics Collector (Priority 1)
-
-**Architecture**: Central deployment that uses Kubernetes API informers/watchers for API-derivable metrics (part of hybrid approach alongside libvirt sidecar)
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: kubevirt-monitoring-collector
-spec:
-  replicas: 1
-  template:
-    spec:
-      containers:
-      - name: metrics-collector
-        image: kubevirt/monitoring:latest
-  ports:
-  - containerPort: 8080
-    name: metrics
-```
-
-**Responsibilities** (API-derivable metrics only, libvirt metrics handled by sidecar):
-- **virt-controller metrics**: VM lifecycle (`kubevirt_vm_*`), VMI info (`kubevirt_vmi_info`), migration tracking
-- **virt-api metrics**: Connection counts derived from service/pod monitoring
-- **virt-operator metrics**: Operator health from KubeVirt CR status, deployment states
-- **Node schedulability metrics**: Node schedulability
-
-**Note**: VM runtime metrics (`kubevirt_vmi_memory_*`, `kubevirt_vmi_cpu_*`, etc.) are collected by the libvirt sidecar in virt-handler pods, not by this central collector.
-
-**Why Informers/Watchers Work:**
-- All data available through Kubernetes API (VMs, VMIs, Pods, Services, Nodes)
-- No special access required to Unix sockets or libvirt
-- More efficient than multiple sidecars watching same API resources
-- Centralized logic easier to maintain and update
-
-**Informers vs Watchers**:
-- **Informers** (Recommended): Higher-level abstraction with local caching, event handlers, and built-in retry logic
-- **Watchers**: Lower-level streaming interface for real-time resource changes
-- **Choice**: Both are valid, informers provide better performance and reliability
-
-**Implementation Approach:**
-
-The central metrics collector can be implemented as either:
-- **Single controller** with multiple informers/watchers for different resource types
-- **Multiple specialized controllers** (e.g., VM controller, Node controller, API controller)
-
-**Technical choice**: Both informers and watchers are suitable for monitoring Kubernetes resources. Informers provide better performance through local caching, while watchers offer more direct streaming access to resource changes.
-
-**Resource Types to Monitor:**
-- VirtualMachine and VirtualMachineInstance resources
-- Pod and Service resources (for component health)
-- Node resources (for capability detection)
-- KubeVirt CR (for operator metrics)
-
-#### 2. virt-handler Libvirt Metrics Sidecar (Priority 2)
-
-**Architecture**: Sidecar container in virt-handler DaemonSet (ONLY component requiring sidecar)
-
-```yaml
-# virt-handler DaemonSet modification
-spec:
-  template:
-    spec:
-      containers:
-      - name: virt-handler          # Existing container
-      - name: libvirt-metrics       # NEW: Sidecar for libvirt access
-        image: kubevirt/libvirt-metrics:latest
-        ports:
-        - containerPort: 9090
-          name: metrics
-        volumeMounts:
-        - name: virt-share-dir
-          mountPath: /var/run/kubevirt-private
-```
+An external HA Deployment (with leader-elected replica), deployed and managed independently
+from `virt-operator`. It is **not** part of the core KubeVirt installation and has its own
+release lifecycle.
 
 **Responsibilities:**
-- **VM Runtime Metrics**: `kubevirt_vmi_memory_*`, `kubevirt_vmi_cpu_*`, `kubevirt_vmi_network_*`
-- **Real-time Performance Data**: High-frequency libvirt domain statistics
-- **Guest Agent Information**: VM-level insights not available via API
 
-**Why Sidecar Required:**
-- Needs Unix socket access (`/var/run/kubevirt-private/`)
-- Calls libvirt APIs (`virDomainListGetStats()`) directly
-- High-frequency, real-time data not available through Kubernetes API
+| Concern | Current Owner | New Owner |
+|---|---|---|
+| Cluster-state VM/VMI metrics (spec & status) | virt-controller | kubevirt-observability-controller |
+| Runtime VM/VMI metrics (guest agent, libvirt domain) | virt-handler | kubevirt-observability-controller |
+| PrometheusRule CR management | virt-controller / virt-operator | kubevirt-observability-controller |
+| Alert definitions | virt-controller / virt-operator | kubevirt-observability-controller |
 
-**Technical Requirements:**
-- Access to `virtShareDir` for VMI socket communication
-- Node-specific deployment (DaemonSet integration)
-- Direct libvirt API access for performance metrics
+**Cluster-State Metrics Generation:**
 
-### Integration Strategies
+The controller uses standard Kubernetes informers (shared with a `kube_state_metrics`-style
+pattern) to watch `VirtualMachine` and `VirtualMachineInstance` resources. It generates metrics
+from resource specifications and status fields, replacing the metrics currently emitted by
+`virt-controller`.
 
-#### Option A: KubeVirt CR Configuration (Recommended)
+Examples of metrics that move:
 
-```yaml
-apiVersion: kubevirt.io/v1
-kind: KubeVirt
-metadata:
-  name: kubevirt
-spec:
-  configuration:
-    observability:
-      # Central informer-based metrics collector
-      metricsCollector:
-        enabled: true
-        # Image defaults to latest compatible version but can be overridden
-        # image: "kubevirt/monitoring:v1.2.3"  # Optional override
-        port: 8080
-        resources:
-          requests:
-            cpu: "50m"
-            memory: "128Mi"
-          limits:
-            cpu: "200m"
-            memory: "256Mi"
+- `kubevirt_vm_created_total`
+- `kubevirt_vmi_phase_count`
+- `kubevirt_vmi_vcpu_seconds`
+- All VM/VMI label and annotation-derived metrics
 
-      # Libvirt metrics sidecar (only for virt-handler)
-      libvirtMetrics:
-        enabled: true
-        image: "kubevirt/libvirt-metrics:v1.0.0"
-        port: 9090
-        resources:
-          requests:
-            cpu: "10m"
-            memory: "32Mi"
-          limits:
-            cpu: "100m"
-            memory: "128Mi"
+The controller exposes a `/metrics` endpoint scraped by Prometheus.
+
+**Runtime VM/VMI Metrics Generation:**
+
+The controller uses the `GetMonitoringData` RPC to collect the data from the guest agent and libvirt domain.
+
+**Recording Rules and Alerts Management:**
+
+The controller reconciles `PrometheusRule` CRs that contain KubeVirt's recording rules and
+alert definitions. This gives it full ownership of the monitoring rule lifecycle:
+
+- Create/update `PrometheusRule` objects on startup and when the KubeVirt CR changes.
+- Remove stale rules on uninstall or configuration changes.
+- Version-stamp rules to enable clean upgrades.
+
+### 2. Unified Monitoring gRPC Refactor
+
+#### Current Architecture
+
+Today, monitoring data is served through many separate gRPC RPCs in `cmd.proto` (e.g.
+`GetDomainStats`, `GetGuestInfo`, `GetUsers`, `GetFilesystems`, `GetDomain`, among others).
+Each has its own request/response message (all requests are `EmptyRequest`), its own
+serialization logic, and a dedicated scraper on the `virt-handler` side. The server
+(`server.go`) delegates to `DomainManager` methods, which read from two caches
+(`domainStatsCache` and `AsyncAgentStore`).
+
+This architecture has two compounding problems:
+
+1. **Performance**: Per Prometheus scrape, each VMI triggers multiple individual gRPC
+   round-trips across the different scrapers.
+2. **Inflexibility**: The current model limits what information is collected.
+   Adding a new libvirt statistic or guest agent field requires defining a new proto message,
+   writing a new RPC, adding a new scraper in `virt-handler`, and wiring the data through to
+   the metrics endpoint, all tightly coupled to the existing parsing pipeline. This rigidity
+   has led to useful data being left uncollected because the cost of plumbing it through is
+   disproportionate.
+
+#### Proposed Architecture
+
+A new `GetMonitoringData` RPC consolidates monitoring queries into fewer, more flexible calls.
+The caller specifies which data categories it needs via boolean flags; the server only
+serializes and returns the requested fields from the existing caches. This drastically
+simplifies the approach, as new libvirt or guest agent fields can be appended to the existing
+messages without introducing new RPCs, scrapers, or parsing pipelines.
+
+**Key properties:**
+
+- **Selective serialization**: Only requested fields are populated in the response, avoiding
+  unnecessary serialization overhead.
+- **Simplified data pipeline**: One unified path for collecting, serializing, and parsing
+  monitoring data replaces the per-RPC scraper model. Adding a new data source is a matter
+  of appending a field to the proto messages rather than building an end-to-end pipeline.
+- **Backward compatible**: Existing RPCs remain in the proto definition and continue to work.
+  Callers can be migrated incrementally.
+- **Extensible**: New libvirt domain fields and guest agent data can be appended to both
+  `MonitoringRequest` and `MonitoringResponse` without breaking the wire format or existing
+  callers.
+
+#### Proto Changes
+
+In `pkg/handler-launcher-com/cmd/v1/cmd.proto`:
+
+```protobuf
+service Cmd {
+  // ... existing RPCs stay for backward compat ...
+  rpc GetMonitoringData(MonitoringRequest) returns (MonitoringResponse) {}
+}
+
+message MonitoringRequest {
+  bool domainStats      = 1;
+  bool guestInfo        = 2;
+  bool guestFilesystems = 3;
+  bool guestAgent       = 4;
+  bool guestUsers       = 5;
+  ...
+}
+
+message MonitoringResponse {
+  Response response         = 1;
+  string   domainStats      = 2;
+  string   guestInfo        = 3;
+  string   guestFilesystems = 4;
+  string   guestAgent       = 5;
+  string   guestUsers       = 6;
+  ...
+}
 ```
 
-#### Option B: Separate Deployment + DaemonSet Patch
-
-**Central Metrics Collector:**
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: kubevirt-monitoring-collector
-  namespace: kubevirt
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: kubevirt-monitoring-collector
-  template:
-    spec:
-      containers:
-      - name: metrics-collector
-        image: kubevirt/monitoring:v1.0.0
-        ports:
-        - containerPort: 8080
-        env:
-        - name: METRICS_PORT
-          value: "8080"
-```
-
-**virt-handler Sidecar Patch:**
-```yaml
-# Applied via KubeVirt CR customizeComponents
-- resourceType: DaemonSet
-  resourceName: virt-handler
-  patch: |
-    spec:
-      template:
-        spec:
-          containers:
-          - name: libvirt-metrics
-            image: kubevirt/libvirt-metrics:v1.0.0
-            ports:
-            - containerPort: 9090
-            volumeMounts:
-            - name: virt-share-dir
-              mountPath: /var/run/kubevirt-private
-```
-
-## API Examples
-
-### External Monitoring Repository Configuration
-
-**Important**: These are ADDITIONAL monitoring configurations, not replacements.
-Users can:
-- **Keep using embedded rules/alerts** (existing KubeVirt behavior)
-- **Add external rules/alerts** for enhanced monitoring features
-- **Mix both approaches** as needed for their environment
-- **Never be forced to migrate** from embedded to external
-
-
-
-### Repository Structure
-
-#### kubevirt/monitoring Repository Structure Example
-```
-monitoring/                      # Existing kubevirt/monitoring repository
-├── cmd/
-│   ├── metrics-collector/        # Central informer-based collector
-│   └── libvirt-metrics/         # Libvirt sidecar for virt-handler
-├── pkg/
-│   ├── informers/               # Kubernetes API informers
-│   ├── collectors/              # Metrics collection logic
-│   │   ├── controller/          # virt-controller metrics
-│   │   ├── api/                 # virt-api metrics
-│   │   ├── operator/            # virt-operator metrics
-│   │   └── libvirt/             # libvirt domain metrics
-│   ├── exporters/               # Prometheus/OTEL exporters
-│   ├── config/                  # Configuration management
-│   └── client/                  # KubeVirt API clients
-├── build/
-│   ├── Dockerfile.metrics-collector  # Central collector
-│   └── Dockerfile.libvirt-metrics   # Libvirt sidecar
-├── deploy/
-│   ├── central/                 # Central collector manifests
-│   └── sidecar/                 # Sidecar patches
-├── examples/
-│   ├── central-collector.yaml
-│   ├── hybrid-deployment.yaml
-│   └── migration-guide.yaml
-└── docs/
-    ├── architecture.md          # Hybrid architecture explanation
-    ├── deployment.md
-    └── troubleshooting.md
-```
-
-#### kubevirt/monitoring Repository Structure (Extended)
-```
-monitoring/                      # Existing kubevirt/monitoring repository
-├── dashboards/                  # Existing: Grafana dashboards
-├── docs/                        # Existing: Documentation
-├── tools/                       # Existing: Monitoring tools
-├── collector/                   # NEW: Hybrid metrics collection implementation
-│   ├── cmd/
-│   │   └── main.go             # Central collector entry point
-│   ├── pkg/
-│   │   ├── informers/          # Kubernetes API informers
-│   │   ├── libvirt/            # Libvirt sidecar implementation
-│   │   └── metrics/            # Prometheus metrics definitions
-│   ├── Dockerfile              # Container image build
-│   └── manifests/              # Kubernetes deployment manifests
-├── config/
-│   ├── rules/                  # Prometheus recording rules
-│   │   ├── vm-performance.yaml
-│   │   ├── cluster-health.yaml
-│   │   └── migration-stats.yaml
-│   ├── alerts/                 # Prometheus alert rules
-│   │   ├── vm-alerts.yaml
-│   │   ├── component-alerts.yaml
-│   │   └── storage-alerts.yaml
-│   └── dashboards/             # Grafana dashboards
-│       ├── kubevirt-overview.json
-│       ├── vm-details.json
-│       └── cluster-health.json
-├── manifests/                  # Kubernetes manifests (optional standalone deployment)
-│   ├── collector-deployment.yaml
-│   ├── servicemonitor.yaml
-│   └── prometheusrule.yaml
-├── examples/                   # Example configurations
-│   ├── kubevirt-cr-hybrid.yaml
-│   └── standalone-deployment.yaml
-├── versions/                    # Version compatibility management
-│   ├── v1.6/                    # KubeVirt v1.6 compatible configs
-│   ├── v1.7/                    # KubeVirt v1.7 compatible configs
-│   ├── main/                    # Latest configurations
-│   ├── compatibility.md         # Version compatibility matrix
-│   └── backport-guide.md        # Guide for using newer monitoring with older KubeVirt
-└── docs/
-    ├── deployment.md            # How to deploy monitoring stack
-    ├── customization.md         # Customizing alerts and dashboards
-    └── migration.md             # Migrating from embedded monitoring
-```
-
-## Implementation Phases
-
-### Phase 1: External Repository + Central Collector (Alpha)
-**Focus**: Establish external monitoring foundation and hybrid collection
-**Timeline**:
-
-- [ ] **Extend existing monitoring repository**: Add hybrid metrics collection
-  implementation to existing kubevirt/monitoring repository
-- [ ] **Central Metrics Collector**: Implement single deployment with Kubernetes
-  API informers
-- [ ] **virt-controller metrics**: VM lifecycle, VMI info, migration tracking
-  via API watching
-- [ ] **virt-api metrics**: Connection metrics derived from service/pod
-  monitoring
-- [ ] **virt-operator metrics**: Operator health from KubeVirt CR and deployment
-  status
-- [ ] **Node capability metrics**: Node labels and hardware detection
-- [ ] **Feature gate**: `HybridMetricsCollection` (Alpha, disabled by default)
-- [ ] **Dual metrics exposure**: Both embedded and hybrid collection available
-- [ ] **Container images**: Build and publish central collector image
-- [ ] **Integration testing**: Validate metrics accuracy vs current
-  implementation
-- [ ] **Migration documentation**: Clear guidance on progressive migration
-  strategy
-
-**Deliverables**:
-- Single `kubevirt/monitoring` deployment with hybrid collector
-- 80% of current metrics available via informers
-- Extended `kubevirt/monitoring` repository with metrics collection implementation
-
-### Phase 2: Libvirt Metrics Sidecar (Critical Performance Data)
-- [ ] **Libvirt sidecar**: Implement virt-handler sidecar for Unix socket access
-- [ ] **Real-time VM metrics**: CPU, memory, network, storage statistics
-- [ ] **Domain integration**: Connect to libvirt via existing gRPC protocol
-- [ ] **KubeVirt CR integration**: Add sidecar configuration options
-- [ ] **Migration testing**: Ensure seamless transition
-
-**Deliverables**:
-- `kubevirt/libvirt-metrics` sidecar image
-- Complete hybrid architecture deployment
-- Performance benchmarking results
-- Migration guide for existing deployments
-
-### Phase 3: Production Optimization
-**Focus**: Performance tuning and operational excellence
-
-- [ ] **Resource optimization**: Fine-tune informer resync intervals and memory usage
-- [ ] **Caching strategies**: Implement efficient metrics caching for high-frequency data
-- [ ] **Health monitoring**: Add self-monitoring for both collector and sidecar
-- [ ] **Security hardening**: Complete security review and implement best practices
-- [ ] **Documentation**: Comprehensive operational guides
-
-### Phase 4: Migration Finalization
-**Focus**: Complete migration and deprecation planning
-**Timeline**: To be determined based on community feedback
-
-- [ ] **Community decision point**: Evaluate migration strategy based on Phase 1-3 feedback
-- [ ] **Embedded metrics deprecation**: Begin deprecation process for embedded metrics (if community agrees)
-- [ ] **Migration tooling**: Automated tools to help users migrate monitoring configurations
-- [ ] **Documentation updates**: Updated docs reflecting new recommended approach
-- [ ] **Backward compatibility**: Ensure smooth transition path
-
-### Phase 5: Advanced Features
-**Focus**: Extended capabilities and ecosystem integration
-
-- [ ] **OpenTelemetry support**: Multi-format export capabilities
-- [ ] **Custom metrics framework**: Allow users to extend metrics collection
-- [ ] **Performance analytics**: Advanced metrics aggregation and analysis
-- [ ] **Community-driven configurations**: External monitoring ecosystem
-
-## Feature lifecycle Phases
-
-### Alpha (Target: TBD based on kubevirt community feedback)
-
-**Graduation Criteria:**
-- [ ] Central informer-based metrics collector implemented and functional
-- [ ] Basic libvirt sidecar for virt-handler working
-- [ ] External monitoring repository created with recording rules and alerts
-- [ ] KubeVirt CR configuration schema defined and implemented
-- [ ] Dual-mode operation (both embedded and hybrid metrics available)
-- [ ] Unit tests and basic integration tests passing
-- [ ] Initial performance validation (<200Mi memory for central collector)
-- [ ] Documentation for deployment and configuration
-
-**Alpha Characteristics:**
-- Feature disabled by default
-- Manual configuration required
-- Both embedded and hybrid metrics active simultaneously
-- Basic functionality validated in test environments
-
-**API Stability:** Configuration schema may change between alpha releases
-
-### Beta (Target: TBD based on kubevirt community feedback)
-
-**Graduation Criteria:**
-- [ ] All component metrics available through hybrid architecture
-- [ ] External monitoring configurations fully migrated and tested
-- [ ] Performance testing shows <80% reduction in monitoring overhead vs pure sidecar
-- [ ] Compatibility testing with existing Prometheus setups completed
-- [ ] Production deployment validation (at least 3 environments)
-- [ ] Automated migration tools and validation scripts available
-- [ ] Comprehensive upgrade/downgrade testing completed
-- [ ] Feature enabled by default with opt-out capability
-- [ ] Security review and hardening completed
-
-**Beta Characteristics:**
-- Feature enabled by default
-- Stable API with backward compatibility guarantees
-- Production-ready with comprehensive testing
-- Migration path from embedded metrics proven
-
-**Breaking Changes:** Optional transition to hybrid-only mode available
-
-### GA (Target: TBD based on kubevirt community feedback)
-
-**Graduation Criteria:**
-- [ ] Successful operation in multiple production environments (6+ months)
-- [ ] Performance proven stable under high VM density (100+ VMs/node)
-- [ ] Community adoption and positive feedback demonstrated
-- [ ] Complete documentation including best practices and troubleshooting
-- [ ] Automated health monitoring and alerting for hybrid components
-- [ ] Comprehensive test coverage (>90%) with automated regression testing
-- [ ] Breaking change plan for deprecating embedded metrics finalized
-
-**GA Characteristics:**
-- Feature graduated and always available
-- Embedded metrics deprecated with migration period
-- Full production support and SLA compliance
-- Long-term API stability guaranteed
-
-**Post-GA Roadmap:**
-- OpenTelemetry export support
-- Custom metrics framework for extensibility
-- Enhanced performance analytics and aggregation
-- Community-driven monitoring configurations and dashboards
-
-Refer to the [KubeVirt feature lifecycle documentation](https://github.com/kubevirt/community/blob/main/design-proposals/feature-lifecycle.md#releases) for more details on graduation criteria and processes.
-
-## Open Discussion Points
-
-The following aspects of this proposal are **open for community discussion**
-and feedback:
-
-### 1. Migration Timeline and Strategy
-
-**Question**: Should we migrate existing metrics, alerts, and recording rules
-out of core components, or maintain them indefinitely?
-
-**Options**:
-- **Option A**: **Progressive Migration (Proposed)**
-  - Gradually phase out embedded monitoring over 2-3 KubeVirt releases
-  - Maintain backward compatibility during transition
-  - Eventually remove embedded approach in favor of external approach
-
-- **Option B**: **Indefinite Coexistence**
-  - Keep both embedded and external approaches forever
-  - Users choose their preferred approach
-  - Higher maintenance burden but maximum compatibility
-
-**Trade-offs**:
-- **Migration benefits**: Cleaner architecture, reduced coupling, simpler
-  maintenance
-- **Coexistence benefits**: Zero breaking changes, maximum user choice, no
-  forced migrations
-
-### 2. Feature Gate Strategy
-
-**Question**: How should we control the migration and new features?
-
-**Options**:
-- Feature gates for hybrid collection (enable new approach)
-- Feature gates for embedded deprecation (disable old approach)
-- Version-based automatic migration
-- User-controlled migration only
-
-### 3. Controller Architecture
-
-**Question**: Should the central metrics collector be a single controller or multiple specialized controllers?
-
-**Single Controller Approach**:
-- **Pros**: Simpler deployment, single binary, unified configuration
-- **Cons**: Larger memory footprint, all-or-nothing failure mode
-
-**Multiple Controller Approach**:
-- **Pros**: Better fault isolation, independent scaling, focused responsibilities
-- **Cons**: More complex deployment, additional operational overhead
-
-**Recommendation**: Start with single controller for simplicity, allow future split if needed.
-
-### 4. Metrics Endpoint Changes
-
-**Question**: Should we maintain existing metrics endpoints during migration?
-
-**Considerations**:
-- Prometheus scraping configuration changes
-- Monitoring tool integration impact
-- Backward compatibility requirements
-- Performance implications of dual exposure
-
-### 5. Versioning Strategy for Backports
-
-**Question**: How should we version the monitoring images to enable backports?
-
-**Challenge**: If KubeVirt CR specifies exact monitoring image versions, users
-can't get newer monitoring features on older KubeVirt versions.
-
-**Proposed Solution**:
-- **Default behavior**: KubeVirt operator uses compatible monitoring image
-  version automatically
-- **User override**: Allow explicit image specification in KubeVirt CR for
-  backports
-- **Version compatibility matrix**: Document which monitoring versions work
-  with which KubeVirt versions
-
-**Example backport scenario**:
-```yaml
-# KubeVirt v1.4 with newer monitoring v1.8
-apiVersion: kubevirt.io/v1
-kind: KubeVirt
-spec:
-  configuration:
-    observability:
-      metricsCollector:
-        enabled: true
-        image: "kubevirt/monitoring:v1.8.2"  # Newer than default for v1.4
-```
-
-
-### 6. Recording Rules and Alerts Migration
-
-**Question**: What's the best approach for migrating recording rules and alerts?
-
-**Options**:
-- **Immediate external availability**: Extend existing kubevirt/monitoring
-  repository with hybrid metrics collection
-- **Gradual migration**: Move rules/alerts over multiple releases
-- **Dual maintenance**: Maintain both embedded and external versions
-
-## Alternatives Considered
-
-### Alternative 1: Keep Current Embedded Approach (Status Quo)
-Continue with metrics, recording rules, and alerts embedded in virt-handler,
-virt-controller, virt-api, and virt-operator.
-
-**Pros**:
-- **No changes required**: Existing setup continues working
-- **Simplicity**: All monitoring logic contained within core components
-- **No additional containers**: Zero operational overhead from new components
-
-**Cons**:
-- **Coupling**: Monitoring logic tightly coupled with core component
-functionality
-- **Slow update cycle**: Monitoring improvements require KubeVirt releases
-- **No backports**: Cannot deploy new monitoring features to older KubeVirt
-versions
-- **Resource overhead**: Metrics collection adds load to critical components
-- **Limited flexibility**: Cannot customize monitoring without modifying core
-components
-
-**Why we need improvement**: While this works, it limits monitoring evolution
-and ties monitoring updates to core platform releases.
-
-### Alternative 2: Pure Sidecar Approach
-Deploy sidecars for all KubeVirt components (virt-handler, virt-controller, virt-api, virt-operator).
-
-**Rejected**: Most metrics (virt-controller, virt-api, virt-operator) can be
-efficiently collected via Kubernetes API informers/watchers, making sidecars unnecessary.
-
-### Alternative 3: Pure Informer/Watcher Approach
-Use only informer/watcher-based collection for all metrics.
-
-**Rejected**: While efficient, this approach loses access to critical VM runtime
-metrics that require direct libvirt access via Unix sockets.
-
-### Alternative 4: External DaemonSet Approach
-Deploy separate DaemonSet for metrics collection that discovers and scrapes VMs.
-
-**Rejected**: Would require complex discovery mechanisms and increase
-operational overhead while losing access to efficient Unix socket communication.
-
-### Alternative 5: Metrics Proxy/Gateway
-Use single metrics aggregation service that proxies requests to core components.
-
-**Rejected**: Creates single point of failure and doesn't address the
-fundamental coupling issues between monitoring and core functionality.
-
-### Decision Matrix Summary
-
-**Why Hybrid Approach is Better Than Current State:**
-
-**Current Embedded Approach Limitations:**
-- **Release coupling**: Monitoring improvements tied to KubeVirt releases
-- **No backports**: Cannot deploy new monitoring features to older versions
-- **Limited flexibility**: Customization requires core component changes
-- **Resource overhead**: Metrics collection adds load to critical components
-
-**Hybrid Approach Advantages:**
-1. **Preserves all benefits of current state** (complete metrics, no breaking
-changes)
-2. **Adds monitoring independence** - update rules/alerts without KubeVirt
-releases
-3. **Enables backports** - deploy critical monitoring to older KubeVirt versions
-4. **Provides efficiency option** - users can opt for resource optimization
-5. **Supports customization** - external monitoring configurations
-6. **Future-proof** - enables monitoring evolution separate from core platform
-
-**Key Insight**: Hybrid approach is **additive, not replacement** - it keeps
-what works and adds what's missing.
-
-**Other Alternatives Rejected:**
-- **Pure Sidecar**: Overengineered for API-derivable metrics
-- **Pure Informer**: Loses critical libvirt VM performance data
-- **External DaemonSet**: Complex discovery, loses Unix socket efficiency
-- **Metrics Proxy**: Single point of failure, doesn't solve coupling
+All response fields are JSON-encoded strings (consistent with the current approach). The
+messages are designed to be extended over time, as additional libvirt domain data and guest
+agent fields will be appended as new boolean flags and response fields as monitoring
+coverage grows.
+
+### 3. Recording Rules and Alerts Migration
+
+Recording rules and alert definitions are currently managed by `virt-operator` and
+`virt-controller`. The migration proceeds as follows:
+
+1. **Extract**: All `PrometheusRule` move from `virt-operator` to the
+   `kubevirt-observability-controller` codebase.
+2. **Reconcile**: The new controller reconciles the `PrometheusRule` CRs, ensuring they match
+   the desired state on every sync loop.
 
 ## Scalability
 
-The hybrid architecture is designed to scale efficiently across different
-cluster sizes:
+### kubevirt-observability-controller
 
-### Central Metrics Collector Scalability
-- **Single replica** sufficient for clusters up to 1000 nodes
-- **Horizontal scaling** available via multiple replicas with leader election
-- **Memory usage** scales linearly with VM/VMI count (~1MB per 100 VMs)
-- **CPU usage** minimal due to efficient informer caching
+- Uses shared informers (list+watch) against the Kubernetes API server, the same pattern
+  used by `kube-state-metrics`. Memory footprint scales linearly with the number of VM/VMI
+  objects.
+- HA with leader election. Horizontal scaling is not required because metric
+  generation is CPU-light (serializing cached object state).
+- `/metrics` endpoint is scraped by Prometheus at the configured interval (typically 30s).
+  No additional load on the API server beyond the informer watches.
 
-### Libvirt Sidecar Scalability
-- **Per-node scaling**: One sidecar per node with VMs
-- **Resource usage**: <128Mi memory, <100m CPU regardless of VM count per node
-- **Collection frequency**: Configurable intervals (default 30s) for performance
-tuning
-- **High-density support**: Tested with 200+ VMs per node
+### Unified gRPC
 
-### Network Scalability
-- **Reduced API load**: Single informer vs multiple component watchers
-- **Efficient collection**: Metrics aggregated locally before export
-- **Prometheus scraping**: Standard scraping patterns, no additional network overhead
+- Significantly reduces per-VMI gRPC calls per scrape cycle regardless of how many data types
+  are requested.
+- Response size may increase per call since multiple data types are returned, but total bytes
+  transferred remains the same (or decreases slightly due to reduced framing overhead).
+- Selective serialization ensures the server only marshals requested fields.
 
 ## Update/Rollback Compatibility
 
-### Migration Strategy Overview
+The `kubevirt-observability-controller` is an **external** component, deployed and managed
+independently from `virt-operator`. It is not part of the core KubeVirt installation, has
+its own release lifecycle, and is installed/upgraded separately by the cluster administrator.
+This architectural decision provides clear separation of concerns and simplifies
+compatibility.
 
-This proposal adopts a **phased migration approach** where metrics, recording
-rules, and alerts are gradually moved from embedded (core components) to
-external repositories over multiple KubeVirt releases.
+### Upgrade Scenarios
 
-**Migration Philosophy**: **Progressive migration with backward compatibility**
-- **Phase out** embedded approach in future versions
-- **Maintain** embedded monitoring in older/current versions
-- **Provide** external alternatives that work across versions
+**Upgrading KubeVirt without monitoring:**
 
-### Detailed Migration Strategy
+- Core KubeVirt upgrade proceeds normally.
+- No metrics available (expected behavior).
+- No action required.
 
-#### Current State Assessment
-- **Embedded metrics**: Exposed directly by virt-handler, virt-controller,
-  virt-api, virt-operator
-- **Embedded rules/alerts**: Defined in kubevirt/kubevirt repository
-- **Tight coupling**: Monitoring tied to KubeVirt release cycle
+**Upgrading KubeVirt with monitoring desired:**
 
-#### Target State
-- **External metrics collection**: Hybrid approach with standalone repositories
-- **External monitoring**: Independent lifecycle in kubevirt/monitoring
-- **Loose coupling**: Monitoring evolves independently
-- **Keep existing metrics**: All current endpoints remain functional
-- **Add hybrid collection**: Provide more efficient alternatives
-- **User choice**: Let users decide when and if to switch
-- **Long-term coexistence**: Both approaches supported indefinitely
+- Install/upgrade `kubevirt-observability-controller` independently (it is not managed by
+  `virt-operator`).
+- Requires KubeVirt version with the new `GetMonitoringData` RPC.
+- Can be updated on its own release cadence without updating KubeVirt.
 
-### Update Path
-1. **Phase 1**: Deploy central collector alongside existing metrics (dual mode)
-2. **Phase 2**: Add libvirt sidecar to virt-handler
-3. **Phase 3**: Update Prometheus configuration to scrape new endpoints
-4. **Phase 4**: Validate metrics parity and compatibility
-5. **Phase 5**: Deprecate embedded metrics in core components
-6. **Phase 6**: Remove embedded metrics (breaking change with migration period)
+### Rollback Scenarios
 
-### Rollback Strategy
-- **Central collector removal**: Simply delete deployment, no impact on VMs
-- **Sidecar removal**: Remove sidecar patch from KubeVirt CR, restart virt-handler
-- **Prometheus rollback**: Revert scraping configuration to original endpoints
-- **No VM impact**: All changes are monitoring-layer only
+**Rolling back core KubeVirt:**
 
-### Version Compatibility Strategy
+- `kubevirt-observability-controller` is external and independently managed, so no action
+    required.
+- If rolling back to a version without the new `GetMonitoringData` RPC:
+  - `virt-controller`/`virt-handler` metrics endpoints will have VM/VMI metrics again.
+  - `kubevirt-observability-controller` can remain installed (but no metrics will be
+    collected), or be uninstalled.
 
-#### Cross-Version Monitoring Strategy
+## Migration Strategy
 
-**Problem**: External monitoring repo needs to work across multiple KubeVirt versions
+Cluster-state metrics, recording rules, and alert definitions currently owned
+by `virt-controller` / `virt-operator` will migrate to
+`kubevirt-observability-controller` over two release cycles, giving users time
+to adopt the new component. The same two-phase approach applies to all three
+concerns.
 
-**Solution**: Version-aware configurations
-```yaml
-# kubevirt-monitoring/versions/v1.6/prometheus-rules.yaml
-# Recording rules that work with KubeVirt v1.6.0 embedded metrics
+### Phase 1: Dual-emission (release N)
 
-# kubevirt-monitoring/versions/v1.7/prometheus-rules.yaml
-# Enhanced rules that can use hybrid metrics if available
+**Metrics:** Both `virt-controller` and `kubevirt-observability-controller`
+emit the same cluster-state metrics. Users who install the new controller will
+see duplicate series; they can use Prometheus relabeling or recording rules to
+deduplicate if needed. This phase exists so that dashboards and alerts continue
+to work regardless of whether the new controller is installed.
 
-# kubevirt-monitoring/examples/kubevirt-cr-hybrid.yaml
-apiVersion: kubevirt.io/v1
-kind: KubeVirt
-spec:
-  configuration:
-    observability:
-      metricsCollector:
-        enabled: true
-        # Auto-detects compatible version or user can override
-```
+**Recording rules and alerts:** Both `virt-operator` and
+`kubevirt-observability-controller` reconcile the same `PrometheusRule` CRs.
+Because the rule content is identical, Prometheus evaluates the same
+expressions regardless of which controller wrote the CR. If both controllers
+are running, the last writer wins; since the rule bodies match, the outcome is
+the same.
+
+### Phase 2: Removal from core KubeVirt (release N+1)
+
+`virt-controller` stops emitting the migrated cluster-state metrics and
+`virt-operator` stops reconciling `PrometheusRule` CRs. From this release
+onward, the only source for these metrics, recording rules, and alerts is the
+`kubevirt-observability-controller`. Users who depend on any of these **must**
+install the new controller before upgrading to this release.
+
+### Timeline summary
+
+| Release | virt-controller metrics | PrometheusRule reconciliation (virt-operator) | kubevirt-observability-controller | Action required |
+|---|---|---|---|---|
+| N | Emitted | Active | Emits metrics + reconciles rules (if installed) | None: install the new controller at your convenience |
+| N+1 | **Removed** | **Removed** | Sole source of metrics, rules, and alerts | Install kubevirt-observability-controller before upgrading |
+
+### Communication plan
+
+- Release N release notes will announce the deprecation of cluster-state
+  metrics in `virt-controller` and `PrometheusRule` management in
+  `virt-operator`, and recommend installing
+  `kubevirt-observability-controller`.
+- Release N+1 release notes will list the removal as a breaking change with
+  a link to the installation guide for the new controller.
 
 ## Functional Testing Approach
 
-### Unit Testing
-- **Informer Logic**: Test Kubernetes API watching and metric generation
-- **Libvirt Integration**: Mock libvirt socket communication and domain stats
-- **Metric Accuracy**: Validate metric values against known VM states
-- **Error Handling**: Test failure scenarios and recovery mechanisms
+- **Unit tests**: Each metric generator function is tested independently with synthetic
+  VM/VMI objects. The unified gRPC handler is tested with mock `DomainManager` implementations
+  to verify selective serialization.
+- **Integration tests**: A test harness spins up the `kubevirt-observability-controller` with
+  a fake Kubernetes API server, creates VM/VMI objects, and asserts the expected metrics are
+  exposed on the `/metrics` endpoint.
+- **gRPC integration tests**: A test `virt-launcher` gRPC server verifies that
+  `GetMonitoringData` returns correct data for various flag combinations, and that the
+  fallback to legacy RPCs works when the new RPC is unimplemented.
+- **E2E tests**:
+  - Deploy a cluster with the new controller and verify metrics appear in Prometheus.
+  - Verify that `PrometheusRule` CRs are created, updated on config change, and removed on
+    uninstall.
+  - Perform a rolling upgrade and verify no metric gaps during the transition.
+  - Verify gRPC fallback behavior during mixed-version rolling upgrades.
 
-### Integration Testing
-- **End-to-End Metrics**: Deploy full hybrid stack and validate all metrics
-- **Monitoring Configuration**: Test external recording rules and alerts functionality
-- **Compatibility Testing**: Verify existing Grafana dashboards continue working
-- **Performance Testing**: Measure resource usage under various VM loads
-- **Migration Testing**: Test smooth transition from embedded to hybrid metrics
-and monitoring configs
+## Implementation Phases
 
-### Automation
-- **CI/CD Integration**: Automated testing in KubeVirt CI pipeline
-- **Performance Benchmarks**: Automated resource usage validation
-- **Regression Testing**: Ensure no metric data loss during transitions
-- **Multi-cluster Testing**: Validate across different Kubernetes versions
-- **Monitoring Config Validation**: Automated testing of recording rules and
-alert expressions
-
-## Risks and Mitigations
-
-### Risk: Increased Resource Usage
-**Mitigation**:
-- Implement resource limits and requests
-- Use efficient collection algorithms
-- Provide configuration for collection intervals
-
-### Risk: Metrics Compatibility
-**Mitigation**:
-- Maintain exact metric name and label compatibility
-- Implement comprehensive testing against existing dashboards
-- Provide migration guides
-
-### Risk: Deployment Complexity
-**Mitigation**:
-- Provide simple KubeVirt CR patches
-- Create automation tools and documentation
-- Support gradual rollout
-
-### Risk: Socket Access Security
-**Mitigation**:
-- Use minimal required permissions
-- Implement proper volume mounting with security contexts
-- Regular security audits
-
-## Testing Strategy
-
-### Unit Tests
-- Individual collector logic
-- Metric export functionality
-- Configuration handling
-
-### Integration Tests
-- End-to-end metric collection
-- Compatibility with existing Prometheus setups
-- Performance impact measurement
-
-### E2E Tests
-- Full KubeVirt deployment with sidecars
-- Metrics accuracy validation
-- Upgrade/downgrade scenarios
-
-## Graduation Criteria
-
-### Alpha
-- [ ] Working virt-handler sidecar implementation
-- [ ] Basic KubeVirt CR integration
-- [ ] Documentation and examples
-
-### Beta
-- [ ] All component sidecars implemented
-- [ ] Performance testing completed
-- [ ] Production deployment validation
-
-### Stable
-- [ ] Proven in production environments
-- [ ] Complete test coverage
-- [ ] Security review completed
-- [ ] Community adoption
+1. **Proto changes**: Add `GetMonitoringData` RPC, `MonitoringRequest`, and
+   `MonitoringResponse` messages. Regenerate Go code.
+2. **virt-launcher server**: Implement the `GetMonitoringData` handler, delegating to existing
+   `DomainManager` methods.
+3. **virt-handler caller**: Update the domain stats scraper, downward metrics, and REST
+   handlers to use the new RPC with version-negotiation fallback.
+4. **kubevirt-observability-controller scaffold**: Create the external component (new binary,
+   Deployment manifest, RBAC, ServiceAccount, and Service), managed outside of `virt-operator`.
+5. **Cluster-state metrics migration**: Move VM/VMI informer-based metrics from
+   `virt-controller` to the new controller.
+6. **Recording rules and alerts migration**: Move `PrometheusRule` reconciliation to the new
+   controller.
+7. **Dual-emission release (N)**: `virt-controller` continues emitting cluster-state
+   metrics and `virt-operator` continues reconciling `PrometheusRule` CRs, while
+   `kubevirt-observability-controller` emits the same metrics and reconciles the same
+   rules. Deprecation notice published in release notes.
+8. **Removal release (N+1)**: `virt-controller` stops emitting the migrated metrics and
+   `virt-operator` stops reconciling `PrometheusRule` CRs. Users must install
+   `kubevirt-observability-controller` to retain metrics, recording rules, and alerts.
 
 ## Implementation History
 
-- 2025-08-11: VEP proposal created
-- 2025-XX-XX: Alpha implementation started
-- 2025-XX-XX: Beta release
-- 2025-XX-XX: Stable release
+<!-- Filled in as implementation progresses -->
 
-## References
+## Graduation Requirements
 
-- [KubeVirt Metrics Documentation](
-  https://github.com/kubevirt/kubevirt/blob/main/docs/observability/metrics.md)
-- [Existing Sidecar Implementation](
-  https://github.com/kubevirt/kubevirt/tree/main/cmd/sidecars)
-- [KubeVirt Customization Components](
-  https://kubevirt.io/user-guide/operations/customize_components/)
-- [Prometheus Operator Integration](
-  https://github.com/prometheus-operator/prometheus-operator)
-- [KubeVirt Enhancement Process](
-  https://github.com/kubevirt/enhancements#process)
+### Alpha
+
+- [ ] Feature gate `MonitoringStackSeparation` guards KubeVirt-side code changes
+  (gRPC refactor in `virt-handler`/`virt-launcher`)
+- [ ] `GetMonitoringData` RPC implemented in `virt-launcher` and called by `virt-handler`
+  with fallback to legacy RPCs
+- [ ] Cluster-state metrics emitted by the new controller (subset of metrics migrated)
+- [ ] Unit and integration test coverage for the new RPC and controller
+
+### Beta
+
+- [ ] All cluster-state metrics migrated from `virt-controller`
+- [ ] Recording rules and alert management fully owned by the new controller
+- [ ] E2E tests covering upgrade/rollback scenarios and gRPC fallback
+- [ ] Legacy individual monitoring RPCs deprecated in documentation
+- [ ] Performance benchmarks comparing per-scrape latency before and after
+
+### GA
+
+- [ ] Legacy individual monitoring RPCs removed from `virt-handler` caller code
+  (proto definitions kept for wire compatibility)
+- [ ] Cluster-state metrics removed from `virt-controller` and `PrometheusRule`
+  reconciliation removed from `virt-operator` (release N+1);
+  `kubevirt-observability-controller` is the sole source for metrics, recording
+  rules, and alerts
+- [ ] Upgrade/rollback tests pass across two consecutive releases
+- [ ] Documentation updated with new architecture diagrams and operator guide
