@@ -304,8 +304,13 @@ Maintain backwards compatibility with existing live migrations.
 
 Including feature gate.
 
+Alpha is complete, moving to beta
+
+
 ### Beta
 API is mature and stable and maintains backwards compatilibity with existing live migrations.
+
+Current phase
 
 ### GA
 Remove feature gate
