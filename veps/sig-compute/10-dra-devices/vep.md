@@ -178,16 +178,24 @@ KEP-5304 requires drivers to populate device metadata files:
 
 #### File Location
 
-Metadata files are written at a well-known path:
+**Host Path** (where DRA driver writes the file):
+```
+/var/run/dra-device-attributes/<driver-name>/<claim-name>/metadata.json
+```
 
+**Container Path** (where virt-launcher reads the file):
 ```
-/var/run/dra-device-attributes/<driver-name>/<namespace>/<claim-name>/metadata.json
+/var/run/dra-device-attributes/<driver-name>/<claim-name>/metadata.json
 ```
 
-Example for a GPU claim:
-```
-/var/run/dra-device-attributes/gpu.example.com/gpu-test1/my-gpu-claim/metadata.json
-```
+The host path is bind-mounted into the container via CDI at the same location.
+
+**Example for a GPU claim:**
+
+| Path Type | Example |
+|-----------|---------|
+| Host | `/var/run/dra-device-attributes/gpu.example.com/my-gpu-claim/metadata.json` |
+| Container | `/var/run/dra-device-attributes/gpu.example.com/my-gpu-claim/metadata.json` |
 
 #### Example: Kubernetes Objects to Metadata File
 
@@ -292,7 +300,7 @@ spec:
 ```
 
 The DRA driver generates the following metadata file at:
-`/var/run/dra-device-attributes/gpu.example.com/gpu-test1/virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28/metadata.json`
+`/var/run/dra-device-attributes/gpu.example.com/virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28/metadata.json`
 
 ```json
 {
@@ -303,6 +311,7 @@ The DRA driver generates the following metadata file at:
     "namespace": "gpu-test1",
     "uid": "8ffb7e04-6c4b-4fc7-bbaa-c60d9a1e0eaa"
   },
+  "podClaimName": "gpu-resource-claim",
   "requests": [
     {
       "name": "gpu",
@@ -325,6 +334,9 @@ The DRA driver generates the following metadata file at:
 }
 ```
 
+> **Note:** The `podClaimName` field is only present for template-generated claims. For pre-existing claims
+> (where `resourceClaimName` is specified directly in the pod spec), this field is absent.
+
 #### JSON Schema
 
 ```json
@@ -336,6 +348,7 @@ The DRA driver generates the following metadata file at:
     "namespace": "gpu-test1",
     "uid": "abc-123-def"
   },
+  "podClaimName": "pgpu-generated-claim-name-from-template",
   "requests": [
     {
       "name": "pgpu-request",
@@ -361,8 +374,9 @@ The DRA driver generates the following metadata file at:
 
 | Field | Type | Source | Description |
 |-------|------|--------|-------------|
-| `metadata.name` | string | Automatic | Claim name |
+| `metadata.name` | string | Automatic | Actual ResourceClaim object name |
 | `metadata.namespace` | string | Automatic | Claim namespace |
+| `podClaimName` | string | Automatic | User-defined claim name from `pod.spec.resourceClaims[].name`. Only present for template-generated claims. |
 | `requests[].name` | string | Automatic | Request name from ResourceClaim |
 | `requests[].devices[].driver` | string | Automatic | Driver name |
 | `requests[].devices[].pool` | string | Automatic | Pool name from allocation |
@@ -384,16 +398,29 @@ DRA GPU drivers that want to support KubeVirt must include the following attribu
 
 #### Virt-Launcher Parsing
 
-Virt-launcher discovers and parses metadata files using the following steps:
+When a VMI references a DRA device via `gpu.claimName`, virt-launcher must resolve this user-defined name
+to the actual ResourceClaim to locate the correct metadata file. The resolution differs based on claim type:
 
-1. Glob for metadata files at `/var/run/dra-device-attributes/*/<namespace>/<claim-name>/metadata.json`
-2. Read and parse each JSON file as `DeviceMetadata`
-3. Iterate through `requests[]` to find the matching request name
-4. Iterate through `devices[]` within each request
-5. Extract the appropriate attribute based on device type:
-   - Passthrough GPU: `attributes["resources.kubernetes.io/pciBusID"].stringValue`
-   - Mediated device: `attributes["mdevUUID"].stringValue`
-6. Use the extracted attribute to generate the libvirt domain XML
+- **Template-generated claims** (`resourceClaimTemplateName`): The metadata file includes a `podClaimName` field
+  containing the user-defined name.
+- **Pre-existing claims** (`resourceClaimName`): The user-defined name in `vmi.spec.resourceClaims[].name` directly
+  maps to the actual claim name specified in `resourceClaimName`.
+
+#### Virt-Launcher Claim Resolution Algorithm
+
+For each GPU entry in `vmi.spec.domain.devices.gpus[]`:
+
+1. Get the user-defined claim name from `gpu.claimName`
+2. Find the matching entry in `vmi.spec.resourceClaims[]` by name
+3. **If `resourceClaimName` is set** (pre-existing claim):
+   - The actual claim name equals `resourceClaimName`
+   - Locate metadata file at container path `/var/run/dra-device-attributes/*/<resourceClaimName>/metadata.json`
+4. **If `resourceClaimTemplateName` is set** (template-generated claim):
+   - Glob all metadata files at container path `/var/run/dra-device-attributes/*/*/metadata.json`
+   - Parse each file and match where `podClaimName` equals `gpu.claimName`
+5. Within the matched metadata file, find the request where `requests[].name` equals `gpu.requestName`
+6. Extract device attributes (`resources.kubernetes.io/pciBusID` or `mdevUUID`)
+7. Generate libvirt domain XML using extracted attributes
 
 ### Webhook changes
 
@@ -415,7 +442,8 @@ Note: The feature gate verification when VMI requesting DRA device will either b
 
 1. For devices allocated using DRA, virt-launcher reads device attributes from metadata files mounted via CDI
    (as defined by KEP-5304). This replaces the need to read from VMI status or environment variables.
-2. Virt-launcher globs for metadata files or parses JSON by claim name to find the allocated device attributes.
+2. Virt-launcher resolves user-defined claim names to actual ResourceClaim names using the algorithm described in
+   [Claim Name Resolution](#claim-name-resolution) and [Virt-Launcher Claim Resolution Algorithm](#virt-launcher-claim-resolution-algorithm).
 3. Virt-launcher extracts the required attributes:
    - For passthrough GPUs: `resources.kubernetes.io/pciBusID` (e.g., "0000:65:00.0")
    - For mediated devices (vGPU): `mDevUUID` (e.g., "aa618089-8b16-4d01-a136-25a0f3c73123")
@@ -427,9 +455,71 @@ Note: The feature gate verification when VMI requesting DRA device will either b
 
 ## API Examples
 
+### VM with Multiple GPUs (Template and Pre-existing Claims)
+
+This example demonstrates a VMI with two GPUs: one from a template-generated claim and one from a pre-existing shared claim.
+
+```yaml
+---
+# Pre-existing shared GPU claim (can be shared across pods)
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: my-shared-gpu
+  namespace: gpu-test
+spec:
+  devices:
+    requests:
+    - name: shared-request
+      exactly:
+        deviceClassName: gpu.example.com
+---
+# Template for dynamic GPU allocation
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: pgpu-claim-template
+  namespace: gpu-test
+spec:
+  spec:
+    devices:
+      requests:
+      - name: template-request
+        exactly:
+          deviceClassName: vgpu.example.com
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  name: vmi-multi-gpu
+  namespace: gpu-test
+spec:
+  resourceClaims:
+  - name: dynamic-gpu                            # user-defined name
+    resourceClaimTemplateName: pgpu-claim-template
+  - name: existing-gpu                           # user-defined name
+    resourceClaimName: my-shared-gpu             # actual claim name
+  domain:
+    devices:
+      gpus:
+      - name: pgpu
+        claimName: dynamic-gpu
+        requestName: template-request
+      - name: vgpu
+        claimName: existing-gpu
+        requestName: shared-request
+```
+
+**Claim Resolution for this example:**
+
+| GPU | `claimName` | Claim Type | Actual Claim Name | Resolution Method |
+|-----|-------------|------------|-------------------|-------------------|
+| `pgpu` | `dynamic-gpu` | Template | `vmi-multi-gpu-dynamic-gpu-xyz123` | Match via `podClaimName` field in metadata |
+| `vgpu` | `existing-gpu` | Pre-existing | `my-shared-gpu` | Direct from `resourceClaimName` |
+
 ### VM API with PassThrough GPU
 
-```
+```yaml
 ---
 # this is a cluster scoped resource
 apiVersion: resource.k8s.io/v1
@@ -707,7 +797,7 @@ GPU DRA driver authors who want their drivers to work with KubeVirt must:
 
 3. **Verify metadata files** are written at:
    ```
-   /var/run/dra-device-attributes/<driver-name>/<namespace>/<claim-name>/metadata.json
+   /var/run/dra-device-attributes/<driver-name>/<claim-name>/metadata.json
    ```
 
 Note: Virt-launcher will glob for metadata files at `/var/run/dra-device-attributes/*/` and extract the
