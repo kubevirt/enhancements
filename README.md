@@ -25,7 +25,7 @@ a common process to ensure synchronization between SIGs and uniformity of the pr
 
 2. **VEP Creation**: VEP authors will initiate proposals via PRs to the `kubevirt/enhancements` repository.
    See the [VEP template](https://github.com/kubevirt/enhancements/blob/main/veps/NNNN-vep-template/vep.md),
-   each section needs to be filled even if the section doesn't apply to the VEP.
+   each section needs to be filled even if the section doesn't apply to the VEP. The Issue's ID is used to for the VEP ID, title of the PR should start with "VEP-<ID>"
 
 3. **SIG Review and Collaboration**: Although each VEP can have multiple target SIGs, it needs to have a single owning SIG.
    In case of a cross SIG feature, the most relevant SIG should be chosen.
@@ -46,6 +46,8 @@ a common process to ensure synchronization between SIGs and uniformity of the pr
 5. **Single source of truth**: Each VEP will be the authoritative reference for the associated feature. This aligns with
    the Kubernetes KEP process. It will ensure that each enhancement includes all the relevant information, including the
    design and the state.
+
+6. **Graduation**: The author of the VEP is responsible to keep the tracker issue up-to-date, referencing each implementation/bug fix PR, bugs reported as an issue or in other channels. In order to move the VEP to next phase author needs to open new PR updating the VEP's history and setting it to the right state. This update PR also serves as additional review for acceptence criteria for the next stage.
 
 ### Responsibilities
 
@@ -157,3 +159,6 @@ that seems most relevant for them. The SIG will either own the VEP or suggest th
 While doing so is valid, it is discouraged. If an implementation was already merged but is ruled out as part 
 of the VEP update this might lead to reverts, and the VEP owner should be aware of this risk. It is always 
 recommended to merge a VEP update before starting to implement.
+
+**How to graduate a VEP?**
+Author needs to open a PR to update existing VEP, a reviewers will feedback on what needs to be done in order to move forward.
