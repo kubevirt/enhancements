@@ -12,8 +12,8 @@ a common process to ensure synchronization between SIGs and uniformity of the pr
 **Glossary**
 
 - VEP: Virtualization Enhancement Proposal
-- EF: Enhancement Freeze
-- CF: Code Freeze
+- EF: Enhancement Freeze, Deadline for merging a VEP for next release
+- CF: Code Freeze, Deadline for all implementation to be merged referenced by VEP
 - RC: Release Candidate
 
 ## Process
