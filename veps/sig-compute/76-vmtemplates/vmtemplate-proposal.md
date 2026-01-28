@@ -783,6 +783,11 @@ in an additional binary called `virttemplatectl`. This binary uses the same
 internal structure as `virtctl`, so in the v1.8.0 cycle, these new commands
 can be imported into `virtctl`.
 
+To enable the import of the template logic developed in the
+`kubevirt/virt-template` repository, the logic is extracted into a
+separate submodule, which is published as `kubevirt.io/virt-template-engine`.
+This requires an additional repository called `kubevirt/virt-template-engine`.
+
 ### template.kubevirt.io/v1beta1
 
 #### Import/Export of VirtualMachineTemplates in standardized format (optional in v1.8.0, full support in v1.9.0)
