@@ -186,17 +186,24 @@ Outline any alternative designs that have been considered)
 Overview of how the design scales)
 -->
 
+
 ## Update/Rollback Compatibility
 
 <!--
 Does this impact update compatibility and how?)
 -->
 
+- This is upgrade compatible.
+- On rollback, VMs will fall back to the old behavior.
+
 ## Functional Testing Approach
 
 <!--
 An overview on the approaches used to functional test this design)
 -->
+
+- Unit tests: add coverage for new code.
+- E2E tests: including cases for guest os shutdown and crash.
 
 ## Implementation History
 
