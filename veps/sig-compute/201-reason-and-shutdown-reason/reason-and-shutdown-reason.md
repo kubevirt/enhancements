@@ -213,6 +213,9 @@ For example:
 03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
 -->
 
+10-02-2026: Draft PR: https://github.com/kubevirt/kubevirt/pull/16787
+
+
 ## Graduation Requirements
 
 <!--
