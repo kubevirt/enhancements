@@ -36,8 +36,8 @@ Provide a brief overview of the topic)
 Why this enhancement is important
 -->
 
-Recovery logic for a shutdown machine depends on the reason for the shutdown:
-- If the machine was cleanly shutdown by the user, not automatic recovery is needed
+Implementing automatice recovery logic for VM depends on the reason for the shutdown:
+- If the VM was cleanly shutdown by the user, no automatic recovery is needed
 - For other cases, automatic recovery may take place.
 
 "Cleanly shutdown by a user" can be recognized by the following conditions:
