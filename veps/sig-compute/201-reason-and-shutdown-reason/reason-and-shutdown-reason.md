@@ -180,6 +180,8 @@ const (
 Outline any alternative designs that have been considered)
 -->
 
+`ShutdownReason` could be set as an annotation on `VMI` instead of introducing `vmi.Status.ShutdownReason`.
+
 ## Scalability
 
 <!--
