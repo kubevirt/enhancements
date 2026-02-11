@@ -1,4 +1,4 @@
-# VEP #201: Reason for each Phase + ShutdownReason
+# VEP #201: Reason for each Phase + ShutdownInitiatedBy
 
 ## Release Signoff Checklist
 
@@ -25,9 +25,9 @@ Provide a brief overview of the topic)
   - `VirtLauncherCrashed` (for `Phase = v1.Failed`)
   - `VirtLauncherSecureBootUnsupported` (for `Phase = v1.Failed`)
   - `VirtLauncherIrrecoverable` (for `Phase = v1.Failed`)
-- Introduce `vmi.Status.ShutdownReason` to indicate the reason for initiating VMI shutdown. Shutdown reasons include:
-  - `PodDeleted`
-  - `VMIDeleted`
+- Introduce `vmi.Status.ShutdownInitiatedBy` to indicate the reason for initiating VMI shutdown. `ShutdownInitiatedBy` values include:
+  - `GracefulPodDeletion`
+  - `VMIDeletion`
 
 
 ## Motivation
@@ -42,7 +42,7 @@ Implementing automatice recovery logic for VM depends on the reason for the shut
 
 "Cleanly shutdown by a user" can be recognized by the following conditions:
 - `Reason == Shutdown` (for `Phase = v1.Suceeded`)
-- `ShutdownReason NOT IN (PodDeleted, VMIDeleted)`
+- `ShutdownInitiatedBy NOT IN (GracefulPodDeletion, VMIDeletion)`
 
 
 ## Goals
@@ -53,8 +53,8 @@ The desired outcome
 
 Recognize user initiated shutdown alongside the result wether the shutdown succeeded, the VM crashed, or kubevirt failed.
 
-- Reason is set for final phases `Failed` and `Succeeded`
-- ShutdownReason is set whenever a shutdown is initiated by kubevirt
+- `Reason` is set for final phases `Failed` and `Succeeded`
+- `ShutdownInitiatedBy` is set whenever a shutdown is initiated by kubevirt
 
 ## Non Goals
 
@@ -98,8 +98,8 @@ This should be brief and concise. We want just enough to get the point across
 
 - Set `vmi.Status.Reason` each time `vmi.Status.Phase` is set.
   - Essentially adding `Reason = ` for every `Phase = `.
-- Introduce `vmi.Status.ShutdownReason` to indicate the reason for initiating VMI shutdown.
-  - Set `ShutdownReason` every time `shouldShutdown = true`
+- Introduce `vmi.Status.ShutdownInitiatedBy` to indicate the reason for initiating VMI shutdown.
+  - Set `ShutdownInitiatedBy` every time `shouldShutdown = true`
 
 ## API Examples
 
@@ -109,7 +109,7 @@ Tangible API examples used for discussion
 
 Notice that:
 - `Reason` currently already exists as `string`. It's proposed to change it to `VirtualMachineInstanceReason` with proper `const`s
-- `ShutdownReason` is added
+- `ShutdownInitiatedBy` is added
 
 ```golang
 type VirtualMachineInstanceStatus struct {
@@ -118,8 +118,8 @@ type VirtualMachineInstanceStatus struct {
 	// +optional
 	Reason VirtualMachineInstanceReason `json:"reason,omitempty"`
 
-	// A brief CamelCase message indicating details about why the machine shutdown was initiated.
-	ShutdownReason VirtualMachineInstanceShutdownReason `json:"shutdownReason,omitempty"`
+	// A brief CamelCase message indicating details about how the machine shutdown was initiated.
+	ShutdownInitiatedBy VirtualMachineInstanceShutdownInitiatedBy `json:"shutdownInitiatedBy,omitempty"`
   
 	// Phase is the status of the VirtualMachineInstance in kubernetes world. It is not the VirtualMachineInstance status, but partially correlates to it.
 	Phase VirtualMachineInstancePhase `json:"phase,omitempty"`
@@ -156,21 +156,21 @@ const (
 )
 ```
 
-ShutdownReason values
+ShutdownInitiatedBy values
 
 ```golang
 
-// VirtualMachineInstanceShutdownReason indicated the reason for initiating shutdown.
-type VirtualMachineInstanceShutdownReason string
+// VirtualMachineInstanceShutdownInitiatedBy indicated the how the shutdown is initiated.
+type VirtualMachineInstanceShutdownInitiatedBy string
 
-// These are the valid shutdown reasons of vmis.
+// These are the valid shutdown initiation sources of vmis.
 const (
-	// When a VirtualMachineInstance Object is first initialized and no shutdown reason is present,
-	// or when the shutdown is initiated by the user.
-	VmiShutdownReasonUnset VirtualMachineInstanceShutdownReason = ""
+	// When a VirtualMachineInstance Object is first initialized,
+	// or when the shutdown is initiated by the guest os.
+	VmiShutdownInitiatedByUnset VirtualMachineInstanceShutdownInitiatedBy = ""
 
-	PodDeletedShutdownReason VirtualMachineInstanceShutdownReason = "PodDeleted"
-	VMIDeletedShutdownReason VirtualMachineInstanceShutdownReason = "VMIDeleted"
+	GracefulPodDeletionShutdownInitiatedBy VirtualMachineInstanceShutdownInitiatedBy = "GracefulPodDeletion"
+	VMIDeletionShutdownInitiatedBy VirtualMachineInstanceShutdownInitiatedBy = "VMIDeletion"
 )
 ```
 
@@ -180,7 +180,7 @@ const (
 Outline any alternative designs that have been considered)
 -->
 
-`ShutdownReason` could be set as an annotation on `VMI` instead of introducing `vmi.Status.ShutdownReason`.
+`ShutdownInitiatedBy` could be set as an annotation on `VMI` instead of introducing `vmi.Status.ShutdownInitiatedBy`.
 
 ## Scalability
 
