@@ -26,7 +26,7 @@ Provide a brief overview of the topic)
   - `VirtLauncherSecureBootUnsupported` (for `Phase = v1.Failed`)
   - `VirtLauncherIrrecoverable` (for `Phase = v1.Failed`)
 - Introduce `vmi.Status.ShutdownInitiatedBy` to indicate the reason for initiating VMI shutdown. `ShutdownInitiatedBy` values include:
-  - `GracefulPodDeletion`
+  - `PodDeletion`
   - `VMIDeletion`
 
 
@@ -42,7 +42,7 @@ Implementing automatice recovery logic for VM depends on the reason for the shut
 
 "Cleanly shutdown by a user" can be recognized by the following conditions:
 - `Reason == Shutdown` (for `Phase = v1.Suceeded`)
-- `ShutdownInitiatedBy NOT IN (GracefulPodDeletion, VMIDeletion)`
+- `ShutdownInitiatedBy NOT IN (PodDeletion, VMIDeletion)`
 
 
 ## Goals
@@ -169,7 +169,7 @@ const (
 	// or when the shutdown is initiated by the guest os.
 	VmiShutdownInitiatedByUnset VirtualMachineInstanceShutdownInitiatedBy = ""
 
-	GracefulPodDeletionShutdownInitiatedBy VirtualMachineInstanceShutdownInitiatedBy = "GracefulPodDeletion"
+	PodDeletionShutdownInitiatedBy VirtualMachineInstanceShutdownInitiatedBy = "PodDeletion"
 	VMIDeletionShutdownInitiatedBy VirtualMachineInstanceShutdownInitiatedBy = "VMIDeletion"
 )
 ```
