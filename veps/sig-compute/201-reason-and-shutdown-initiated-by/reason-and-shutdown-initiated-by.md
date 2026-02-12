@@ -18,13 +18,14 @@ Provide a brief overview of the topic)
   - `NodeUnresponsive` (already exists for `Phase = v1.Failed`)
   - `Shutdown` (for `Phase = v1.Suceeded`)
   - `Crashed` (for `Phase = v1.Failed`)
-  - `Migrated` (for `Phase = v1.Suceeded`)
-  - `MigrationTimeout` (for `Phase = v1.Failed`)
-  - `MigrationFailed` (for `Phase = v1.Failed`)
-  - `VirtLauncherUnresponsive` (for `Phase = v1.Failed`)
-  - `VirtLauncherCrashed` (for `Phase = v1.Failed`)
-  - `VirtLauncherSecureBootUnsupported` (for `Phase = v1.Failed`)
-  - `VirtLauncherIrrecoverable` (for `Phase = v1.Failed`)
+  - Other possible values that's **out of scope**:
+	- `Migrated` (for `Phase = v1.Suceeded`)
+	- `MigrationTimeout` (for `Phase = v1.Failed`)
+	- `MigrationFailed` (for `Phase = v1.Failed`)
+	- `VirtLauncherUnresponsive` (for `Phase = v1.Failed`)
+	- `VirtLauncherCrashed` (for `Phase = v1.Failed`)
+	- `VirtLauncherSecureBootUnsupported` (for `Phase = v1.Failed`)
+	- `VirtLauncherIrrecoverable` (for `Phase = v1.Failed`)
 - Introduce `vmi.Status.ShutdownInitiatedBy` to indicate the reason for initiating VMI shutdown. `ShutdownInitiatedBy` values include:
   - `PodDeletion`
   - `VMIDeletion`
@@ -62,7 +63,15 @@ Recognize user initiated shutdown alongside the result wether the shutdown succe
 Why this enhancement is important Limitations to the scope of the design
 -->
 
-- Reasons for non-final phases like `Scheduled`, and `Running`
+- For non-final phases `Scheduled`, and `Running`, providing Reasons is out of scope
+- For final phases `Succeeded` and `Failed`, the following reasons are possible but out of scope:
+  - `Migrated` (for `Phase = v1.Suceeded`)
+  - `MigrationTimeout` (for `Phase = v1.Failed`)
+  - `MigrationFailed` (for `Phase = v1.Failed`)
+  - `VirtLauncherUnresponsive` (for `Phase = v1.Failed`)
+  - `VirtLauncherCrashed` (for `Phase = v1.Failed`)
+  - `VirtLauncherSecureBootUnsupported` (for `Phase = v1.Failed`)
+  - `VirtLauncherIrrecoverable` (for `Phase = v1.Failed`)
 
 ## Definition of Users
 
