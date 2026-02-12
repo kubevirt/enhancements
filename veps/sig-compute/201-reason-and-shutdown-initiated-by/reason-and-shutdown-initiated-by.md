@@ -36,7 +36,7 @@ Provide a brief overview of the topic)
 Why this enhancement is important
 -->
 
-Implementing automatice recovery logic for VM depends on the reason for the shutdown:
+Implementing automatic recovery logic for VM depends on the reason for the shutdown:
 - If the VM was cleanly shutdown by the user, no automatic recovery is needed
 - For other cases, automatic recovery may take place.
 
@@ -180,7 +180,20 @@ const (
 Outline any alternative designs that have been considered)
 -->
 
+### Using annotations instead of status
+
 `ShutdownInitiatedBy` could be set as an annotation on `VMI` instead of introducing `vmi.Status.ShutdownInitiatedBy`.
+
+I still believe the status is the right place for it.
+
+### Implement an Event instead of Status change
+
+An Event will **not suffice** in this case because to detect guest shutdown we need to depend on two separate parts of the status `ShutdownInitiatedBy` and `Reason` that change at different times.
+
+For example, on one iteration of virt-handler, `ShutdownInitiatedBy` is set. Then on a later iteration `Reason` is set to `Shutdown`. Having both stored in the status, a client watching the VMI status will be able to decide that it's a guest shutdown depending on the condition:
+- `Reason == Shutdown` (for `Phase = v1.Suceeded`)
+- `ShutdownInitiatedBy NOT IN (PodDeletion, VMIDeletion)`
+
 
 ## Scalability
 
