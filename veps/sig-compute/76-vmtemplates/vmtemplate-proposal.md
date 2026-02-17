@@ -760,21 +760,26 @@ eventually be adapted to the `VirtualMachineTemplates` found in the new
 See [WIP: Convert to KubeVirt VirtualMachineTemplates](https://github.com/kubevirt/common-templates/pull/696)
 for the work that was done during the v1.7.0 cycle.
 
-#### Extended status in VirtualMachineTemplates (v1.8.0)
+#### Admission-time validation of VirtualMachineTemplates (v1.8.0)
 
-To better keep track of the resources associated with a `VirtualMachineTemplate`,
-the status of the CRD should be extended with a list of volumes that the
-template depends on. The list should also contain the `Ready` condition of
-the volumes.
+The original design considered extending the status of `VirtualMachineTemplates`
+with a list of dependent volumes and their readiness conditions, maintained by
+a controller that would watch and reconcile against resources such as `PVCs`,
+`VolumeSnapshots`, and `DataSources`. This approach was dropped because
+watching and reconciling on that many external resource types would be too
+costly in terms of controller complexity and resource consumption, especially
+at scale.
 
-This function requires that the `VirtualMachineTemplate` controller evaluates
-all `DataVolumeTemplates` in a specific template and constructs the status from
-all volumes that it can resolve.
-
-Furthermore, the controller can dry-run process and create a
-`VirtualMachine` from a `VirtualMachineTemplate`, to verify that processing
-of the template will result in a valid `VirtualMachine` definition. To reflect
-a failing dry-run, the `Ready` condition of the template can be set to `False`.
+Instead, the admitter for `VirtualMachineTemplates` should be extended to
+catch terminal issues at admission time. Specifically, when all required
+parameters of a template have a default value, the admitter should attempt to
+render the `VirtualMachine` definition from the template. If the rendered
+`VirtualMachine` is invalid (e.g. due to structural issues in the spec that
+would always prevent a valid VM from being created), the admission request
+should be rejected. This ensures that templates which are fundamentally broken
+and can never produce a valid `VirtualMachine` without further modification
+are caught immediately on create or update, without requiring a controller
+to continuously reconcile against external resources.
 
 #### Import of subcommands into `virtctl` (v1.8.0)
 
