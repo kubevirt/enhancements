@@ -13,7 +13,6 @@ a stable API (CRD) version, e.g. `kubevirt.io/v1`.
 
 ## Overview
 
-### Motivation
 KubeVirt has grown into a mature virtualization management solution
 with a large set of features.
 
@@ -51,49 +50,7 @@ proven to be actually in use (and useful) before graduating.
 > to all users. GA features need to comply with [semver](https://semver.org/)
 > which adds constraints on their ability to change (including deprecation).
 
-### Goals
-- Define the process a feature needs to pass in order to be
-  Generally Available.
-- Define the process a feature needs to pass in order to be removed.
-- Provide policies and rules on how to manage a feature during its
-  lifetime.
-
-### Non Goals
-- Implement enforcement tooling to keep features in sync with
-  the lifecycle rules.
-
-### Definition Of Users
-- Development contributors.
-- Cluster operators.
-
-### User Stories
-- As a KubeVirt contributor, I would like to introduce a new useful
-  feature and follow it to graduation (GA).
-- As a KubeVirt contributor, I would like to remove a feature
-  that has not yet reached its formal graduation.
-- As a KubeVirt contributor, I would like to remove a feature
-  that has already graduated.
-  > **Note**: Removal of a GA feature is considered an exception.
-  > Strong arguments and a wide agreement is required for such an action.
-- As a KubeVirt cluster operator, I would like to experiment with
-  a newly-proposed ("Alpha") feature in a controlled environment, to see
-  if it makes sense to me.
-- As a KubeVirt cluster operator, I would like to evaluate an
-  undergraduate ("Beta") feature in a real-life environment with actual users.
-- As a KubeVirt cluster operator, I would like to keep using a feature
-  that got graduated after I used it during the "Beta" evaluation period.
-- As a KubeVirt cluster operator, I would like to know that
-  an experimental ("Alpha") feature is planned to be removed.
-- As a KubeVirt cluster operator, I would like to know that
-  an undergraduate ("Beta") feature is planned to be removed.
-- As a KubeVirt cluster operator, I would like to stop using a feature
-  that got removed.
-
-### Repos
-This is a cross repo project policy under the
-[kubevirt](https://github.com/kubevirt) organization.
-
-## Proposal Design
+## Feature Lifecycle Policy
 The proposal on how to define a feature lifecycle is influenced by
 processes and policies from the Kubernetes project.
 These sources are scattered around, each focusing on different
@@ -303,16 +260,7 @@ Therefore, it should be acceptable to have exceptions from time to time
 given a very good reasoning and an agreement from 2/3 of the project
 maintainers (also known as "approvers").
 
-## Implementation Phases
-- Add a section in the
-  [design proposal template](https://github.com/kubevirt/community/blob/main/design-proposals/proposal-template.md)
-  that describes the planned timelines for the feature stages.
-- Add a reference to the feature-lifecycle documentation to assure contributors
-  know the process and policy.
-- Prepare a user-facing document that describes the usability implications of
-  this feature lifecycle.
-
-## Miscellaneous
+### Miscellaneous
 
 - New features are to be introduced to major and minor release versions only.
   For clarification, this implies that new features are **not** to be backported.
