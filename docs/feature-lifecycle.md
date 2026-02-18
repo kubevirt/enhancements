@@ -5,10 +5,10 @@
 KubeVirt requires a clear policy on how features are introduced,
 evaluated and finally graduated or removed.
 
-This proposal defines the steps and policies to follow in order
+This document defines the steps and policies to follow in order
 to manage a feature and its lifecycle in KubeVirt.
 
-The proposal is focusing on introducing features in
+The document is focusing on introducing features in
 a stable API (CRD) version, e.g. `kubevirt.io/v1`.
 
 ## Overview
@@ -32,7 +32,7 @@ proven to be actually in use (and useful) before graduating.
 > which adds constraints on their ability to change (including deprecation).
 
 ## Feature Lifecycle Policy
-The proposal on how to define a feature lifecycle is influenced by
+The feature lifecycle policy on how to define a feature lifecycle is influenced by
 processes and policies from the Kubernetes project.
 These sources are scattered around, each focusing on different
 aspects of a feature:
@@ -41,15 +41,11 @@ aspects of a feature:
 - [Changing the API](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api_changes.md)
 - [Deprecation](https://kubernetes.io/docs/reference/using-api/deprecation-policy/)
 
-The proposal takes the top-down approach, starting with the high level
+The policy takes the top-down approach, starting with the high level
 flow that a common feature will traverse through.
-Continuing with actions that need to be taken and timeline suggestions.
 
 Both feature graduation and discontinuation flows are covered.
 Including the implications on users.
-
-Depending on individual topics, follow-up proposals may extend the basic
-points raised in this proposal.
 
 ### Terminology
 It is important to differentiate between Feature Gates and feature configuration.
@@ -71,7 +67,7 @@ Starting from the Alpha release, it can be removed with restrictions that
 depend on the release stage (Alpha, Beta, GA).
 
 [Removal](#removal) of features is widely discussed later
-in this proposal.
+in this document.
 
 #### Enhancement proposal
 As the first step for introducing a new feature, a formal proposal is
