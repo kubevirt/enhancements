@@ -31,6 +31,31 @@ proven to be actually in use (and useful) before graduating.
 > to all users. GA features need to comply with [semver](https://semver.org/)
 > which adds constraints on their ability to change (including deprecation).
 
+### Kubevirt's release cycle
+
+Each Kubevirt release cycle is split into 3 different phases:
+1. **Design phase**: During this phase the community will be focused on creating and reviewing VEP PRs.
+At a higher level, during this period the community will start crafting what the next release will look like;
+ensure there are enough reviewers and approvers to cover the VEPs, discuss priorities, etc.
+The VEP freeze marks the end of this phase.
+2. **Implementation phase**: This phase is centered around the implementation of the VEPs that were merged in the design phase.
+PRs that implement a VEP would be required to reference it in the PR description, which will result in the bot adding
+an `approved-vep` label to the PR.
+During this phase, the community will help review `approved-vep` PRs which will be considered as the highest priority PRs to review.
+The code freeze marks the end of this phase.
+3. **Stabilization phase**: During this time the community will focus on stabilization, allowing only bug PRs to be merged.
+The Kubevirt release marks the end of this phase.
+
+Important notes:
+- It is recommended to submit VEPs for the next releases as soon as possible.
+It is not needed, and not recommended, to wait to the design phase in order to do so.
+- PRs that are not related to any VEPs would also be reviewed and implemented during the implementation phase,
+but they will be considered to have lower priority.
+- Community members, especially VEP authors, are expected to participate in reviews.
+Those who focus solely on their own work may see their own submissions deprioritized.
+
+For the exact schedule for each Kubevirt release, please see https://github.com/kubevirt/sig-release/tree/main/releases.
+
 ## Feature Lifecycle Policy
 The feature lifecycle policy on how to define a feature lifecycle is influenced by
 processes and policies from the Kubernetes project.
