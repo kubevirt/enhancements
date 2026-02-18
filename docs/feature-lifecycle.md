@@ -22,26 +22,7 @@ With time, the challenge of supporting and maintaining such a large
 set of features raised the need to re-examine their relevance.
 It also raised the need to examine with more care features graduation.
 
-The KubeVirt community has tried to control the flow of features
-informally through feature-gates, similar to Kubernetes.
-However, as time passed, several challenges presented themselves:
-- Evaluated features rarely got graduated to GA or removed, causing
-  feature consumption to be risky for users and a maintenance burden
-  for the project contributors.
-  > **Note**: As of this writing (pre v1.2), there are 37 FGs,
-  > out of which 5 GA-ed and 2 marked for deprecation.
-  > For more information, explore the
-  > [source](https://github.com/kubevirt/kubevirt/blob/5ff12ae931cefd81514ec96f97a189ab2c179ad7/pkg/virt-config/feature-gates.go).
-- We do not have agreed-upon procedures on how and when features
-  graduate or discontinue.
-  This causes each feature to take different approaches, possibly
-  surprising users.
-
-We conclude that the current use of FGs is insufficient
-due to the lack of well-defined processes and policy on how a feature
-should progress in its lifecycle.
-
-Eventually we would like to see features being evaluated carefully
+We would like to see features being evaluated carefully
 before they are introduced, while they are experimented with and
 proven to be actually in use (and useful) before graduating.
 
@@ -243,14 +224,6 @@ These are the steps needed to deprecate & remove a feature:
     While keeping fields around for a period of a release or two makes
     sense, beyond a limited period it adds a burden on dragging leftover
     fields around to eternity.
-
-> **Note**: The only reference seen on why fields should not be removed
-> was mentioned [here](https://github.com/kubernetes/kubernetes/issues/52185).
-> But it is unclear if this is relevant for Alpha stage features.
-> Starting with a strict policy, similar to Kubernetes is recommended,
-> i.e. once fields are introduced, they should not be removed no matter
-> the feature release stage.
-> Per need, the topic can be revisited in follow-up adjustments.
 
 ### Exceptions
 While the project strives to maintain a stable contract with its users,
