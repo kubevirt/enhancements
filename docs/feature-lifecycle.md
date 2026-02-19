@@ -47,12 +47,48 @@ flow that a common feature will traverse through.
 Both feature graduation and discontinuation flows are covered.
 Including the implications on users.
 
-### Terminology
+### Feature Gates
 It is important to differentiate between Feature Gates and feature configuration.
 - Feature Gate: A flag that controls the presence or availability of a feature in the cluster.
 - Feature configuration: Cluster or workload level configuration that allows an admin or user
   (depending on the feature) to control aspects of a feature operation.
   A common usage is to determine if features are opt-in or opt-out by default.
+
+In other words, a Feature Gate flag is solely intended to control
+feature lifecycle. It should not be confused and used as a cluster
+configurable enablement of the functionality.
+In cases where the cluster admin should control a functionality,
+regardless to the feature stage, dedicated configuration fields
+should be included.
+
+#### Why is a feature gate important?
+
+A feature gate is needed for several reasons:
+- To force the user to **explicitly enable it**, therefore expressing an agreement to enable an experimental feature
+  that might be broken.
+- To loudly express that the API can be changed in a breaking way or even entirely removed at any moment
+  (according to the graduation phase. See [Graduation Phases](#graduation-phases) below).
+- To loudly express that we are not committing or promising anything regarding the feature's quality.
+  It could be broken, could be buggy, could harm security, scale, performance, etc.
+  (according to the graduation phase. See [Graduation Phases](#graduation-phases) below).
+- To (dramatically) lower the bar for new alpha features.
+  This raises the reviewers' confidence that a regression would not introduce to anyone not explicitly enabling the gate.
+
+#### Can a VEP choose to not include a feature gate?
+
+It can be decided that a VEP would not need a feature gate.
+However, in order to do so, the VEP author has to provide a strong reasoning and justification.
+
+For example, the following reasons are considered as weak reasons for avoiding a feature gate:
+- It is a simple change.
+- It is off by default, hence safe.
+- It keeps backward compatibility.
+
+Generally, avoiding a feature gate is expected to be rare.
+Possible reasons for not having a feature gates could be (although demand specific discussion):
+- It's basically impossible to keep both the old and the new living in harmony in the codebase.
+- The VEP is about reshaping an existing feature in a relatively simple way.
+- The VEP adds logic under an existing gate.
 
 ### Feature Stages
 A feature is expected to pass in the following order through the following stages:
@@ -128,13 +164,6 @@ testing, integration and documentation.
   with the previous releases.
 
   The feature functionality is no longer controlled by a FG.
-
-> **Warning**: A Feature Gate flag is solely intended to control
-> feature lifecycle. It should not be confused and used as a cluster
-> configurable enablement of the functionality.
-> In cases where the cluster admin should control a functionality,
-> regardless to the feature stage, dedicated configuration field/s
-> should be included.
 
 #### Removal
 If a feature is targeted for deprecation and retirement,
