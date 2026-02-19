@@ -116,45 +116,59 @@ Possible reasons for not having a feature gates could be (although demand specif
 - The VEP adds logic under an existing gate.
 
 ### Feature Stages
-A feature is expected to pass in the following order through the following stages:
-1. Enhancement proposal.
-2. Implementation.
-3. Release as Alpha (experimental).
-4. Release as Beta (pre-release for evaluation).
-5. Release as General Availability (graduation).
-6. Removal.
 
-Starting from the Alpha release, it can be removed with restrictions that
-depend on the release stage (Alpha, Beta, GA).
+A feature follows this sequence (optional steps are shown in parentheses).
+All VEP updates and implementation work are tied to the [KubeVirt release cycle](#kubevirts-release-cycle).
+
+1. Open a VEP tracking issue.
+2. Create and merge the initial VEP PR (expected during the **design phase**).
+3. Implement the feature with one or more PRs (expected during the **implementation phase**).
+4. (If the implementation diverges from the approved VEP, submit a VEP update PR to keep the proposal in sync).
+5. Release the feature as **Alpha** (experimental) at the end of the current release cycle. In the **next** release cycle:
+6. (If the feature is not yet ready for Beta, submit a VEP update during the design phase that describes the planned work.
+   Implement the agreed changes during the implementation phase.)
+7. To graduate to **Beta** (pre-release for evaluation):
+   Submit a VEP update during the design phase that explicitly names the upcoming release as the Beta target.
+   Implement the agreed changes during the implementation phase.
+   After all implementation PRs are merged, submit a PR to bump the version from Alpha to Beta. 
+8. (If the feature is not yet ready for GA, submit another VEP update during the design phase and implement during the implementation phase.)
+9. To graduate to **General Availability (GA)** (graduation):
+   Submit a VEP update during the design phase that explicitly names the upcoming release as the GA target.
+   Implement the agreed changes during the implementation phase.
+   After all implementation PRs are merged, submit a PR to bump the version from Beta to GA.
 
 [Removal](#removal) of features is widely discussed later
 in this document.
 
-#### Enhancement proposal
+#### Virtualization Enhancement Proposal (a.k.a. VEP)
 As the first step for introducing a new feature, a formal proposal is
-expected to be shared for public review via mailinglist and
-a [design proposal](https://github.com/kubevirt/community/tree/main/design-proposals).
+expected to be shared for public review via the
+[Kubevirt Enhancements](https://github.com/kubevirt/enhancements) repository.
 
-This is the first opportunity to evaluate a new feature.
+As mentioned above, the first step would be to open a [VEP tracker issue](https://github.com/kubevirt/enhancements/issues/new?template=vep.md).
+The issue ID will be considered as the VEP's unique ID.
+The issue is expected to remain open until the feature either reaches GA or is dropped.
+It is the VEP author's responsibility to keep the issue up-to-date and reference all related VEP update PRs and implementation PRs.
+The issue can serve as a platform for general conversations regarding the VEP.
+
+This is the way to transparently share a proposal in order to evaluate a new feature.
 The proposal needs to include motivation, goals, implementation details
-and phases. Review the [proposal template](https://github.com/kubevirt/community/blob/main/design-proposals/proposal-template.md)
+and phases. Review the [proposal template](https://github.com/kubevirt/enhancements/blob/main/veps/NNNN-vep-template/vep.md)
 for more information.
 
-#### Implementation
-The development work on the feature is expected to include coding,
-testing, integration and documentation.
-
-#### Releases
+#### Graduation phases
 - **Alpha**:
   An initial release of the feature for experimental purposes.
   Recommended for non-production usages, evaluation or testing.
 
   The API is considered unstable and may change significantly.
-  There are no backward compatability considerations and it can
+  There are no backward compatibility considerations and it can
   be removed at any time.
 
+  For this reason, the bar for adding new alpha features should be lower than Beta.
+
   The period in which a feature can remain in Alpha is limited,
-  assuring features are not piling up without control.
+  assuring unfinished features don't start piling up.
   See [release stage transition table](#release-stage-transition-table)
   for more information.
 
@@ -168,15 +182,23 @@ testing, integration and documentation.
   If there is no confidence of usage or usefulness, it may remain in
   this stage for some time.
 
-  However, the period in which a feature can remain in Beta is limited,
-  assuring features are not piling up without control.
-  See [release stage transition table](#release-stage-transition-table)
-  for more information.
-
   The API is considered stable with care not to break backward compatibility
   with previous beta releases.
   This implies that fields may only be added during this stage,
   not removed or renamed.
+ 
+  As opposed to Alpha, the bar for Beta graduation should be fairly high.
+  Generally, a feature should graduate to Beta only when both the API and the code are considered stable.
+  In fact, the ideal situation is that there are no changes at all between Beta
+  and GA graduation.
+  Minor changes are acceptable during Beta. However, major changes would possibly
+  cause the feature to be removed from the codebase with the need to start with a fresh
+  new VEP starting from scratch as alpha.
+
+  The period in which a feature can remain in Beta is limited,
+  assuring unfinished features don't start piling up.
+  See [release stage transition table](#release-stage-transition-table)
+  for more information.
 
   The feature presence is controlled using a Feature-Gate (FG) during
   runtime. It must be specified for the feature to be active.
@@ -187,6 +209,10 @@ testing, integration and documentation.
 
   The API is considered stable with care not to break backward compatibility
   with the previous releases.
+
+  The bar for GA graduation should be relatively low.
+  If a feature had been in Beta for a while with active users and no major bug,
+  it's basically ready for GA.
 
   The feature functionality is no longer controlled by a FG.
 
