@@ -65,7 +65,7 @@ This component includes a mutating webhook that automatically mutates Pods, upon
 network-resources-injector, although a standalone project, is also part of the [sriov network operator](https://github.com/k8snetworkplumbingwg/sriov-network-operator/tree/v1.6.0/bindata/manifests/webhook). It is known to run successfully in KubeVirt clusters that already include the `sriov network operator`, 
 even though it does not mutate virt-launcher pods, since the existing KubeVirt code pre-populates the pod template with the resource requests before the admission webhook operates.
 This architecture decouples KubeVirt from NAD resources, creating a cleaner separation of concerns where KubeVirt focuses on VM lifecycle management while the admission controller handles network resource injection.
-A new Feature Gate will be introduced named `DisableNADResourceInjection`, in preparation for NAD query code removal.
+A new Feature Gate will be introduced named `ExternalNetResourceInjection`, in preparation for NAD query code removal.
 If the FG is enabled:
 
 - The VMI/Migration controller code that queries NADs and populates custom resources in the virt-launcher pod template, will be skipped.
@@ -222,7 +222,7 @@ Existing e2e tests already rely on mapping of custom resources and thus will val
   Since no new code addition is planned (other than validation warnings), there's not much to protect with a multi-phased FG.
   The FG is mainly used in order to provide users with sufficient preparation time, and a means to roll back if they failed to deploy network-resources-injector.
   As such:
-  - In release 1.8, the `DisableNADResourceInjection` FG will be introduced in **disabled by default** mode.
+  - In release 1.8, the `ExternalNetResourceInjection` FG will be introduced in **disabled by default** mode.
     While the FG is enabled, KubeVirt will **not** map custom-resources, and will **not** deploy associated RBAC rules.
     The NAD query and RBAC code will be marked as deprecated.
     This provides users with 1 release period to learn about the new required dependency.
