@@ -51,7 +51,7 @@ confidential VMs can certify that they are running on confidential HW.
 From the implementation perspective, we extend the KubeVirt CR spec to enable
 attestation:
 
-```xml
+```yaml
 configuration:
   confidentialCompute:
     tdx:
@@ -105,7 +105,7 @@ The below YAML snippets provide an example of how to enable attestation in the
 KubeVirt CR. In the default configuration, enforced is false and the
 qgsSocketPath is "/var/run/tdx-qgs/qgs.socket".
 
-```xml
+```yaml
 configuration:
   confidentialCompute:
     tdx:
@@ -116,7 +116,7 @@ configuration:
 The below YAML snippets provide an example of how to enforce the enabling of
 attestation.
 
-```xml
+```yaml
 configuration:
   confidentialCompute:
     tdx:
