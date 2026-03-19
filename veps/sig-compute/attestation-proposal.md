@@ -51,7 +51,7 @@ confidential VMs can certify that they are running on confidential HW.
 From the implementation perspective, we extend the KubeVirt CR spec to enable
 attestation:
 
-```xml
+```yaml
 configuration:
   confidentialCompute:
     tdx:
@@ -105,7 +105,7 @@ The below YAML snippets provide an example of how to enable attestation in the
 KubeVirt CR. In the default configuration, enforced is false and the
 qgsSocketPath is "/var/run/tdx-qgs/qgs.socket".
 
-```xml
+```yaml
 configuration:
   confidentialCompute:
     tdx:
@@ -116,7 +116,7 @@ configuration:
 The below YAML snippets provide an example of how to enforce the enabling of
 attestation.
 
-```xml
+```yaml
 configuration:
   confidentialCompute:
     tdx:
@@ -139,10 +139,10 @@ configuration:
 - This should not impact existing VMs
 
 ## Functional Testing Approach
-- e2e tests to check that the blob from the guest point of view is correctly
+- E2E tests to check that the blob from the guest point of view is correctly
   generated.
 - Since TDX & SEV-SNP do not have support for nested virtualization this will
-  require bare metal hardware to conduct e2e testing.
+  require bare metal hardware to conduct E2E testing.
 
 ## Implementation Phases
 The initial phase of implementation will focus on integrating basic
@@ -153,16 +153,39 @@ the UNIX socket into the virt-launcher.
 
 ### Alpha
 The feature will be implemented in Alpha. We do not know if it will be possible
-to have e2e tests in Alpha due to lack of TDX hardware. We expect the feature
-to be merged without the e2e tests.
+to have E2E tests in Alpha due to lack of TDX hardware. We expect the feature
+to be merged without the E2E tests.
 
 ### Beta
-We expect e2e tests in Beta. We expect the API to be stable. We need to decide
-if we keep the path to the UNIX socket as an attribute or we remove it in favor
-of a default location. Finally we need to re-evaluate whether there is any use
-case for enforcing the existance of QGS on the KubeVirt side (i.e use of the
-`attestation.enforced` field) and if so whether it makes sense to extend these
-enforcements to support per-VMI enforcements (as opposed to only cluster-wide).
+We expect E2E tests to be implemented in Beta. We also expect the API to be
+stable by Beta, and to this end, we must revisit the following topics:
+- Decide whether to keep the `confidentialCompute.tdx.attestion.qgsSocketPath`
+  configuration option to custom QGS path locations or to remove it in favor of
+  a default location (i.e. `/var/run/tdx-qgs/qgs.socket`).
+- Decide whether to enforce the existance of QGS on the KubeVirt side (i.e use
+  of the `confidentialCompute.tdx.attestation.enforced` field) and if so whether 
+  it makes sense to extend these enforcements to support per-VMI enforcements (as
+  opposed to only cluster-wide).
+
+In addition to this, the following design-level consideration should also be
+revisited:
+- Decide whether TDX detection should be removed from node-labeller (since the
+  device plugin already achieves this purpose) or whether it should be kept for
+  either consistency with SEV-SNP or for user-friendliness.
+
+Finally, we must revisit whether to assume that KubeVirt will have exclusive
+access to the TDX or if we want to support the use case of non-KubeVirt components
+launching TDX VMs. Answering this question will impact the following topics:
+- The TDX device counting mechanism as at the moment it assumes that KubeVirt will
+  have exclusive access to the TDX hardware.
+- Permission configuration for the QGS socket is currently the cluster-admin's
+  responsibility. We should revisit the permission model for the QGS socket and
+  decide whose responsibility permission configuration should be and whether
+  KubeVirt can assume that it has exclusive access to the socket.
 
 ### GA
-Remove feature gate.
+- Removal of the feature gate.
+- Documentations for: 
+  * Setting up and verifying attestation 
+  * Explanation of available configuration options
+  * Labels and annotations that indicate node-level TDX support
