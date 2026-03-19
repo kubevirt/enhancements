@@ -1,17 +1,35 @@
 # VEP #NNNN: Your short, descriptive title
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+<!--
+A PR must update this section during the planning phase of a given release in order to track it.
+PRs that will not update the VEP during the planning phase will not be able to graduate the
+VEP by creating a code PR to kubevirt/kubevirt to bump the phase in-code.
+
+Please avoid targeting future releases in this section. Only capture the upcoming release.
+For example, during the planning phase for version v1.123, do **not** target beta for v.124 in advance.
+-->
+
+- This VEP targets alpha for version: 
+- This VEP targets beta for version:
+- This VEP targets GA for version:
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
+- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [ ] (R) Beta target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
 <!--
-Provide a brief overview of the topic)
+Provide a brief overview of the topic
 -->
 
 ## Motivation
