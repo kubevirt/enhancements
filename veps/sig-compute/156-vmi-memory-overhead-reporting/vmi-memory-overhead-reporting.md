@@ -1,4 +1,4 @@
-# VEP #156: Expose  Memory Overhead on VMI Status
+# VEP #156: Expose Memory Overhead on VMI Status
 
 ## Release Signoff Checklist
 
@@ -31,10 +31,12 @@ By exposing overhead information:
 - Users can understand actual resource allocation and adjust workloads when needed.
 - External systems, such as autoscalers, monitoring tools, or alerting systems, can track resource overhead and alert or act when VMIs are at risk due to overcommitment or undercommitment.
 - Quotas can use this data to account for virtual resources, considering any memory added or subtracted from the requested values.
+- Fix a hidden bug where virt-handler and metrics collector recalculated memory overhead dynamically, which might lead to using incorrect values after upgrades or configuration changes.
 
 ## Goals
 
 - Expose memory overhead in the `status` of each VMI.
+- Fix incorrect memory overhead calculation in virt-handler and metrics collector after upgrades or configuration changes.
 
 ## Non Goals
 
@@ -87,7 +89,10 @@ https://github.com/kubevirt/kubevirt
 
 ## Design
 
-- Introduce new field in `VMI.status` to report memory overhead.
+- Introduce new fields in `VMI.status` to report memory overhead:
+  - `MemoryOverhead` in `VMI.status.memory` - the memory overhead for the current virt-launcher pod
+  - `TargetMemoryOverhead` in `VMI.status.migrationState` - the memory overhead of the target pod during live migration
+- Add a pod annotation `kubevirt.io/memory-overhead-bytes` on virt-launcher pods to store the overhead per pod.
 - Values will be populated by `virt-controller`.
 - Overhead values are calculated when the VMI starts and stored in the status.
 - Values are updated again after a live migration completes, reflecting the VMI's current resource allocation.
@@ -109,10 +114,10 @@ spec:
       limits:
         memory: 6Gi
 status:
-...
   memory:
     memoryOverhead: 300Mi
-...
+  migrationState:
+    targetMemoryOverhead: 320Mi  # during migration, may differ from source
 ```
 
 ## Alternatives
@@ -153,17 +158,21 @@ During an upgrade, the new fields will be added to the VMI status when the featu
 # Functional Testing Approach
 
 - Enable the `VMIResourceMetrics` feature gate in functional tests.
-- Verify that `VMI.status.memory.memoryOverhead` and `VMI.status.currentCPUTopology.cpuOverhead` are correctly calculated and reported at VMI startup.
+- Verify that the added fields are correctly calculated and reported at VMI startup.
 - Confirm that the values are updated correctly after live migration.
 
 # Implementation History
+
+- 2026-03-01: Alpha implementation merged ([kubevirt/kubevirt#16746](https://github.com/kubevirt/kubevirt/pull/16746))
 
 # Graduation Requirements
 
 ### Alpha
 
-- Implement feature, enable feature gate by default in tests.
-- Add functional tests to verify that `memoryOverhead` and `cpuOverhead` are correctly reported at VMI startup and after live migration.
+- Implement feature behind a feature gate.
+- Add `MemoryOverhead` field to `VMI.status.memory` and `TargetMemoryOverhead` to `VMI.status.migrationState`.
+- Add `kubevirt.io/memory-overhead-bytes` annotation on virt-launcher pods.
+- Add tests to verify that the new fields are correctly reported.
 
 ### Beta
 - revisit the API
