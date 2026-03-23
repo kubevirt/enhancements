@@ -1,10 +1,15 @@
 # VEP #100: Introduce Custom Metadata to Cloud-init
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+This VEP does not have graduation phases guarded by a feature gate.
+- Ship target version:
+
+### Release Signoff Checklist
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
 
 ## Overview
 This VEP proposes enhancing KubeVirt's cloud-init metadata support by enabling users to add custom metadata to cloud-init. 

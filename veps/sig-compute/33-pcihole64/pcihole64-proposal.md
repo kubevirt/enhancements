@@ -1,6 +1,13 @@
 # VEP #33: Allow to disable the 64-bit PCI hole
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+This VEP does not have graduation phases guarded by a feature gate.
+- Ship target version: v1.6
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone /
 release*.

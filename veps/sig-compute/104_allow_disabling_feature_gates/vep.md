@@ -1,12 +1,17 @@
 # VEP 104: Allow disabling feature gates
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+This VEP does not have graduation phases guarded by a feature gate.
+- Ship target version: v1.8
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
 
 ## Overview
 
