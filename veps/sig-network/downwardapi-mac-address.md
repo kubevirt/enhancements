@@ -6,13 +6,18 @@ kubevirt/community repository.
 
 [kubevirt-network-binding-plugin]: https://github.com/kubevirt/community/blob/9c41536e982072a9b5843571c9d62a8d9bcea448/design-proposals/network-binding-plugin/network-binding-plugin.md
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+This VEP does not have graduation phases guarded by a feature gate.
+- Ship target version: v1.8
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
 
 ## Overview
 

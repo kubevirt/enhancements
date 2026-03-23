@@ -1,5 +1,13 @@
 # VEP #21 - Part 2: Passt Binding Core Migration and Beta
 
+## VEP Status Metadata
+
+### Target releases
+
+- ~This VEP targets alpha for version:~
+- This VEP targets beta for version: v1.8
+- This VEP targets GA for version:
+
 ## Overview
 Following [the initial proposal](./passt-migration-proposal.md), this part extends the `passt` KubeVirt integration to the Beta phase.
 The `passt` network binding is currently implemented as a [network binding plugin](https://kubevirt.io/user-guide/network/network_binding_plugins) and is in Alpha phase.
