@@ -37,15 +37,7 @@ This enhancement is focussing on domain state changes where the reason is extrac
 Why this enhancement is important
 -->
 
-Implementing automatic recovery logic for VM depends on the reason for the shutdown:
-- If the VM was shutdown by the user, no automatic recovery is needed.
-- For other cases, automatic recovery may take place.
-
-"shutdown by a user" can be recognized by the following condition:
-
-```
-Phase == Succeeded && Reason == Shutdown
-```
+Displaying a reason for why the VM is in it's current state is important for end users as well as for debugging.
 
 We are currently missing proper value for `Reason`. This enhancements proposes setting `Reason` to proper value.
 
@@ -55,7 +47,7 @@ We are currently missing proper value for `Reason`. This enhancements proposes s
 The desired outcome
 -->
 
-Recognize user initiated shutdown alongside the result wether the shutdown succeeded, the VM crashed, or kubevirt failed.
+Identify the reason for the current state of the VM.
 
 `Reason` is set for final phases `Failed` and `Succeeded` when they originate from domain state changes.
 
@@ -66,7 +58,7 @@ Why this enhancement is important Limitations to the scope of the design
 -->
 
 - For non-final phases `Scheduled`, and `Running`, providing Reasons is out of scope
-- For final phases `Succeeded` and `Failed`, the followin reasons are out of scope:
+- For final phases `Succeeded` and `Failed`, the following reasons are out of scope:
   - migrations: `Migrated`, `MigrationFailed`, etc
   - other failure: `NodeUnresponsive`, `VirtLauncherUnresponsive`, `VirtLauncherCrashed`, etc
 
@@ -76,7 +68,7 @@ Why this enhancement is important Limitations to the scope of the design
 Who is this feature set intended for
 -->
 
-For cloud providers that are interested in implementing recovery policy based on the reason for shutdown.
+For cloud providers that are interested in identifying the reason for the current VM state and possibly displaying it to the end users or for internal observability.
 
 ## User Stories
 
@@ -84,8 +76,7 @@ For cloud providers that are interested in implementing recovery policy based on
 List of user stories this design aims to solve
 -->
 
-- As a VM user I want the VM to recover if it was stopped for reasons outside my control.
-- As a VM user I want to choose whether the VM recovers or not if the shutdown is initiated by me
+- As a VM user I want know why the VM is stopped.
 
 ## Repos
 
@@ -174,7 +165,7 @@ Does this impact update compatibility and how?)
 -->
 
 - This is upgrade compatible.
-- On rollback, VMs will fallback to the old behavior.
+- On rollback, VMs `Reason` field will be missing some values.
 
 ## Functional Testing Approach
 
@@ -183,7 +174,7 @@ An overview on the approaches used to functional test this design)
 -->
 
 - Unit tests: add coverage for new code.
-- E2E tests: including cases for guest os shutdown.
+- E2E tests: including cases to cover various `Reason` values.
 
 ## Implementation History
 
