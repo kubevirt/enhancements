@@ -1,13 +1,22 @@
 # VEP #76: Native Support For VirtualMachine Templates
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+- This VEP targets alpha for version: v1.8
+- This VEP targets beta for version:
+- This VEP targets GA for version:
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting a milestone / release*.
 
 - [x] (R) Enhancement issue created, which links to VEP dir
   in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
+- [x] (R) Alpha target version is explicitly mentioned and approved
+- [ ] (R) Beta target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 

@@ -1,12 +1,21 @@
 # VEP #140: Live Update NetworkAttachmentDefinition Reference
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+- ~This VEP targets alpha for version:~
+- This VEP targets beta for version: v1.8
+- This VEP targets GA for version:
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [X] (R) Target version is explicitly mentioned and approved
-- [X] (R) Graduation criteria filled
+- [ ] ~(R) Alpha target version is explicitly mentioned and approved~
+- [x] (R) Beta target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 

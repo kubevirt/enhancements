@@ -1,10 +1,21 @@
 # VEP #21: Seamless TCP migration and vhost-user support with passt
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+- ~This VEP targets alpha for version:~
+- This VEP targets beta for version: v1.8
+- This VEP targets GA for version:
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue created, linking to VEP directory in [kubevirt/enhancements] (not the initial VEP PR)
+- [ ] ~(R) Alpha target version is explicitly mentioned and approved~
+- [x] (R) Beta target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
