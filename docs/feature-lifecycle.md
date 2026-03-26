@@ -297,10 +297,6 @@ These are the steps needed to deprecate & remove a feature:
     Kubernetes has not removed fields, it just kept them around with the
     warning that they have been deprecated and no longer available.
 
-    While keeping fields around for a period of a release or two makes
-    sense, beyond a limited period it adds a burden on dragging leftover
-    fields around to eternity.
-
 ### Exceptions
 While the project strives to maintain a stable contract with its users,
 there may be scenarios where the policy described here will not be a fit.
