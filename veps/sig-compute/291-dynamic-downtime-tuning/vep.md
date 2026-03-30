@@ -65,9 +65,8 @@ the existing time-based logic still applies.
 ## Goals
 
 - Activate via presence of `spec.experimental.downtimeTuning` in
-  `MigrationPolicy`, gated behind the experimental migration options
-  feature gate defined by
-  [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
+  `MigrationPolicy`, gated behind the `AdvancedExperimentalMigrationOptions`
+  feature gate
 - Use `maxDowntimeMs` (top-level field per
   [VEP 252](https://github.com/kubevirt/enhancements/pull/252)) as the
   ceiling for the ramp
@@ -106,8 +105,7 @@ kubevirt/kubevirt.
 
 Downtime tuning is activated by the presence of
 `spec.experimental.downtimeTuning` in a `MigrationPolicy`, gated
-behind the experimental migration options feature gate
-([VEP 293](https://github.com/kubevirt/enhancements/pull/295)).
+behind the `AdvancedExperimentalMigrationOptions` feature gate.
 
 The algorithm ramps `max_downtime` up to the `maxDowntimeMs` ceiling —
 a field in `MigrationPolicySpec` / `MigrationConfiguration`.
@@ -311,7 +309,7 @@ For example:
 
 - [ ] `maxDowntimeMs` top-level field available as the ceiling (per
       [VEP 252](https://github.com/kubevirt/enhancements/pull/252))
-- [ ] Experimental options framework from [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
+- [ ] `AdvancedExperimentalMigrationOptions` feature gate
       gates `spec.experimental`
 - [ ] `DowntimeTuningPolicy` struct under `spec.experimental.downtimeTuning`;
       its presence activates the tuning algorithm

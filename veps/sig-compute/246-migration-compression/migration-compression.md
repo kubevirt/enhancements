@@ -47,8 +47,7 @@ bottleneck but not universally beneficial, hence explicit opt-in.
 
 - Expose compression in `MigrationPolicy` under `spec.experimental.compression`
 - Keep the default disabled
-- Gated behind the experimental migration options feature gate defined by
-  [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
+- Gated behind the `AdvancedExperimentalMigrationOptions` feature gate
 - Path toward automatic enablement in future versions
 
 ## Non Goals
@@ -82,9 +81,8 @@ bottleneck but not universally beneficial, hence explicit opt-in.
 ### API and feature gate
 
 Compression is exposed as a field under `spec.experimental` in the
-`MigrationPolicy` CRD. This experimental section,
-its feature gate, and the propagation mechanics are defined by
-[VEP 293: Experimental Migration Options](https://github.com/kubevirt/enhancements/pull/295).
+`MigrationPolicy` CRD. The experimental section is gated by
+`AdvancedExperimentalMigrationOptions` feature gate.
 This VEP only specifies the compression-specific field and its mapping to
 the hypervisor.
 
@@ -156,9 +154,7 @@ The explicit algorithm selection is intended as a transitional API. The
 long-term goal is automatic enablement based on dirty rate, bandwidth, and
 convergence monitoring. If that proves reliable, compression becomes an
 implementation detail and the explicit knob either moves to an
-advanced-only section or is removed. The `spec.experimental` section and
-its lifecycle are defined by
-[VEP 293](https://github.com/kubevirt/enhancements/pull/295).
+advanced-only section or is removed.
 
 ### Consideration for future improvements
 
@@ -211,7 +207,7 @@ overhead is modest at zstd level 1 and bounded by migration bandwidth.
       [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
       (feature gate, `spec.experimental` section, propagation path)
 - [ ] `MigrationCompression` enum and `spec.experimental.compression` field
-      added to `ExperimentalMigrationConfiguration`
+      added to `ExperimentalMigrationConfiguration` within `MigrationPolicy`
 - [ ] `virt-launcher` maps API enum to libvirt compression method and
       sets hypervisor flags
 - [ ] E2E test
