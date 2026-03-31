@@ -1,12 +1,21 @@
 # VEP #150: Add cloud-init vendor-data support
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+- This VEP targets alpha for version: v1.9
+- This VEP targets beta for version:
+- This VEP targets GA for version:
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements](https://github.com/kubevirt/enhancements/issues/150)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
+- [x] (R) Alpha target version is explicitly mentioned and approved
+- [ ] (R) Beta target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
@@ -58,7 +67,7 @@ The typical relationship is: platform operators/providers define vendor-data tha
 
 ## User Stories
 
-1. **As a platform operator**, I want to inject default packages and security settings via vendor-data so that all VMs have a consistent baseline without requiring users to modify their user-data.
+1. **As a platform operator**, I want a vendor-data field available in the VMI spec so that I can use a MutatingAdmissionPolicy to automatically inject organization-wide defaults (e.g., monitoring agents, security settings) into all VMs without requiring individual VM owners to configure it themselves.
 
 2. **As a cloud provider**, I want to provide cloud-specific networking configuration or monitoring agents via vendor-data so that VMs are automatically integrated with my platform services.
 
