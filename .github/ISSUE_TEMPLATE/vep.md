@@ -47,7 +47,11 @@ Additional SIGs (optional):
 **Enhancement link**:
 
 <!-- 
-Link to any enhancement PRs.
+Link to the merged enhancement.
+For example: https://github.com/kubevirt/enhancements/blob/main/veps/sig-compute/10-dra-devices/vep.md.
+
+If the enhancement is not merged yet, please link the VEP PR.
+Once the VEP PR is merged, update this section to contain the merged enhancement.
 -->
 
 **Timeline**:
