@@ -303,7 +303,7 @@ there may be scenarios where the policy described here will not be a fit.
 
 Therefore, it should be acceptable to have exceptions from time to time
 given a very good reasoning and an agreement from 2/3 of the project
-maintainers (also known as "approvers").
+maintainers.
 
 ### Miscellaneous
 
