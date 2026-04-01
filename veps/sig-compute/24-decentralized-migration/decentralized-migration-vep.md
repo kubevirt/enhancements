@@ -315,8 +315,18 @@ Maintain backwards compatibility with existing live migrations.
 
 Including feature gate.
 
+Alpha is complete, moving to beta
+
+
 ### Beta
 API is mature and stable and maintains backwards compatilibity with existing live migrations.
+Stable defined as:
+- [Revert disabling expectations in the decentralized live migration flows](https://github.com/kubevirt/kubevirt/pull/15117)
+- Unquarantine cancellation flaky tests:
+-- `should be able to cancel a migration by deleting the migration resource` delete source migration
+-- `should be able to cancel a migration by deleting the migration resource` delete target migration
+
+Current phase
 
 ### GA
 Remove feature gate
