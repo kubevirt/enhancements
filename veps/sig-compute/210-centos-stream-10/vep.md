@@ -6,7 +6,7 @@
 
 - This VEP targets alpha for version: v1.9
 - This VEP targets beta for version: v1.10
-- This VEP targets GA for version: v1.11
+- This VEP targets GA for version: v1.12
 
 ### Release Signoff Checklist
 
@@ -24,7 +24,7 @@ This VEP proposes transitioning KubeVirt from CentOS Stream 9 to CentOS Stream 1
 1. **Userspace**: The container images (virt-handler, virt-launcher, virt-operator, virt-controller, virt-api, etc.) and the builder image used to compile KubeVirt binaries.
 2. **Host OS**: The kubevirtci cluster providers used for development and CI testing.
 
-Rather than a big-bang switchover, the transition follows a per-lane model: from v1.9, new Kubernetes version lanes are introduced on CentOS Stream 10 for both userspace and host OS, while existing older lanes remain on CentOS Stream 9 until those Kubernetes versions naturally reach end of life and are dropped from CI. CentOS Stream 9 is supported during v1.8, v1.9, and v1.10, with support removed in v1.11 once all remaining CS9 lanes have aged out. This avoids doubling CI capacity and provides a gradual, low-risk migration path.
+Rather than a big-bang switchover, the transition follows a per-lane model: from v1.9, new Kubernetes version lanes are introduced on CentOS Stream 10 for both userspace and host OS, while existing older lanes remain on CentOS Stream 9 until those Kubernetes versions naturally reach end of life and are dropped from CI. CentOS Stream 9 CI lanes are supported during v1.8, v1.9, and v1.10, with all CI lanes running on CentOS Stream 10 by v1.11 once all remaining CS9 lanes have aged out. CentOS Stream 9 build support is retained through v1.11 for downstream consumers, and removed in v1.12. This avoids doubling CI capacity and provides a gradual, low-risk migration path.
 
 CentOS Stream 9 reaches end of life on 2027-05-31, requiring a planned migration well before that date.
 
@@ -122,7 +122,9 @@ The CI strategy follows a per-lane transition model where new Kubernetes version
 
 2. **v1.10 (Beta)**: The new k8s-1.37 lane is introduced on CentOS Stream 10. k8s-1.36 (CS10) and k8s-1.35 (CS9) remain as `run_before_merge` lanes. k8s-1.34 (CS9) is dropped. The majority of `always_run` lanes now run on CentOS Stream 10.
 
-3. **v1.11 (GA)**: The new k8s-1.38 lane is introduced on CentOS Stream 10. k8s-1.35 (the last CS9 lane) is dropped. All remaining lanes run on CentOS Stream 10. CentOS Stream 9 build support is removed. `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed.
+3. **v1.11 (CS10 Default)**: The new k8s-1.38 lane is introduced on CentOS Stream 10. k8s-1.35 (the last CS9 lane) is dropped. All remaining CI lanes run on CentOS Stream 10. `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`. CentOS Stream 9 build support is retained for downstream consumers that still require CS9-based userland builds.
+
+4. **v1.12 (GA)**: CentOS Stream 9 build support is removed. CentOS Stream 9 option removed from `KUBEVIRT_CENTOS_STREAM_VERSION`.
 
 This per-lane approach avoids doubling CI capacity: rather than running parallel CS9 and CS10 jobs for the same Kubernetes version, each lane runs on exactly one base OS. The transition happens naturally as older Kubernetes versions are dropped and new versions are added on CentOS Stream 10.
 
@@ -134,28 +136,35 @@ gantt
     todayMarker off
 
     section Releases
-    v1.8            :milestone, m1, 2025-06-01, 0d
-    v1.9            :milestone, m2, 2025-09-01, 0d
-    v1.10           :milestone, m3, 2025-12-01, 0d
-    v1.11           :milestone, m4, 2026-03-01, 0d
+    v1.8            :milestone, m1, 2026-03-18, 0d
+    v1.9            :milestone, m2, 2026-07-15, 0d
+    v1.10           :milestone, m3, 2026-11-15, 0d
+    v1.11           :milestone, m4, 2027-03-15, 0d
+    v1.12           :milestone, m5, 2027-07-15, 0d
 
     section k8s-1.33 (CS9)
-    active          :done, 2025-06-01, 2025-09-01
+    active          :done, 2026-03-18, 2026-07-15
 
     section k8s-1.34 (CS9)
-    active          :done, 2025-06-01, 2025-12-01
+    active          :done, 2026-03-18, 2026-11-15
 
     section k8s-1.35 (CS9)
-    active          :done, 2025-06-01, 2026-03-01
+    active          :done, 2026-03-18, 2027-03-15
 
     section k8s-1.36 (CS10)
-    active          :crit, 2025-09-01, 2026-06-01
+    active          :crit, 2026-07-15, 2027-11-15
 
     section k8s-1.37 (CS10)
-    active          :crit, 2025-12-01, 2026-06-01
+    active          :crit, 2026-11-15, 2027-11-15
 
     section k8s-1.38 (CS10)
-    active          :crit, 2026-03-01, 2026-06-01
+    active          :crit, 2027-03-15, 2027-11-15
+
+    section k8s-1.39 (CS10)
+    active          :crit, 2027-07-15, 2027-11-15
+
+    section CS9 Build Support
+    retained        :active, 2026-03-18, 2027-07-15
 ```
 
 ### Migration Phases
@@ -177,13 +186,18 @@ gantt
 - k8s-1.35 (CS9) remains as a `run_before_merge` lane
 - k8s-1.34 (CS9) dropped from CI
 
-#### Phase 3: Full Switchover (v1.11)
+#### Phase 3: CS10 Default (v1.11)
 
 - k8s-1.38 lane introduced on CentOS Stream 10
 - k8s-1.35 (last CS9 lane) dropped from CI
-- All remaining lanes run on CentOS Stream 10
+- All remaining CI lanes run on CentOS Stream 10
+- `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`
+- CentOS Stream 9 build support retained for downstream consumers
+
+#### Phase 4: CS9 Build Support Removal (v1.12)
+
 - CentOS Stream 9 build support removed
-- `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed
+- CentOS Stream 9 option removed from `KUBEVIRT_CENTOS_STREAM_VERSION`
 
 ### CI Capacity Constraints
 
@@ -283,10 +297,15 @@ Cluster administrators should verify that any security scanning or compliance to
 - [ ] Majority of `always_run` lanes running on CentOS Stream 10
 - [ ] No CentOS Stream 10 specific test failures
 
-### GA (v1.11)
+### CS10 Default (v1.11)
 
 - [ ] All remaining CS9 lanes dropped
-- [ ] All lanes running on CentOS Stream 10
-- [ ] CentOS Stream 9 build support removed
+- [ ] All CI lanes running on CentOS Stream 10
 - [ ] All container images based on CentOS Stream 10
-- [ ] `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed
+- [ ] `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`
+- [ ] CentOS Stream 9 build support retained and verified
+
+### GA (v1.12)
+
+- [ ] CentOS Stream 9 build support removed
+- [ ] CentOS Stream 9 option removed from `KUBEVIRT_CENTOS_STREAM_VERSION`
