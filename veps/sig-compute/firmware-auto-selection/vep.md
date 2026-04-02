@@ -289,8 +289,8 @@ if secureBoot && vmType == efi.None && config.FirmwareAutoSelectionEnabled() {
    `FirmwareAutoSelection` feature gate; set
    `UsesFirmwareAutoSelection = true` for standard Secure Boot when enabled.
 
-6. **`pkg/hypervisor/common/domain-builder-utils.go`**: Pass through the
-   new field.
+6. **`pkg/virt-launcher/virtwrap/converter/converter.go`**: Pass through the
+   new field in `convertEFIConfiguration()`.
 
 ## API Examples
 
