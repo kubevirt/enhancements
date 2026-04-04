@@ -185,7 +185,7 @@ This gives us a very high likelihood of switching over to post-copy or stop-and-
 
 Typically, while stalled, iterations are quick. This is because even when dirty rates are high, the "working set" in memory tends to span a relatively few amount of memory.
 
-Nevertheless, in future works there might be a marginal benefit to dynamically lowering the number of sample iterations (or foregoing it all together) if not doing so risks a high probability of running out of time as per the "max completition time". However, this would require being able to accurately model the migration duration (technically feasible, practically it also requires some changes in QEMU and therefore we consider this out of scope for now).
+Nevertheless, in future works there might be marginal benefits to dynamically lowering the number of sample iterations (or foregoing it all together) if not doing so risks a high probability of running out of time as per the "max completition time". However, this would require being able to accurately model the migration duration (technically feasible, practically it also requires some changes in QEMU and therefore we consider this out of scope for now).
 
 
 ### Proactive Time Budgeting
@@ -193,14 +193,14 @@ Nevertheless, in future works there might be a marginal benefit to dynamically l
 If requirements on the max completition time are strict enough coupled with a low bandwidth and large state-size, it is possible for a VM with a low dirty rate to still exceed its allocated time budget.
 
 Therefore, another improvement we propose is as follows:
-- Anytime the estimated downtime exceeds the remaining time budget by a factor less than x2, we switch to post-copy or stop-and-copy.
-- If the lowest observed estimated downtime exceeds the remaining time budget by a factor greater than x2, we abort the migration which is consistent with current behavior.
+- Anytime the estimated downtime as reported by QEMU exceeds the remaining time budget by a factor less than x2, we switch to post-copy or stop-and-copy.
+- If the lowest observed estimated downtime exceeds the remaining time budget by a factor greater than x2, we abort the migration which is consistent with current behavior. However, the additional benefit here is that since post-copy migrations can never be cancelled (due to data loss concerns) no matter how they exceed the time budget by, by proactively looking at the estimated downtime we can choose to never switch-over such a migration.
 
-> __Recall:__ Libvirt/QEMU expose downtime estimates to us through the `DomainJobInfo` API.
+> __Recall:__ Libvirt/QEMU exposes downtime estimates to us through the `DomainJobInfo` API.
 
 > __Remaining Time Budget__: The "remaining time budget" is defined as the `MaxCompletitionTime` - `TimeElapsed`.
 
-This is an improvement over the current design because we don't trigger post-copy or pause-and-copy until the max completion time has already been exceeded.
+This is an improvement over the current design because currently don't trigger post-copy or pause-and-copy until the max completion time has already been exceeded.
 
 
 #### Choosing a Sane Default for Max Completition Time Per Gib
@@ -219,41 +219,6 @@ TODO
 - TODO: think about how when compression is active, data reporting would be off and how to get correct estimates still...
 - TODO: prediction algorithm should have expected duration, worst case duration, and best-case duration
 
-
-#### Modeling Estimating Migration Time For Logging & Early Termination
-
-Why:
-- Providing end-users a better estimated for how long migrations that act as expected will take to complete.
-- Giving users an early heads up if a migration is expected to stall.
-- When only pre-copy is allowed, and either the migration downtime will exceed the max-allowable downtime or total migration time will exceed the max completition time, then abort migration early.
-> __Note:__ Inputs into our prediction (i.e. bandwidth, dirty rate, pages modified) vary with the underlying workload and therefore our predictions will vary. So we make three predictions here (1) best case migration completition, (2) worst case migration completition, (3) migration completition.
-- Allows us to dynamically adjust the size of the sample iterations if model indicates a tight time budget. (Edge case, not important).
-
-
-### Stall Start Time and stalled state
-
-- Continuously **update revised downtime** from **observations of the lowest `remaining_bytes` seen**, using a **predictor** (exact method TODO; may combine per-iteration minima, EWMA-style smoothing, and samples **older than** `ProgressTimeout` so recent noise does not dominate). Treat **revised downtime** as a **time-varying** value at each decision tick.
-- **Stall** when **current `remaining_bytes` is lower than** the **current** **revised downtime** threshold (evaluated against the **latest** prediction).
-- **Stall Start Time** is the **first** time that predicate holds (transition into stalled state), not “the time of the minimum sample” unless those coincide by definition in a given implementation.
-- TODO: Reconcile the stall **inequality** and **units** (bytes vs predicted seconds) with the exact Libvirt metric and predictor output.
-- After entering **stalled**, the migration controller treats progress as **non-recoverable** for unsticking: policies apply only to **when** to force convergence, not whether the VM is “making progress” again in the pre-stall sense.
-
-### Local minimum and iteration window (3–10)
-
-After stall, collect **3–10 iterations** measuring how **remaining data varies**, using data from **Stall Start Time** forward (so the buffer may already satisfy “enough” iterations at stall detection).
-
-**Justification for 3–10**: TODO
-
-**Additional Switch policies**:
-
-1. Prefer **≥ 3 iterations**. If we have **fewer than three** and the **time required to reach three iterations** would **exceed** `MaxCompletionTime`, **switch immediately**
-2. If **time remaining until** `MaxCompletionTime` **< 2×** the **wall-clock span** covered by iterations collected so far (TODO: align with final spec text), switching when remaining bytes is **below the median** over the window is **sufficient** (targets a “decent” switchover under time pressure).
-3. Otherwise, continue until **`MaxCompletionTime`** **OR** remaining bytes hits the **smallest value observed** in the stalled observation window (per final implementation semantics).
-
-### Network safety
-
-TODO
-
 ## API Examples
 
 <!--
@@ -266,11 +231,11 @@ Tangible API examples used for discussion
 Outline any alternative designs that have been considered)
 -->
 
-**Iteration-count-based stall threshold** was considered but rejected. An iteration-count window (e.g. "no progress in N iterations") is inferior to a **time-based** window because iterations can be very short; dirty rate and bandwidth measurements over short iterations **fluctuate heavily**. Even if the time window only spans a single iteration, that iteration is long enough to suppress noise. A wall-clock window decouples the stall signal from iteration scheduling artifacts. Remaining bytes while “stuck” tends to **fluctuate**; switching at a **local minimum** reduces the amount of data copied during the disruptive phase. That requires a **time-based** notion of “no progress” (not iteration-count-based), so that short, noisy iterations do not false-trigger or miss real stalls.
+1. **Iteration-count-based stall threshold** was considered but rejected. An iteration-count window (e.g. "no progress in N iterations") is inferior to a **time-based** window because iterations can be very short; dirty rate and bandwidth measurements over short iterations **fluctuate heavily**. Even if the time window only spans a single iteration, that iteration is long enough to suppress noise. A wall-clock window decouples the stall signal from iteration scheduling artifacts. Remaining bytes while “stuck” tends to **fluctuate**; switching at a **local minimum** reduces the amount of data copied during the disruptive phase. That requires a **time-based** notion of “no progress” (not iteration-count-based), so that short, noisy iterations do not false-trigger or miss real stalls.
 
-Considered using a simplier metric to detect stall. dirty rate > bandwidth does not neccesarily mean pre-copy cannot converge. This is because dirty rate often involves a working set thats relatively small. In this case its still important to allow migration to continue to transfer and directly monitor remaining bytes.
+2. Considered using a simplier metric to detect stall like dirty rate > bandwidth. But even when dirty rate > bandwidth, remaining bytes can still make progress because page dirtying often involves the same pages that are part of a working set. This working set tends to be small. In this case its still important to allow migration to continue to transfer and directly monitor remaining bytes.
 
-An alternate proposal for stall detection was proposed here: https://docs.google.com/document/d/15P45MB9LtXTBKMfFkC2CLvEj-Hf9B6lY-W4DIEAq_5w/edit?tab=t.0#heading=h.sj3tv6yulsis. The key idea behind this proposal was to model pre-copy as a geometric series to estimate how long migration would take. Then, the proposal defined "stall" as when either of the two conditions are true:
+3. An alternate proposal for stall detection was proposed here: https://docs.google.com/document/d/15P45MB9LtXTBKMfFkC2CLvEj-Hf9B6lY-W4DIEAq_5w/edit?tab=t.0#heading=h.sj3tv6yulsis. The key idea behind this proposal was to model pre-copy as a geometric series to estimate how long migration would take. Then, the proposal defined "stall" as when either of the two conditions are true:
 (a) the projected completion time exceeded the max completion time
 (b) dirty rate > bandwidth
 Ultimately the design proposed above was favored because it also optimizes for downtime and better considers the variability of the dirty rate and bandwidth.
@@ -321,11 +286,9 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 -->
 
 ### Alpha
-Split into three stages:
-0. Revision of defaults on downtime and completition time.
-1. Improved stall detection
-2. Integrate network stability tests
-3. Improvements towards meeting max deadline
+Split into two stages:
+1. Revision of defaults on downtime from 300ms -> 500ms and decrease completition time per gib.
+2. Improved stall detection
 
 ### Beta
 
