@@ -53,7 +53,7 @@ Why this enhancement is important
     (b) The existing stall detection mechanism in Kubevirt is weak. Currently, it works by monitoring the progress on remaining bytes during a migration. The timeout on the migration is controlled by the `progressTimeout` field and resets anytime remaining bytes decreases. However, this ignores that during a typical stall, remaining bytes on the migration typically fluctuates up and down due to phase variations in the underlying workload causing the dirty rates to vary.
 
 
-2. Migration does not trigger the switch-over to post-copy or stop-and-copy until **after** Max Completion Time (as calculated using `completionTimeoutPerGiB`) has been exceeded. Cluster admins who set a completion-time budget cannot have that budget honored proactively.
+2. Migration does not trigger the switch-over to post-copy or stop-and-copy until **after** Max Completion Time (as calculated using `completionTimeoutPerGiB`) has been exceeded. Cluster admins who set a completion-time budget cannot have that budget honored proactively. Moreover, while at least, migrations that exceed the allocated time budget by a factor of two are aborted, in the case of post-copy even this is not possible since doing so would result in data loss.
 
 3. Currently users are completely blind for how long a migration is actually expected to take. [todo expand on this?]
 
@@ -115,21 +115,39 @@ This design discussion assumes reader is familiar with the following concepts:
 - Downtime
 - How live migration works in Kubevirt
 
+
 ### Stall Detection
 
-The key idea behind understanding the stall detection algorithm is recognizing that in a **stalled** migration dirty rates and bandwidth, and therefore remaining bytes are not constant. Therefore, once a migration "converges", it tends to hover around the "converged" value of remaining bytes. 
+The key idea behind understanding the stall detection algorithm is recognizing that in a **stalled** migration dirty rates and bandwidth, and therefore remaining bytes are not constant. Therefore, once a migration "converges", it tends to hover around the "converged" value of remaining bytes by "bouncing" up and down from iteration to iteration.
 
 > __Convergence__:
 Here we use convergence as the point when pre-copy stops making progress in each iteration of pre-copy, and the "remaining bytes" flattens out.
 
-We want to trigger the switch-over to post-copy or stop-and-copy at a **local-minima** of "remaining bytes" in order to minimize the downtime.
+After convergence, instead of randomly trigger post-copy or stop-and-copy, we optimize for downtime by triggering the switch-over at a **local-minima** of the "remaining bytes".
 
-In order to achieve this, once we stall, we look at "x" iterations since the start of the stall and save the smallest observed "remaining bytes" over these "x" iterations. Afterwards, the moment we see "remaining bytes" lower than that lowest observed value we switch to post-copy or stop-and-copy.
+In order to achieve this, once detect that we have "stalled" (as defined later), we look at "x" iterations since the start of the stall and save the smallest observed "remaining bytes" over these "x" iterations. Afterwards, the moment we see "remaining bytes" lower than that lowest observed value we switch to post-copy or stop-and-copy.
 
 > __Sample Iterations__:
 From here, we will refer to these "x" iterations as the "sample iterations".
 
-#### Defining Stall
+> __Optimal Downtime__:
+After the sample iterations finish, the downtime corresponding to the lowest observed value of "remaining bytes" is called the "optimal downtime".
+
+### Pre-copy Improvements with Dynamic Downtimes
+
+While the above description of a stall detector focuses on the use case for when either post-copy is enabled or when disruptions are allowed (thus allowing for very long downtimes) this mechanism can also be used to improve the behavior of pre-copy only migrations.
+
+We do this by introducing a new API field called `maxDowntime` which specifies the maximum acceptable downtime in workloads where disruption is not allowed. Currently, migrations use a fixed downtime of 300ms (the default in QEMU) and cannot proceed if the predicted downtime is in excess of this value.
+
+When a migration stalls, it stalls because "remaining data" cannot be brought down low enough to achieve a downtime as low as this. However, in many cases, a downtime higher than the default of 300ms is acceptable and even preferred to failing a migration. We call this value the `maxDowntime`.
+
+> __Target Downtime:__
+The "target downtime" refers to the downtime configured in QEMU. This is the threshold that when met, QEMU triggers its internal switch-over to stop-and-copy.
+
+In pre-copy only mode, after stalling, **if** `maxDowntime` is lower than or equal to the "optimal downtime", we proceed with the migration setting the "target downtime" equal to the "optimal downtime"; **else if**, we `maxDowntime * 2 > targetDowntime` then we set the the "target downtime" equal to the `maxDowntime` that perhaps in a future iteration we might get lucky and still converge; **else** we abort the migration early.
+
+
+### Defining Stall
 
 We consider the migration "stalled" if both of the following conditions are satisfied:
 1) At the end of an iteration, "remaining bytes" is larger than or equal to the smallest "remaining bytes" observed in a previous iteration that was also older than the "progress timeout".
@@ -138,15 +156,17 @@ We consider the migration "stalled" if both of the following conditions are sati
 > __Progress Timeout__:
 When we say "progress timeout", we are referring to an existing API field under migration settings called `progressTimeout` that represents the maximum number of seconds a migration does not progress. Our revised stall detection algorithm repurposes this API field.
 
-##### Why this definition makes sense
 
+> __Reasoning and Justification for the Stall Definition:__
 [todo: explain #1 allows remaining bytes to temporarily go up. #2 avoids switching to stall state due to a network blip. how by requiring remaining bytes be the minimum, we avoid triggering post copy during a network blip. there was already an existing issue of a network blip in the middle of post copy, we can't do anything about it. But network blips are expected to be rare, but even so when you are constantly watching for stall, and migrations can last a long time a blip anytime during a migration happening is much more likely (rather than the short duration post copy last).
 ]
 
-#### Choosing a Sane Default for Progress Timeout
-TODO
 
-#### Defining the number of Sample Iterations
+### Choosing a Sane Default for Progress Timeout
+TODO? Default 75s? Loosely informed by SimPoint-style phase-behavior analysis (Sherwood et al., 2002): rough phase lengths well under ~15 s for typical workloads, multiplied by ~5 for slack. Operators override via configuration.
+
+
+### Defining the number of Sample Iterations
 
 In order to identify that we are in a local minima, we must look at how "remaining bytes" has varied since the "stall start time".
 
@@ -160,93 +180,55 @@ This gives us a very high likelihood of switching over to post-copy or stop-and-
 > __Math behind the 97% figure:__
  Given a particular random sample, there is a 50% probability that the random sample is less than the average. Therefore, after 5 random samples, we get 0.5^5=0.03125. Then 1-0.03125=0.96875, giving us the 97% figure above.
 
+ > __Why not more samples?__
+ While by collecting even more samples, we can likely lower how long downtime lasts, the benefits are maginal at the cost of increased total migration time.
+
 Typically, while stalled, iterations are quick. This is because even when dirty rates are high, the "working set" in memory tends to span a relatively few amount of memory.
 
-Nevertheless, in a future section we discusses dynamically lowering the number of sample iterations (or foregoing it all together) if not doing so risks a high probability of running out of time.
+Nevertheless, in future works there might be a marginal benefit to dynamically lowering the number of sample iterations (or foregoing it all together) if not doing so risks a high probability of running out of time as per the "max completition time". However, this would require being able to accurately model the migration duration (technically feasible, practically it also requires some changes in QEMU and therefore we consider this out of scope for now).
 
-#### Algorithm
 
-Putting this all together, here is a high level description of how the stall detection algorithm works:
+### Proactive Time Budgeting
 
-TODO
+If requirements on the max completition time are strict enough coupled with a low bandwidth and large state-size, it is possible for a VM with a low dirty rate to still exceed its allocated time budget.
 
-### Migration Time Budgeting
+Therefore, another improvement we propose is as follows:
+- Anytime the estimated downtime exceeds the remaining time budget by a factor less than x2, we switch to post-copy or stop-and-copy.
+- If the lowest observed estimated downtime exceeds the remaining time budget by a factor greater than x2, we abort the migration which is consistent with current behavior.
 
-We propose modeling how long a migration is estimated to last and pro-actively using this data
+> __Recall:__ Libvirt/QEMU expose downtime estimates to us through the `DomainJobInfo` API.
+
+> __Remaining Time Budget__: The "remaining time budget" is defined as the `MaxCompletitionTime` - `TimeElapsed`.
+
+This is an improvement over the current design because we don't trigger post-copy or pause-and-copy until the max completion time has already been exceeded.
+
 
 #### Choosing a Sane Default for Max Completition Time Per Gib
 
 [todo: run the numbers on calculating given working set size, dirty rate, and bandwidth for how many iterations would it take for a pre-copy migration to stall (and flatten out) on a spreadsheet using formulas]
 
-#### Budgeting Time for Sample Iterations
-[todo talk about budgeting the time for the sample iteration + finding the local minima]
 
-TODO: in order to ever trigger switch over, bandwidth must be at least 8mbps
-- TODO: just like now if migration duration exceeds x2 the budget, cancel migration
-- TODO: maybe once its obvious migration will exceed maxcompletiontime, cancel migration instead of going through with it?
-- **Early switchover when the lower bound exceeds the deadline:** if the revised downtime from the lowest `remaining_bytes` ever observed already implies exceeding `MaxCompletionTime`, force switchover immediately — even before stall is detected (Design → **Lower-bound early switchover**).
-- **Network safety** for forced convergence: Design → **Network safety** (TODO).
-- TODO: maybe predicting when we get stalled?
+### Algorithm
 
-### `ProgressTimeout` (existing field, removed and repurposed)
+Putting this all together, here is a technical description of how the stall detection algorithm works including how it wires together with the existing Kubevirt codebase:
 
-Today, **`ProgressTimeout`** is already plumbed from migration configuration into the launcher (e.g. `pkg/virt-handler/migration-source.go` → `cmdclient.MigrationOptions` → `pkg/virt-launcher/virtwrap/live-migration-source.go`). The **`migrationMonitor`** uses it only in **`isMigrationProgressing`**: if **wall-clock seconds since the last time remaining migration data improved** (relative to an internal watermark) exceed `ProgressTimeout`, the monitor considers migration non-progressing; depending on other branches in **`processInflightMigration`**, that can lead to **aborting** the job. That is a **minimal** stall signal—**no** completion-time budgeting, **no** EWMA of dirty rate or bandwidth, **no** local-minimum hunt before forcing pre-copy or pause-and-copy.
+TODO
 
-This proposal is **strictly better** for the convergence problem this VEP targets: the **existing** `ProgressTimeout` stall behavior will be **removed**, and the **`ProgressTimeout` field will be repurposed** to mean the **time window** that governs which observations are “mature” enough to feed **revised downtime** (e.g. samples **older than** `ProgressTimeout` from “now”), and to drive the convergence policies below. **`ProgressTimeout` does not pin revised downtime to one fixed minimum**—it shapes **inputs** to the predictor; **revised downtime** itself **updates** as lows are observed. Operators keep a single familiar knob; semantics and implementation change accordingly.
 
-**Default value (75 s):** Loosely informed by SimPoint-style phase-behavior analysis (Sherwood et al., 2002): rough phase lengths well under ~15 s for typical workloads, multiplied by ~5 for slack. Operators override via configuration.
+- Other use cases could include input for deciding whether or not to activate compression since rn the choice is immutable.
+- TODO: think about how when compression is active, data reporting would be off and how to get correct estimates still...
+- TODO: prediction algorithm should have expected duration, worst case duration, and best-case duration
 
-TODO: Update API / OpenAPI field description, cluster default (today **150** seconds in `virt-config`), and any user-facing docs to match repurposed semantics; feature gate if required.
 
-### Max completion time and pre-copy timing
+#### Modeling Estimating Migration Time For Logging & Early Termination
 
-Use **EWMA**-smoothed **dirty rate** and **bandwidth** with **remaining data** and a **downtime threshold** to estimate **how long** iterative pre-copy (or equivalent) will take, so migration does not exceed `MaxCompletionTime`. This addresses the current gap: pre-copy is only triggered **after** the deadline because **duration was not estimable**.
+Why:
+- Providing end-users a better estimated for how long migrations that act as expected will take to complete.
+- Giving users an early heads up if a migration is expected to stall.
+- When only pre-copy is allowed, and either the migration downtime will exceed the max-allowable downtime or total migration time will exceed the max completition time, then abort migration early.
+> __Note:__ Inputs into our prediction (i.e. bandwidth, dirty rate, pages modified) vary with the underlying workload and therefore our predictions will vary. So we make three predictions here (1) best case migration completition, (2) worst case migration completition, (3) migration completition.
+- Allows us to dynamically adjust the size of the sample iterations if model indicates a tight time budget. (Edge case, not important).
 
-**Givens (at each decision tick):**
-
-| Symbol | Meaning |
-|--------|---------|
-| `ewma_dirty_rate` | EWMA of memory dirtying rate (same units as used for ratio with bandwidth, e.g. bytes/s) |
-| `ewma_bandwidth` | EWMA of effective migration throughput (e.g. bytes/s) |
-| `data_remaining` | Memory / data still to migrate (`memory left`, e.g. Libvirt `remaining_bytes`) |
-| `downtime_threshold` | Target bound driving how many iterations are assumed before the final cutover (same unit family as `data_remaining` when used inside the ratio below—typically a **residual byte budget** aligned with max acceptable downtime via bandwidth; see note) |
-
-**Note 1 — `downtime_threshold` is dynamic.** It is **not** fixed for the whole migration: when it becomes clear the migration **cannot** converge under the current downtime budget, the threshold may be **revised**. In particular, once **stalled**, **`downtime_threshold` is the revised downtime** (the current predicted best-case / policy bound feeding this model—see **Terminology**).
-
-**Convergence coefficient** (matches Liu et al., HPDC 2011, $\lambda = D/R$):
-
-\[
-\lambda = \frac{\texttt{ewma\_dirty\_rate}}{\texttt{ewma\_bandwidth}}.
-\]
-
-**Predicted migration duration** (same closed form as the base geometric pre-copy model: total time $\approx \sum_i T_i$ with $T_i = V_i/R$, $V_i = V_{\mathrm{mem}}\lambda^i$, with $V_{\mathrm{mem}}$ taken as **`data_remaining`** at prediction time):
-
-$$
-T_{\mathrm{pred}}
-  = \frac{\texttt{data\_remaining}}{\texttt{ewma\_bandwidth}}
-    \cdot \frac{1 - \lambda^{\,n+1}}{1 - \lambda}.
-$$
-
-**Number of iterations** $n$ (ceiling of the base-$\lambda$ logarithm of the ratio of threshold to remaining data):
-$$
-n = \left\lceil \log_{\lambda}\!\left(\frac{\texttt{downtime\_threshold}}{\texttt{data\_remaining}}\right) \right\rceil.
-$$
-
-In code, $\log_{\lambda}(x) = \dfrac{\ln(x)}{\ln(\lambda)}$ (equivalently `log(x)/log(λ)`), for $\lambda > 0$, $\lambda \neq 1$.
-
-**Validity and edge cases (TODO: encode explicitly in implementation):**
-
-- The geometric sum requires **$0 < \lambda < 1$** (dirtying slower than the link on average). If **$\lambda \ge 1$** the model does not converge; treat **$T_{\mathrm{pred}}$** as **infinite** or fall back to a capped iteration count / conservative heuristic.
-- If **$\lambda \to 1$**, use the limit $\displaystyle \lim_{\lambda \to 1} \frac{1-\lambda^{n+1}}{1-\lambda} = n+1$, i.e. $T_{\mathrm{pred}} \approx \dfrac{\texttt{data\_remaining}}{\texttt{ewma\_bandwidth}} \cdot (n+1)$.
-- Clamp **$\texttt{downtime\_threshold} / \texttt{data\_remaining}$** into a valid range for the logarithm (e.g. $(0,1]$) and guard **$n \ge 0$**.
-
-Compare **$T_{\mathrm{pred}}$** (plus any constant resume/overhead terms if needed) to **remaining time until `MaxCompletionTime`** when deciding whether to start or continue a convergence phase.
-
-TODO: Failure modes when EWMA lags reality; interaction with `max_round` / platform caps on iterations.
-
-### Lower-bound early switchover (pre-stall)
-
-Even **before** the VM is stalled, if the **revised downtime** implied by the **lowest `remaining_bytes` observed so far** would cause $T_{\mathrm{pred}}$ to **exceed** `MaxCompletionTime`, **trigger switchover immediately**. The reasoning: the fastest possible completion is a pure pause-and-copy from the best point we have ever seen; that forms a **lower bound** on how long migration can possibly last. If that lower bound already blows the deadline, no future iteration can rescue it, so waiting further only wastes time.
 
 ### Stall Start Time and stalled state
 
@@ -288,6 +270,11 @@ Outline any alternative designs that have been considered)
 
 Considered using a simplier metric to detect stall. dirty rate > bandwidth does not neccesarily mean pre-copy cannot converge. This is because dirty rate often involves a working set thats relatively small. In this case its still important to allow migration to continue to transfer and directly monitor remaining bytes.
 
+An alternate proposal for stall detection was proposed here: https://docs.google.com/document/d/15P45MB9LtXTBKMfFkC2CLvEj-Hf9B6lY-W4DIEAq_5w/edit?tab=t.0#heading=h.sj3tv6yulsis. The key idea behind this proposal was to model pre-copy as a geometric series to estimate how long migration would take. Then, the proposal defined "stall" as when either of the two conditions are true:
+(a) the projected completion time exceeded the max completion time
+(b) dirty rate > bandwidth
+Ultimately the design proposed above was favored because it also optimizes for downtime and better considers the variability of the dirty rate and bandwidth.
+
 ## Scalability
 
 <!--
@@ -306,9 +293,10 @@ Does this impact update compatibility and how?)
 An overview on the approaches used to functional test this design)
 -->
 
-## Implementation History
-
 <!--
+## Implementation History
+Not Applicable
+
 For example:
 01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
 03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
