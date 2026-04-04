@@ -54,9 +54,6 @@ Why this enhancement is important
 
 2. Migration does not trigger the switch-over to post-copy or stop-and-copy until **after** Max Completion Time (as calculated using `completionTimeoutPerGiB`) has been exceeded. Cluster admins who set a completion-time budget cannot have that budget honored proactively. Moreover, while at least, migrations that exceed the allocated time budget by a factor of two are aborted, in the case of post-copy even this is not possible since doing so would result in data loss.
 
-3. Currently users are completely blind for how long a migration is actually expected to take. [todo expand on this?]
-
-
 
 ## Goals
 
@@ -159,8 +156,8 @@ We consider the migration "stalled" if both of the following conditions are sati
 When we say "progress timeout", we are referring to an existing API field under migration settings called `progressTimeout` that represents the maximum number of seconds a migration does not progress. Our revised stall detection algorithm repurposes this API field.
 
 
-> __Reasoning and Justification for the Stall Definition:__
-[todo: explain #1 allows remaining bytes to temporarily go up. #2 avoids switching to stall state due to a network blip. how by requiring remaining bytes be the minimum, we avoid triggering post copy during a network blip. there was already an existing issue of a network blip in the middle of post copy, we can't do anything about it. But network blips are expected to be rare, but even so when you are constantly watching for stall, and migrations can last a long time a blip anytime during a migration happening is much more likely (rather than the short duration post copy last).
+### Stall Design Justifications
+[todo: explain #1 allows remaining bytes to temporarily go up. #2 avoids switching to stall state due to a network blip. how by requiring remaining bytes be the minimum, we avoid triggering post copy during a network blip. there was already an existing issue of a network blip in the middle of post copy, we can't do anything about it. But network blips are expected to be rare, but even so when you are constantly watching for stall, and migrations can last a long time a blip anytime during a migration happening is much more likely (rather than the short duration post copy last). Also include data on the variations of remaining bytes while stalled to show just how much of a difference does optimizing for a local minima actually makes.
 ]
 
 
