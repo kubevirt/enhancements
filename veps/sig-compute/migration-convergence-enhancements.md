@@ -32,14 +32,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 Provide a brief overview of the topic
 -->
 
-This proposal makes the following key contributions:
-
-(a) The introduction of a robust migration stall detection algorithm to detect whether the migration has stalled and when further progress is not expected.
-(b) Optimized switch-over decision for when to switch to post-copy mode or stop-and-copy.
-    (1) In cases where disruptions are allowed: select the best time to switch to post-copy mode or stop-and-copy mode when convergence is not possible.
-    (2) In cases where disruptions are not allowed (pre-copy only): either fail the migration early as soon as it is clear convergence is not possible, or dynamically adjust the target migration `downtime` up to a maximum `max_downtime` as selected by the user.
-(c) Proactively ensure the max completion time as derived from `completionTimeoutPerGiB` is not overrun by modeling migration completion time where possible.
-(d) Data-backed optimizations of migration related defaults.
+This proposal introduces an iteration-boundary-aligned stall detection algorithm that monitors QEMU's estimated downtime to determine when a migration has stopped making progress. Once a stall is detected, a short sampling window identifies the optimal moment to act and switch to either post-copy or stop-and-copy, by dynamically raising the target downtime up to a user-configured `maxDowntime`. The same mechanism proactively enforces the completion time budget before it is exceeded, and in particular avoids starting a post-copy migration that would significantly overrun the budget. These changes reduce total migration time, minimize guest downtime during switch-over, and avoid wasting compute, bandwidth, and energy on migrations that have already converged as far as they can.
 
 ## Motivation
 
@@ -50,7 +43,6 @@ Why this enhancement is important
 1. On high dirty-rate VMs where dirty-rates are more than the network bandwidth, migration runs for a long time wasting energy, compute and bandwidth even if the migration had already gotten as close to convergence as it could much earlier. There are two main reasons for this:
     (a) The defaults on `completionTimeoutPerGiB` are overly conservative with a value of 150s. For example, a moderately sized VM with 16GB memory can attempt to continue migrating for over 40 minutes before timing out. [TODO: show calculations on typical values for how long you really need]
     (b) The existing stall detection mechanism in Kubevirt is weak. Currently, it works by monitoring the progress on remaining bytes during a migration. The timeout on the migration is controlled by the `progressTimeout` field and resets anytime remaining bytes decreases. However, this ignores that during a typical stall, remaining bytes on the migration typically fluctuates up and down due to phase variations in the underlying workload causing the dirty rates to vary.
-
 
 2. Migration does not trigger the switch-over to post-copy or stop-and-copy until **after** Max Completion Time (as calculated using `completionTimeoutPerGiB`) has been exceeded. Cluster admins who set a completion-time budget cannot have that budget honored proactively. Moreover, while at least, migrations that exceed the allocated time budget by a factor of two are aborted, in the case of post-copy even this is not possible since doing so would result in data loss.
 
@@ -65,10 +57,10 @@ The desired outcome for end-users is to achieve the lowest possible downtime wit
 
 - Decrease total migration time, downtime, and/or the time spent in pre-copy for VMs with high dirty rates.
 - Better adhere to the `MaxCompletionTime` by switching over to pre-copy or pause-and-copy earlier. 
-- Exposing to users an estimate of the total migration time.
 - Minimize API changes and avoid exposing implementation details to end-users.
 - Avoid arbitrary hard-coded constants unless we can present a coherent justification for them.
-- Ensure robustness against network fluctuations and failures. For example, some solutions to this problem may trigger switch over if bandwidth is decreasing to ensure completion time is met. But if network is dying this is the worst thing you can do (especially in post copy).
+- Ensure robustness against network fluctuations and failures. 
+    * This is an important goal because some solutions to this problem may trigger switch over if bandwidth is decreasing to ensure completion time is met. But if network is dying this is the worst thing you can do (especially in post copy).
 
 ## Non Goals
 
