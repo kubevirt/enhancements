@@ -6,7 +6,7 @@
 
 - ~This VEP targets alpha for version:~
 - This VEP targets beta for version: v1.8
-- This VEP targets GA for version:
+- This VEP targets GA for version: v1.10
 
 ## Overview
 Following [the initial proposal](./passt-migration-proposal.md), this part extends the `passt` KubeVirt integration from network binding plugin to core binding.
@@ -103,7 +103,7 @@ This condition will be modified such that passt-repair would only be called if t
 
 The `passt` network binding plugin will be deprecated once the feature is GA.
 Once deprecated, it'll still be maintained for another 3 releases, per KubeVirt's deprecation policy.
-This means that the plugin code will continue to work at least until release 1.11 (assuming GA at 1.9).
+This means that the plugin code will continue to work at least until release 1.11 (assuming GA at 1.10).
 Existing users may retain existing passt plugin based VMs until then.
 Seamless migration functionality will be discontinued for `passt` binding plugin users, following the introduction of the `passt` core network binding.
 Users of the `passt` binding plugin will be encouraged to move to the core passt binding in order to enjoy the benefits of the seamless migration feature.
@@ -116,4 +116,11 @@ Users of the `passt` binding plugin will be encouraged to move to the core passt
 The current e2e `passt` tests will be duplicated so that, in addition to the existing set that runs with the `passt` plugin, a second variant will run VMs configured with the core `passt` binding. 
 The existing set will be labeled to control execution as follows:
 - For the first release (1.8), both sets will run as part of presubmits.
-- In subsequent releases the plugin tests will be removed.
+- Passt binding plugin e2e tests were removed in https://github.com/kubevirt/kubevirt/pull/17476. A minimal set still remains with the purpose of testing the network binding plugin mechanism itself.  
+
+## Graduation Requirements
+
+### GA
+- Remaining bugs must be fixed 
+- Guest IP addresses must persist across migration in both IPv4 and IPv6
+- e2e testing de-quarantined and stable
