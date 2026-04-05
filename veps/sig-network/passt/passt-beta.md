@@ -5,8 +5,8 @@
 ### Target releases
 
 - ~This VEP targets alpha for version:~
-- This VEP targets beta for version: v1.8
-- This VEP targets GA for version:
+- ~This VEP targets beta for version: v1.8~ 
+- This VEP targets GA for version: v1.9
 
 ## Overview
 Following [the initial proposal](./passt-migration-proposal.md), this part extends the `passt` KubeVirt integration to the Beta phase.
@@ -67,8 +67,9 @@ The `passtIPStackMigration` feature gate that was introduced in the Alpha phase 
 
 ### Validation Webhook
 `passtBinding` network binding will only be allowed for interfaces bound to `Pod` network or `multus` default network.
-In addition, the admitter will also validate enablement of the `PasstBinding` feature gate. 
+In addition, in the Beta stage, the admitter will also validate enablement of the `PasstBinding` feature gate. 
 A validation will be implemented in the network binding admitter.
+The FG validation will be removed once graduated.
 
 ### virt-controller
 250Mi of RAM will be added to the compute container of virt-launcher pods if VMI has passtBinding, as those are the overheads that passt requires (if all ports are forwarded).
@@ -118,4 +119,4 @@ Users of the `passt` binding plugin will be encouraged to move to the core passt
 The current e2e `passt` tests will be duplicated so that, in addition to the existing set that runs with the `passt` plugin, a second variant will run VMs configured with the core `passt` binding. 
 The existing set will be labeled to control execution as follows:
 - For the first release (1.8), both sets will run as part of presubmits.
-- In subsequent releases the plugin tests will run in the SIG Network periodic job to monitor regressions.
+- Upon graduation the binding plugin test will be removed.
