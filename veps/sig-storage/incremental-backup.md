@@ -684,9 +684,6 @@ Same as the chosen method of operation.
 With certain storage providers, even when a small PVC size is requested, a larger volume may be provisioned based on the provider’s minimum volume size. When managing a large number of VMs, this behavior can lead to inefficient storage.
 **This is a general limitation that also affects VM state PVCs.**
 
-- Managing a large number of checkpoints.
-If too many checkpoints accumulate, the `CheckpointsList` CR can become large and difficult to manage. To keep it maintainable, it is recommended that users periodically delete old checkpoints. Realistically, once a checkpoint has been successfully backed up from, it is no longer needed and can be deleted.
-
 ## Update/Rollback Compatibility
 
 Since the new feature allows users to enable or disable it, upgrades will not pose any issues. Users must opt in by setting the changedBlockTracking to true. The rollback will not be a problem either, as it is essentially the same as setting the changedBlockTracking to false, which will be the default value.
@@ -703,7 +700,7 @@ Check failure scenario where incremental backup cannot be done and in such case 
 - Add/remove the qcow2 overlay
 - Subresource to initiate backup (full and incremental) including Libvirt wrapper backup functions.
 - New VirtualMachineBackup CR + controller for backups - online backup only
-- New VirtualMachineCheckpointsList CR, Handling restart of VM and redefinition of checkpoints.
+- New VirtualMachineBackupTracker CR, Handling restart of VM and redefinition of checkpoints.
 - Handle VM failure where bitmap is corrupted - next backup needs to be full.
 - Offline backup
 - API to allow to pull the backup over network.
