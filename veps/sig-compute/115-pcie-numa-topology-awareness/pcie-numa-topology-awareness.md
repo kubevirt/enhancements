@@ -128,6 +128,62 @@ This approach ensures each passthrough device appears on a guest PCIe bus that c
 its actual host NUMA node, enabling AI frameworks to make optimal communication and memory access
 decisions.
 
+### Guest NUMA Topology Extension for Cross-NUMA Devices
+
+On some hardware architectures, passthrough devices are on a different physical NUMA node
+than any allocated vCPUs. The primary example is NVIDIA's [Grace Hopper](https://developer.nvidia.com/blog/nvidia-grace-hopper-superchip-architecture-in-depth/)
+and [Grace Blackwell (GB200)](https://docs.nvidia.com/multi-node-nvlink-systems/multi-node-tuning-guide/overview.html)
+superchip architectures, where the Grace ARM64 CPU and the GPU are physically separate
+dies connected via [NVLink-C2C](https://www.nvidia.com/en-us/data-center/nvlink-c2c/)
+(900 GB/s on GH200, 1.8 TB/s on GB200) rather than PCIe.
+
+From the OS perspective, [the Grace CPU and GPU appear as separate NUMA nodes](https://developer.nvidia.com/blog/nvidia-grace-hopper-superchip-architecture-in-depth/):
+- **NUMA node 0**: Grace CPU cores + LPDDR5X memory (~490 GB)
+- **NUMA node 1**: GPU + HBM3/HBM3e memory (~95-188 GB), with 0 CPUs
+
+This is confirmed by the [Grace Performance Tuning Guide](https://docs.nvidia.com/dccpu/grace-perf-tuning-guide/system.html),
+which shows `numactl -H` output with the CPU on node 0 (72 cores, ~490 GB) and the GPU
+on node 1 (0 CPUs, ~95 GB HBM3) at NUMA distance 80. This cross-NUMA topology is an
+architectural constant — the CPU and GPU are separate silicon with separate memory
+controllers and can never be co-located on the same NUMA node.
+
+> **Note on CDMM mode**: Starting with the R580 driver, NVIDIA introduced
+> [Coherent Driver-Based Memory Management (CDMM)](https://developer.nvidia.com/blog/understanding-memory-management-on-hardware-coherent-platforms/)
+> mode, where the NVIDIA host driver no longer exposes GPU HBM as an OS NUMA memory
+> node. CDMM is recommended for Kubernetes pod workloads to prevent the OS from
+> counting GPU HBM as available system memory. However, CDMM is likely irrelevant
+> for the GPU passthrough use case that this VEP addresses: with VFIO passthrough,
+> the GPU is unbound from the NVIDIA host driver and bound to `vfio-pci`, so the
+> NVIDIA driver never initializes the GPU and CDMM has no effect. The PCI device's
+> sysfs `numa_node` is set by the kernel's PCI subsystem based on the ACPI SRAT
+> proximity domain from firmware, not by the NVIDIA driver, and should still report
+> the correct physical NUMA node regardless of CDMM mode or driver binding. This
+> should be verified on actual Grace Hopper/GB200 hardware with a vfio-pci bound GPU.
+
+When `guestMappingPassthrough` is configured, the guest NUMA topology is built exclusively
+from vCPU pinning information. If all vCPUs are pinned to pCPUs on pNUMA node 0, only a
+single guest NUMA node (vNUMA 0) is created. A device on pNUMA node 1 has no corresponding
+guest NUMA node, so its NUMA affinity information is lost and it falls back to the default
+`pci.0` bus with NUMA node `-1`.
+
+To address this, when the `PCINUMAAwareTopology` feature gate is enabled and
+`guestMappingPassthrough` is set, KubeVirt will extend the guest NUMA topology
+with CPU-less NUMA cells for any host NUMA node that:
+1. Has one or more passthrough PCIe devices allocated to the VM.
+2. Is not already represented by an existing guest NUMA cell (i.e., has no pinned vCPUs).
+
+These additional NUMA cells will have no CPUs assigned and a minimal memory allocation
+sufficient for the guest kernel to recognize the NUMA node. The `pcie-expander-bus`
+controller for each such cell will be configured with the corresponding NUMA node ID,
+allowing the guest OS and AI frameworks to observe the correct device-to-NUMA relationship.
+
+For the GB200 example, the resulting guest topology would be:
+- **vNUMA 0**: all vCPUs + guest memory (mirroring pNUMA 0)
+- **vNUMA 1**: no CPUs, GPU attached via `pcie-expander-bus` (mirroring pNUMA 1)
+
+This enables AI frameworks such as NCCL to detect that the GPU is on a separate NUMA
+domain and make optimal communication path decisions, matching the behavior on bare metal.
+
 A non NUMA-aware PCIe topology of a VM looks like this:
 
 ```
@@ -174,10 +230,20 @@ While a NUMA-aware PCIe topology will look like this:
 KubeVirt's `virt-launcher` component [converts](https://github.com/kubevirt/kubevirt/blob/0358eea1e1b9faf2717700b7b0599268e8488706/pkg/virt-launcher/virtwrap/converter/converter.go#L1159)
 the VirtualMachineInstance Spec to the equivalent libvirt domain XML. During
 this conversion, it determines device NUMA affinity by reading
-`/sys/bus/pci/devices/<BDF>/numa_node` from the host filesystem and comparing
-the device's NUMA node against the guest's configured NUMA nodes. When the
-device's NUMA node matches one of the guest's NUMA nodes, the device is aligned
-to that node; otherwise, it defaults to NUMA node `-1`.
+`/sys/bus/pci/devices/<BDF>/numa_node` from the host filesystem.
+
+The device's host NUMA node is then resolved to a guest NUMA node using the
+following strategy:
+
+1. **vCPU-based matching (existing path)**: The host NUMA node's pCPU list is
+   compared against the vCPU pinning information. If a pCPU on the device's NUMA
+   node is pinned to a vCPU, the corresponding guest NUMA cell is used.
+2. **Device-only NUMA cell (extended path)**: If no vCPU is pinned to any pCPU
+   on the device's host NUMA node, a new CPU-less guest NUMA cell is created for
+   that host NUMA node. This cell is added to the domain's NUMA topology before
+   device placement, ensuring the `pcie-expander-bus` controller can reference it.
+3. **Fallback**: If the device's host NUMA node cannot be determined (e.g.,
+   sysfs reports `-1`), the device defaults to the `pci.0` bus with NUMA node `-1`.
 
 Mediated devices: while PCIe devices already include this information, mediated
 devices require additional resolution. We resolve the parent PCIe device address
@@ -197,13 +263,16 @@ slot assigner). This assigner will be executed before any host devices are added
 to the domain. It will perform the following steps to create the NUMA-aware PCIe
 topology for the devices with NUMA affinity information:
 
-1. Discovers the NUMA node for each passthrough PCIe device and if it matches any of the guest's NUMA nodes.
-2. Filters out devices without NUMA alignment to be placed on the default `pci.0` bus using the existing root slot assigner.
-3. Groups devices by NUMA node: `numaNode -> []api.HostDevice`.
-4. Creates `pcie-expander-bus` controllers with `<target busNr="X"><node>Y</node></target>` elements for each NUMA node.
-5. Creates one `pcie-root-port` controller per device under the respective `pcie-expander-bus` controller.
-6. Assigns device addresses to the `pcie-root-port` aligned with its NUMA node.
-7. Inserts the controllers created into the domain before adding the host devices.
+1. Discovers the host NUMA node for each passthrough PCIe device by reading `/sys/bus/pci/devices/<BDF>/numa_node`.
+2. Resolves each device's host NUMA node to a guest NUMA cell:
+   a. If a vCPU is pinned to a pCPU on the device's host NUMA node, uses the corresponding guest NUMA cell.
+   b. If no vCPU exists on the device's host NUMA node, creates a new CPU-less guest NUMA cell for that host NUMA node and adds it to the domain's NUMA topology.
+3. Filters out devices without a determinable host NUMA node (e.g., sysfs reports `-1`) to be placed on the default `pci.0` bus using the existing root slot assigner.
+4. Groups devices by guest NUMA node: `numaNode -> []api.HostDevice`.
+5. Creates `pcie-expander-bus` controllers with `<target busNr="X"><node>Y</node></target>` elements for each guest NUMA node.
+6. Creates one `pcie-root-port` controller per device under the respective `pcie-expander-bus` controller.
+7. Assigns device addresses to the `pcie-root-port` aligned with its guest NUMA node.
+8. Inserts the controllers and any new NUMA cells into the domain before adding the host devices.
 
 ### Schema Changes
 
@@ -264,40 +333,95 @@ func PCIAddressToString(pciBusID *api.Address) string {
                strings.TrimPrefix(pciBusID.Function, prefix))
 }
 
-// LookupDeviceVCPUNumaNode looks up the NUMA node of a device based on its PCI address
-// and the domain specification of the virtual machine.
+// LookupDevicesNumaNodes looks up the NUMA nodes of multiple devices based on
+// their PCI addresses and the domain spec of the virtual machine.
 //
-// It returns a pointer to the NUMA node ID if found, or nil if not found.
-func LookupDeviceVCPUNumaNode(pciAddress *api.Address, domainSpec *api.DomainSpec) (numaNode *uint32) {
-       if pciAddress == nil || domainSpec == nil ||
-               domainSpec.CPU.NUMA == nil {
+// It returns a map of PCI addresses to their corresponding guest NUMA node IDs.
+//
+// For each device, the function:
+// 1. Reads the device's host NUMA node from sysfs.
+// 2. Finds a pCPU on that NUMA node that is pinned to a vCPU.
+// 3. Maps the vCPU to its guest NUMA cell.
+//
+// If no vCPU is pinned to the device's host NUMA node (e.g., on NVIDIA GB200
+// where the GPU is on a separate NUMA node from all CPUs), the device's host
+// NUMA node is recorded for the caller to create a CPU-less guest NUMA cell.
+func LookupDevicesNumaNodes(pciAddresses []string, domainSpec *api.DomainSpec) (
+       aligned map[string]uint32, unaligned map[string]uint32) {
+
+       aligned = make(map[string]uint32)
+       unaligned = make(map[string]uint32)
+       if len(pciAddresses) == 0 || domainSpec == nil ||
+               domainSpec.CPU.NUMA == nil || domainSpec.CPUTune == nil {
                return
        }
 
-       // vCPUS by device PCI address
-       vCPUList, err := LookupDeviceVCPUAffinity(
-               PCIAddressToString(pciAddress),
-               domainSpec,
-       )
-       if err != nil || len(vCPUList) == 0 {
-               return
-       }
-
-       // guest OS numa node by vCPU
-       for i, cell := range domainSpec.CPU.NUMA.Cells {
-               vcpusInCell, err := ParseCPUSetLine(cell.CPUs, 5000)
+       // pcpu -> vcpu mapping
+       p2vCPUMap := make(map[uint32]uint32)
+       for _, vcpuPin := range domainSpec.CPUTune.VCPUPin {
+               pc, err := ParseCPUSetLine(vcpuPin.CPUSet, MAX_CPU_LIMIT)
                if err != nil {
                        continue
                }
+               for _, p := range pc {
+                       p2vCPUMap[uint32(p)] = vcpuPin.VCPU
+               }
+       }
 
+       // vcpu -> vnuma mapping
+       vCPUToCellMap := make(map[uint32]uint32)
+       for _, cell := range domainSpec.CPU.NUMA.Cells {
+               vcpusInCell, err := ParseCPUSetLine(cell.CPUs, MAX_CPU_LIMIT)
+               if err != nil {
+                       continue
+               }
+               cellID, err := strconv.Atoi(cell.ID)
+               if err != nil {
+                       continue
+               }
                for _, vcpu := range vcpusInCell {
-                       if vcpu == int(vCPUList[0]) {
-                               id, err := strconv.Atoi(domainSpec.CPU.NUMA.Cells[i].ID)
-                               if err == nil {
-                                       cellID := uint32(id)
-                                       numaNode = &cellID
-                               }
+                       vCPUToCellMap[uint32(vcpu)] = uint32(cellID)
+               }
+       }
+
+       // pnuma -> pcpu cache
+       pNumaToPCPUSetMap := make(map[uint32][]uint32)
+       for _, pciAddress := range pciAddresses {
+               deviceNuma, err := GetDeviceNumaNode(pciAddress)
+               if err != nil || int32(*deviceNuma) == -1 {
+                       continue
+               }
+
+               var pcpus []uint32
+               if res, exists := pNumaToPCPUSetMap[*deviceNuma]; exists {
+                       pcpus = res
+               } else {
+                       pcpusNuma, err := GetNumaNodeCPUList(int(*deviceNuma))
+                       if err != nil {
+                               continue
                        }
+                       for _, pcpu := range pcpusNuma {
+                               pcpus = append(pcpus, uint32(pcpu))
+                       }
+                       pNumaToPCPUSetMap[*deviceNuma] = pcpus
+               }
+
+               // Try to find a vCPU on this NUMA node
+               found := false
+               for _, pcpu := range pcpus {
+                       if vCPU, exist := p2vCPUMap[pcpu]; exist {
+                               cellID := vCPUToCellMap[vCPU]
+                               aligned[pciAddress] = cellID
+                               found = true
+                               break
+                       }
+               }
+
+               // Device is on a host NUMA node with no pinned vCPUs.
+               // Record the host NUMA node so the caller can create a
+               // CPU-less guest NUMA cell for it.
+               if !found {
+                       unaligned[pciAddress] = *deviceNuma
                }
        }
        return
@@ -308,7 +432,7 @@ func LookupDeviceVCPUNumaNode(pciAddress *api.Address, domainSpec *api.DomainSpe
 
 - Mediated devices / VFs:
   - do we always know the backing PCIe BDF? If not, extend DRA/device-plugin payloads to supply it.
-  - the current design assumes the parent device's NUMA node can be accessed from
+  - the current design assumes the parent device’s NUMA node can be accessed from
     the mdev/VFs sysfs entry accessible in `virt-launcher`. This assumption requires validation;
     if it proves incorrect, alternative implementation strategies for VF NUMA affinity
     must be considered.
@@ -326,6 +450,31 @@ func LookupDeviceVCPUNumaNode(pciAddress *api.Address, domainSpec *api.DomainSpe
 - Opt-out mechanism: when this feature graduates from Alpha and becomes enabled by default, users might need a way to preserve
   legacy PCI topology for existing VMs. We can consider implementing an annotation-based system where existing VMs are automatically
   marked with legacy topology mode, while users can explicitly opt-in to NUMA-aware topology through user-facing annotations.
+- CPU-less guest NUMA cell memory allocation: when creating a CPU-less NUMA cell for
+  a device-only host NUMA node, determine the minimum memory allocation required for
+  the guest kernel to recognize and expose the NUMA node. Verify that QEMU and libvirt
+  accept NUMA cells with no CPUs and minimal memory.
+- CPU-less NUMA node compatibility: verify that the ARM64 `virt` machine type (used by
+  GB200) supports `pcie-expander-bus` controllers. The current VEP assumes q35, but
+  GB200 is the primary cross-NUMA use case.
+- `GetDeviceNumaNode` uint32 overflow: when sysfs reports NUMA node `-1` for a device
+  without NUMA affinity, the current implementation casts this to `uint32(4294967295)`.
+  An explicit check for `-1` before the cast should be added.
+- NVIDIA [CDMM mode](https://developer.nvidia.com/blog/understanding-memory-management-on-hardware-coherent-platforms/):
+  CDMM controls whether the NVIDIA host driver exposes GPU HBM as an OS NUMA memory
+  node. For GPU passthrough (VFIO), the GPU is bound to `vfio-pci` and the NVIDIA
+  driver is not involved, so CDMM should be irrelevant. The PCI device's sysfs
+  `numa_node` is set by firmware (ACPI SRAT), not the NVIDIA driver. Verify on
+  actual Grace Hopper/GB200 hardware that a vfio-pci bound GPU still reports the
+  correct `numa_node` value regardless of CDMM mode.
+- NUMA distance passthrough: the current implementation does not map host NUMA
+  distances between nodes to the guest. QEMU defaults to distance 10 (local) and
+  20 (remote), but on Grace Hopper/GB200 the actual distance between CPU (node 0)
+  and GPU (node 1) is 80. Host distances are available from
+  `/sys/bus/node/devices/nodeX/distance` and could be passed through to the guest
+  via libvirt `<distances><sibling>` elements in NUMA cell definitions. This would
+  give AI frameworks more accurate topology information for routing decisions.
+  Consider whether this should be part of the initial implementation or a follow-up.
 
 ## API Examples
 
@@ -610,6 +759,95 @@ KubeVirt creates:
 </devices>
 ```
 
+### Cross-NUMA Example (NVIDIA GB200)
+
+#### System Configuration
+An NVIDIA GB200 Grace Blackwell system with:
+- **NUMA Node 0**: Grace ARM64 CPUs
+- **NUMA Node 1**: Blackwell GPU (connected via NVLink-C2C, no CPUs)
+
+The VM is configured with `guestMappingPassthrough` and 2 dedicated vCPUs pinned
+to pCPUs on NUMA node 0. One GPU from NUMA node 1 is passed through.
+
+#### Result
+KubeVirt:
+1. Discovers the GPU is on host NUMA node 1 via `/sys/bus/pci/devices/<BDF>/numa_node`.
+2. Finds no vCPUs pinned to pCPUs on NUMA node 1.
+3. Creates a CPU-less guest NUMA cell (vNUMA 1) for host NUMA node 1.
+4. Creates a `pcie-expander-bus` controller targeting vNUMA node 1.
+5. Places the GPU behind a `pcie-root-port` under that expander bus.
+
+#### Guest NUMA Topology
+```
+  vNUMA 0 (from guestMappingPassthrough)     vNUMA 1 (extended for device)
+  ┌────────────────────────────────────┐     ┌──────────────────────────────┐
+  │  vCPU 0, vCPU 1                   │     │  No CPUs                    │
+  │  Guest memory                     │     │  Minimal memory             │
+  └────────────────────────────────────┘     └──────────────────────────────┘
+                                                        │
+                                                  ┌───────────┐
+                                                  │ pxb-pcie  │
+                                                  │ (node=1)  │
+                                                  └───────────┘
+                                                        │
+                                                ┌───────────────┐
+                                                │pcie-root-port │
+                                                └───────────────┘
+                                                        │
+                                                  ┌───────────┐
+                                                  │    GPU    │
+                                                  │ (VFIO)    │
+                                                  └───────────┘
+```
+
+#### Domain XML (Cross-NUMA)
+
+##### NUMA Cells
+```xml
+<cpu>
+  <numa>
+    <!-- vNUMA 0: vCPUs from guestMappingPassthrough -->
+    <cell id='0' cpus='0-1' memory='6291456' unit='KiB'/>
+    <!-- vNUMA 1: CPU-less cell for GPU NUMA node -->
+    <cell id='1' cpus='' memory='1024' unit='KiB'/>
+  </numa>
+</cpu>
+```
+
+##### Controllers
+```xml
+<devices>
+  <controller type='pci' index='0' model='pcie-root'/>
+
+  <!-- pxb-pcie for NUMA Node 1 (GPU) -->
+  <controller type='pci' index='1' model='pcie-expander-bus'>
+    <model name='pxb-pcie'/>
+    <target busNr='254'>
+      <node>1</node>
+    </target>
+  </controller>
+
+  <!-- Root port for GPU -->
+  <controller type='pci' index='2' model='pcie-root-port'>
+    <target chassis='1' port='0x0'/>
+    <address type='pci' domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+  </controller>
+</devices>
+```
+
+##### Device
+```xml
+<devices>
+  <hostdev mode='subsystem' type='pci' managed='yes'>
+    <driver name='vfio'/>
+    <source>
+      <address domain='0x0000' bus='0x83' slot='0x00' function='0x0'/>
+    </source>
+    <address type='pci' domain='0x0000' bus='0x02' slot='0x00' function='0x0'/>
+  </hostdev>
+</devices>
+```
+
 ## Scalability
 
 The solution should scale to:
@@ -630,9 +868,16 @@ The solution should scale to:
 
 - Unit tests: add cases under `virt-launcher` `virtwrapper` codebase verifying NUMA grouping, controller
   generation, and fallback when NUMA is `-1`.
+- Unit tests for cross-NUMA device placement: verify that when a device is on a host
+  NUMA node with no pinned vCPUs, a CPU-less guest NUMA cell is created and the device
+  is placed under a `pcie-expander-bus` targeting that cell. Also verify the mixed case
+  where some devices are co-located with vCPUs and others are not.
 - End-to-end tests: craft NUMA VMI functional tests (similar to the ones found in `tests/numa/numa.go`)
   launching with multiple passthrough GPUs on different NUMA nodes; assert domain XML includes `pxb-pcie` `node='0/1'`
   and devices placed under the correct root ports.
+- End-to-end tests for cross-NUMA topologies (e.g., GB200): verify that a VM with
+  vCPUs on pNUMA 0 and a GPU on pNUMA 1 produces a guest with two NUMA nodes, with the
+  GPU placed under a `pcie-expander-bus` on vNUMA 1.
 
 ## Implementation History
 
@@ -647,7 +892,10 @@ This section will be filled as implementation progresses
 - Guest VM NUMA topology awareness for host devices implemented behind the
   respective feature gate.
 - Support NUMA topology awareness for mediated devices and VFs.
-- Unit tests.
+- Support cross-NUMA device placement by extending the guest NUMA topology
+  with CPU-less NUMA cells for host NUMA nodes that have passthrough devices
+  but no pinned vCPUs.
+- Unit tests, including cross-NUMA device placement scenarios.
 - End-to-end tests.
 
 ### Beta
