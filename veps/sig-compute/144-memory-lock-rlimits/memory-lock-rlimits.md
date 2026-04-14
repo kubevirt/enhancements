@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -330,6 +330,12 @@ The following e2e scenarios should be considered:
 
 ## Implementation History
 
+- 2025/04/29: Plans to graduate the feature into beta in v1.9 are
+  accepted.
+- 2025/03/04: Feature lands Alpha stage in v1.8
+  https://github.com/kubevirt/kubevirt/pull/16956
+- 2025/02/27: Feature implementation lands the main branch
+  https://github.com/kubevirt/kubevirt/pull/16384
 - 2025/12/10: Working on the draft implementation for the new design.
 - 2025/11/21: Draft implementation of the first proposed VEP:
   https://github.com/kubevirt/kubevirt/pull/16197
@@ -342,12 +348,12 @@ The following e2e scenarios should be considered:
   to `virt-launcher` and QEMU processes accordingly under a feature
   gate.
 - Add feature gate `MemLockRLimitConfiguration`.
-- e2e testing implementation.
-- Documentation.
 
 ### Beta
+- Implement functional tests.
 - Notify that other memory extension mechanisms will be replaced by this
   one in the future.
+- Documentation.
 
 ### GA
 - Remove the `MemLockRLimitConfiguration` feature gate.
