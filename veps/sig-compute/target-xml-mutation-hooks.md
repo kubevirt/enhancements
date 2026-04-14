@@ -5,14 +5,14 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -163,8 +163,7 @@ It should be a scalable and extendable hook system that allows adding new hooks.
 - Add unit tests for hooks.
 
 ### Beta
-- Enable feature gate by default.
-- Migrate all existing XML modifications from source to target-side hooks (dedicated CPU pinning, etc.).
+- Migrate all target-based modifications from source to target-side hooks (dedicated CPU pinning, disk source path for cross-namespace or cross-cluster live migration).
 
 ### GA
 
