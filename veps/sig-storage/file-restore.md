@@ -40,7 +40,7 @@ Several backup vendors already offer their own file-level restore solutions; how
 * Simplifying guest OS credentials handling, built for confidential guests.
 * Supporting encrypted volumes (LUKS, BitLocker).
 * Managing filesystem-specific metadata (ACLs, xattrs, etc.).
-Furthermore, our approach provides a simple declarative k8s API, supports both Linux and Windows guests, and enables both automated and manual FLR. KubeVirt will offer an integrated, open FLR solution for users who need FLR from a specific backup PVC or VolumeSnapshot, without depending on a backup vendor solution.
+Furthermore, our approach provides a simple declarative k8s API, supports both Linux and Windows guests, and enables both automated and manual FLR. A dedicated file-restore operator aims to offer an integrated, open FLR solution for users who need FLR from a specific backup PVC or VolumeSnapshot, without depending on a backup vendor solution, while keeping KubeVirt at the infrastructure layer.
 
 ### VMware File-Level Restore
 For VMware File-Level Restore, many backup vendors (Veeam, Commvault, Veritas, Dell PowerProtect, etc.) use a guest agent (a persistent one, or an ephemeral one pushed via `VMware Tools`). VMware [vSphere Guest Operations API](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere-sdks-tools/7-0/web-services-sdk-programming-guide/virtual-machine-guest-operations/running-guest-os-operations.html) allows interaction with files inside the guest through the hypervisor without requiring a guest network connection. Its capabilities include `InitiateFileTransferToGuest`, `MakeDirectoryGuest`, `ListGuestFiles`, etc. It is based on the `VMware Tools` control channel. For authentication it requires valid guest OS credentials passed via the API for `root` or a user with specific `sudo` permissions for file operations.
@@ -49,7 +49,7 @@ For VMware File-Level Restore, many backup vendors (Veeam, Commvault, Veritas, D
 The [OADP VM File Restore](https://github.com/migtools/oadp-vm-file-restore?tab=readme-ov-file#oadp-vm-file-restore) project is Velero-oriented, while we suggest a vendor-agnostic approach. Their external pod file-serving architecture is not designed to support encrypted backup volumes; for those, we suggest hotplugging the backup PVCs to the VM so we can mount and access their filesystems. However, for non-encrypted volumes, we can use OADP file-serving to browse backups in a temporary namespace before applying our file restore.
 
 ## Repos
-[KubeVirt](https://github.com/kubevirt/kubevirt)
+[VM File Restore Operator](https://github.com/kubevirt/vm-file-restore-operator) a standalone operator in the kubevirt organization. [KubeVirt](https://github.com/kubevirt/kubevirt) is used only via the public API.
 
 ## Design
 ### Guest-Level Cooperation
@@ -58,27 +58,21 @@ The solution is designed to support file-level restore for both Linux and Window
 Additionally, encrypted volumes (such as BitLocker for Windows) require guest-level access to ensure files are properly restored from encrypted backup PVC or snapshot.
 
 ### Implementation Approach
-* We introduce the `VirtualMachineFileRestore` CRD, which is namespace-scoped and created in the VirtualMachine namespace. Access control is enforced through the relevant RBAC rules.
+* The file-restore operator introduces the `VirtualMachineFileRestore` CRD, which is namespace-scoped and created in the VirtualMachine namespace. Access control is enforced through the relevant RBAC rules.
 * A hotplug volume will be used to attach a backup PVC or a VolumeSnapshot-restored PVC to the VM. The `DeclarativeHotplugVolumes` feature gate must be enabled.
 * SSH over the network will be used for specific command execution on the guest.
 * The guest OS-specific operations will be wrapped in a restricted file-restore guest helper script or binary. We will provide reference scripts, but backup vendors are encouraged to implement their own helpers.
 * Encrypted volume key management is in the responsibility of the guest file restore helper, looking for them in a specific location (e.g. next to the helper, or in the VM encrypted volume that we restore to from its encrypted backup PVC/VolumeSnapshot).
 
 ### File-Level Restore
-virt-controller:
-* Watch `VirtualMachineFileRestore`
+VM File Restore Operator:
+* Watches `VirtualMachineFileRestore` CRs
 * If the source is a VolumeSnapshot, restore it to a PVC in the VM namespace
 * If the source is a PVC in another namespace, clone it to a PVC in the VM namespace
-* Hotplug the volume (read-only)
-* Label `VirtualMachineFileRestore` with the target node (e.g. `kubevirt.io/target-node=node01`).
-* When the restore completes or the CR is deleted:
-  * Unplug the volume
-  * Delete the PVC if temporarily created
-
-virt-handler:
-* Watch `VirtualMachineFileRestore` using a filtered informer to process only restores to local VMIs.
-* SSH into the guest and execute the restore helper with the relevant arguments.
-* Update status upon completion (whether succeeded or failed) or timeout.
+* Declaratively Hotplug the volume (read-only) via the KubeVirt API
+* SSH into the guest over the network and run the restore helper
+* Update CR status on completion, failure, or timeout
+* Unplug the volume and delete the PVC if temporarily created
 
 Guest file restore helper:
 * Unlock the volume if encrypted (key file in target volume)
@@ -181,7 +175,15 @@ spec:
 This reference example assumes the guest helper uses `rclone` and S3 remote was already configured via `rclone config`.
 
 ## Guest command execution
-`virt-handler` connects to the guest `sshd` as restore-user, a user restricted to `sudo` execution of only the specifically-named trusted file-restore helper (via `.ssh/authorized_keys` and `/etc/sudoers.d`). `virt-operator` generates an SSH key pair and stores it in a Secret. The public key can be added to the guest either manually or propagated by `virt-controller` patching the VM `accessCredentials.sshPublicKey` with `propagationMethod: qemuGuestAgent` so it is injected via qemu-guest-agent. `virt-handler` mounts the private key Secret at `/etc/kubevirt/ssh/id_rsa` and uses it for file-restore SSH connections. If we find that private key compromise is an issue, we can create an ephemeral key pair per SSH connection.
+The operator connects to the guest `sshd` as restore-user, a user restricted to using `sudo` to execute only the specifically-named, trusted file-restore helper binary or script (configured via `.ssh/authorized_keys` and `/etc/sudoers.d`).
+
+## Key management
+The SSH key lifecycle is managed by the operator, which creates a single SSH key pair and shares the public key via a ConfigMap.
+
+To activate the helper in the guest adding the restore-user, or to update its public key, one will need to:\
+`$ sudo filerestore.sh activate --public-key-file <PUBLIC_KEY_FILE>`
+
+The operator will also patch specifically labeled VMs `accessCredentials.sshPublicKey` with `propagationMethod: qemuGuestAgent` so the public key is automatically propagated by the `qemu-guest-agent`. This method allows us to support key rotation; however, it is currently supported only for Linux guests.
 
 ### Guest file restore helper CLI
 For covering the mentioned file restore flows, a guest helper CLI should support:
@@ -211,7 +213,7 @@ We use rsync or similar in the guest for file-level restore. File transfer is me
 
 ## Update/Rollback Compatibility
 - The backup volume is temporarily hotplugged to the VMI only for as long as needed
-- No changes to existing APIs or objects
+- No changes to existing KubeVirt APIs or objects
 - No changes to existing VM/VMI specs
 
 ## Functional Testing Approach
@@ -230,7 +232,7 @@ A comprehensive test suite that checks the guest filesystem state is important f
 ## Graduation Requirements
 
 ### Alpha
-The `VirtualMachineFileRestore` feature gate will enable file-level restore.
+The file-restore operator enables file-level restore.
 
 ### Beta
 - Adoption by 2 backup and recovery applications or vendors.
