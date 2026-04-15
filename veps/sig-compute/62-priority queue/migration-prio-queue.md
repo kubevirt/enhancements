@@ -6,7 +6,7 @@
 
 - This VEP targets alpha for version: v1.7
 - This VEP targets beta for version: v1.8
-- This VEP targets GA for version:
+- This VEP targets GA for version: v1.9
 
 ### Release Signoff Checklist
 
@@ -15,7 +15,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements]
 - [x] (R) Alpha target version is explicitly mentioned and approved
 - [x] (R) Beta target version is explicitly mentioned and approved
-- [ ] (R) GA target version is explicitly mentioned and approved
+- [x] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
@@ -136,15 +136,14 @@ type VirtualMachineInstanceMigrationSpec struct {
 ## Feature Lifecycle Phases
 
 ### Alpha
-
 - Add `priority` to VMIM CRD behind a feature gate.
 - Update key controllers and test basic priority ordering.
 - Add feature gate `MigrationPriorityQueue`
 
 ### Beta
+- Enabled by default in e2e tests
 
 ### GA
-
 - Lock feature gate ON
 - Finalize docs
 
