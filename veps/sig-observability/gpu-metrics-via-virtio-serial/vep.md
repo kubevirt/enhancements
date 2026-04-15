@@ -4,7 +4,7 @@
 
 ### Target releases
 
-- This VEP targets alpha for version:
+- This VEP targets alpha for version: v1.9
 - This VEP targets beta for version:
 - This VEP targets GA for version:
 
@@ -41,7 +41,6 @@ per-GPU observability that is consistent with the existing `kubevirt_vmi_*` metr
 - Expose per-VM, per-GPU utilization metrics as Prometheus metrics from virt-handler.
 - Support both GPU passthrough and vGPU devices.
 - Support Linux and Windows guests.
-- Use virtio-serial as the transport, avoiding network dependencies inside the guest.
 - Keep the guest agent lightweight, stateless, and easy to install.
 
 ## Non Goals
@@ -74,8 +73,8 @@ hardware failure.
 
 ## Repos
 
-- https://github.com/kubevirt/kubevirt (virtio-serial channel, virt-handler collector)
-- https://github.com/kubevirt/gpu-metrics-agent (guest-side agent, separate repo)
+- https://github.com/kubevirt/kubevirt
+- https://github.com/kubevirt/gpu-metrics-agent
 
 ## Design
 
@@ -84,47 +83,79 @@ The design has four components spanning three processes:
 ```
 Guest VM (QEMU)                     virt-launcher                         virt-handler
 +--------------------------+        +-------------------------------+     +---------------------------+
-|                          |        |                               |     |                           |
-|  gpu-metrics-agent       |        |  QEMU                         |     |  domainstats scraper      |
-|                          |        |    virtio-serial backend      |     |                           |
-|  - collects NVML metrics |        |    gpu-metrics.sock (UNIX)    |     |  - GetDomainStats()       |
-|  - responds with JSON    | <====> |                               |     |  - GetFilesystems()       |
-|                          |        |  DomainManager                |     |  - GetGPUMetrics()        |
-|  /dev/virtio-ports/      |        |    gpuMetricsCache            |     |                           |
-|  org.kubevirt.           |        |      TimeDefinedCache (3.25s) |     |  resourceMetrics:         |
-|  gpu-metrics.0           |        |    scrapeGPUMetrics()         |     |    gpuMetrics.Collect()   |
-|                          |        |      connect → GET\n → JSON   |     |    → kubevirt_vmi_gpu_*   |
-+--------------------------+        |                               |     |                           |
-                                    |  cmd-server (gRPC)            |     |  cmd-client (gRPC)        |
-                                    |    GetGPUMetrics() RPC        | <-- |    GetGPUMetrics()        |
-                                    +-------------------------------+     +---------------------------+
+|                          |        |  DomainManager                |     |                           |
+|                          |        |    gpuMetricsCache            |     |                           |
+|  gpu-metrics-agent       |        |      TimeDefinedCache (3.25s) |     |                           |
+|  - collects NVML metrics | <====> |    scrapeGPUMetrics()         |     |  domainstats scraper      |
+|                          |        |                               |     |  - GetDomainStats()       |
++--------------------------+        |  cmd-server (gRPC)            |     |  - GetFilesystems()       |
+                                    |    GetGPUMetrics() RPC        | <-- |  - GetGPUMetrics()        |
+                                    +-------------------------------+     |                           |
+                                                                          |  resourceMetrics:         |
+                                                                          |    gpuMetrics.Collect()   |
+                                                                          |    → kubevirt_vmi_gpu_*   |
+                                                                          +---------------------------+
 ```
 
-### 1. Virtio-Serial Channel (virt-launcher)
+### 1. Guest-Host Communication
 
-When a VMI has GPU devices configured (`spec.domain.devices.gpus`), the domain converter adds a virtio-serial channel to the libvirt domain
-XML. The virt-launcher process creates the socket directory (`/var/run/kubevirt-private/gpu-metrics-channel/`) during initialization, before
-the domain is started. libvirt/QEMU then binds the UNIX socket at that path.
+#### Virtio-Serial
 
-This produces:
-- **Host side (virt-launcher pod)**: UNIX socket at `/var/run/kubevirt-private/gpu-metrics-channel/gpu-metrics.sock`
-- **Guest side**: character device at `/dev/virtio-ports/org.kubevirt.gpu-metrics.0` (Linux) or named pipe
-`\\.\Global\org.kubevirt.gpu-metrics.0` (Windows)
+Virtio-serial provides bidirectional character-device-based channels between the guest and host. The host side exposes a UNIX socket, and
+the guest side exposes a character device (`/dev/virtio-ports/<name>` on Linux) or named pipe (`\\.\Global\<name>` on Windows).
+KubeVirt already uses virtio-serial for qemu-guest-agent and downward metrics.
+
+Linux has native support and Windows is supported through the virtio-win driver package.
+
+**Downsides:**
+- Known issues with large data transfers: Windows drivers fail WriteFile calls >2MB.
+- No flow control. The guest can't detect whether the host has connected or disconnected from the socket.
+
+#### VSOCK
+
+VSOCK (`AF_VSOCK`) is a socket address family for guest-host communication using the virtio-vsock transport. KubeVirt already has VSOCK
+support with per-VMI CID assignment by virt-controller.
+
+**Downsides:**
+- Requires Linux kernel 4.8+ in the guest; older kernels have no support.
+- Windows guests require custom virtio-win drivers and a non-standard socket library (`viosocklib`) instead of native Winsock2.
+
+#### QEMU Guest Agent guest-file-read
+
+The guest metrics agent writes GPU metrics to a known file path inside the guest (e.g., `/var/lib/kubevirt/gpu-metrics.json`). The host
+reads that file via the QEMU Guest Agent's `guest-file-open`, `guest-file-read`, and `guest-file-close` commands, which travel over the
+existing qemu-guest-agent virtio-serial channel. No additional virtio-serial channel or transport is needed.
+
+**Downsides:**
+- Each scrape requires three QGA round-trips (open, read, close), adding latency compared to a direct socket connection.
+- Reading while the guest agent is writing can produce partial or corrupt JSON.
+- KubeVirt does not currently expose `guest-file-read`. Enabling would allow reading arbitrary guest files, therefore would need a careful
+security analysis.
+
+#### QEMU Guest Agent guest-exec
+
+The host uses the QGA `guest-exec` command to run a metrics collection binary or script inside the guest on each scrape, and retrieves the
+output via `guest-exec-status`. This avoids the need for a persistent guest agent process or additional virtio-serial channels.
+
+**Downsides:**
+- `guest-exec` is disabled by default in many builds (e.g., RHEL/CentOS) due to security concerns, as it allows arbitrary command execution
+inside the guest.
+- Common issues with SELinux policies blocking executed commands.
+- Output is base64-encoded and must be polled via `guest-exec-status`, adding latency.
+
+#### Embedding Metrics in QEMU Guest Agent
+
+Extend the existing QEMU guest agent to collect GPU metrics.
+
+**Downsides:**
+- Out-of-scope arbitrary NVIDIA-specific monitoring commands to the QEMU guest agent.
+- Push back from QEMU guest agent maintainers team.
 
 ### 2. Guest Agent (gpu-metrics-agent)
 
-A standalone Go binary that runs inside the guest as a systemd service (Linux) or Windows service. On startup it:
-1. Opens the virtio-serial device.
-2. Initializes NVML (gracefully handles failure and remains running with error responses).
-3. Enters a read loop waiting for request lines from the host.
-4. On each request, collects GPU metrics via NVML and writes a JSON response.
-
-The request/response protocol is newline-delimited:
-- **Request**: any text line ending with `\n` (e.g., `GET\n`)
-- **Response**: a single JSON object followed by `\n`
-
-The agent handles host disconnects (EOF on the char device when the host closes the socket) by re-entering the read loop on the same file
-descriptor, matching virtio-serial reconnection semantics.
+A standalone Go binary that runs inside the guest as a systemd service (Linux) or Windows service.
+1. Initializes NVML (gracefully handles failure and remains running with error responses).
+2. On each request, collects GPU metrics via NVML and writes a JSON response.
 
 Response schema:
 ```json
@@ -209,7 +240,7 @@ labels.
 
 ## API Examples
 
-No changes to the KubeVirt API are required. The virtio-serial channel is added automatically when GPUs are present in the VMI spec:
+No changes to the KubeVirt API are required. The setup is enabled when GPUs are present in the VMI spec:
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -224,45 +255,18 @@ spec:
           deviceName: nvidia.com/A100
 ```
 
-The GPU metrics channel appears in the domain XML alongside the existing guest agent channel:
-
-```xml
-<channel type='unix'>
-  <source mode='bind' path='/var/run/kubevirt-private/gpu-metrics-channel/gpu-metrics.sock'/>
-  <target type='virtio' name='org.kubevirt.gpu-metrics.0'/>
-</channel>
-```
-
 ## Alternatives
-
-### VSOCK Instead of Virtio-Serial
-
-VSOCK (`AF_VSOCK`) provides socket-based communication between guest and host without virtio-serial.
-
-**Rejected because:**
-- VSOCK requires kernel support that is not universally available, especially on older guests and Windows.
-- Virtio-serial is already used by KubeVirt for qemu-guest-agent and downward metrics, making it a proven transport.
-- Virtio-serial channels appear as simple character devices in the guest, making the agent trivial to implement on both Linux and Windows.
 
 ### Host-Side GPU Metrics (DCGM / Node Exporter)
 
 Collect GPU metrics from the host using NVIDIA DCGM or the GPU node exporter.
 
-**Rejected as the sole approach because:**
+**Rejected because:**
 - The NVIDIA GPU Operator does not deploy DCGM exporter on nodes where GPUs are configured for passthrough or vGPU, because the host no
 longer has direct access to the device.
 
-### Embedding Metrics in QEMU Guest Agent
-
-Extend the existing QEMU guest agent to collect GPU metrics.
-
-**Rejected because:**
-- Out-of-scope arbitrary NVIDIA-specific monitoring commands to the QEMU guest agent.
-
 ## Scalability
 
-- **Per-scrape overhead**: One UNIX socket connection per VMI with GPUs, per Prometheus scrape. Connection is short-lived (connect, request,
-read, close). A 5-second timeout prevents slow agents from blocking the scrape.
 - **Caching**: GPU metrics are cached in virt-launcher with a 3.25-second TTL, so multiple Prometheus scrapes within that window reuse the
 same data without reconnecting to the guest agent.
 - **Concurrency**: GPU metrics are fetched as part of the existing domainstats scraper, which scrapes all VMIs in parallel using the
