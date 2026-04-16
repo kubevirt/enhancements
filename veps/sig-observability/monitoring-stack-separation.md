@@ -175,7 +175,32 @@ The controller exposes a `/metrics` endpoint scraped by Prometheus.
 
 **Runtime VM/VMI Metrics Generation:**
 
-The controller uses the `GetMonitoringData` RPC to collect the data from the guest agent and libvirt domain.
+The controller collects runtime data (libvirt domain stats, guest agent info)
+by calling the `GetMonitoringData` gRPC directly on each `virt-handler` pod,
+bypassing `virt-api`. This mirrors how Prometheus already reaches
+`virt-handler` today via the headless `kubevirt-prometheus-metrics` Service and
+avoids introducing `virt-api` as a data-forwarding middleman in the
+observability path.
+
+*Discovery:* The controller uses VMI informers to determine which nodes
+currently host VMIs. For each active node it resolves the corresponding
+`virt-handler` pod endpoint through the headless Service and issues a
+`GetMonitoringData` call. Nodes with no running VMIs are skipped entirely.
+
+*Data aggregation:* Each `virt-handler` aggregates the monitoring data from
+its local `virt-launcher` pods over the existing Unix-socket gRPC channel
+before responding, so the controller receives one consolidated response per
+node rather than per-VMI.
+
+*Authentication:* `virt-operator` issues a dedicated client certificate for
+the observability controller, signed by the KubeVirt internal CA. The
+controller presents this certificate when connecting to `virt-handler`,
+which already validates client certificates on its gRPC endpoint. This
+keeps the controller external to the core KubeVirt installation while
+reusing the existing infrastructure. The observability controller requires RBAC
+permissions to read Secrets in the KubeVirt namespace so it can retrieve the
+issued certificate and CA bundle. Downstream vendors may choose whether to grant
+these permissions.
 
 **Recording Rules and Alerts Management:**
 
@@ -347,8 +372,12 @@ install the new controller before upgrading to this release.
    `DomainManager` methods.
 3. **virt-handler caller**: Update the domain stats scraper, downward metrics, and REST
    handlers to use the new RPC with version-negotiation fallback.
-4. **kubevirt-observability-controller scaffold**: Create the external component (new binary,
-   Deployment manifest, RBAC, ServiceAccount, and Service), managed outside of `virt-operator`.
+4. **kubevirt-observability-controller scaffold**: Create the external component
+   (new binary, Deployment manifest, RBAC, ServiceAccount, and Service), managed
+   outside of `virt-operator`. RBAC must include read access to Secrets in the
+   KubeVirt namespace for the client certificate and CA bundle. `virt-operator`
+   is extended to issue a dedicated client certificate for the controller,
+   signed by the KubeVirt internal CA.
 5. **Cluster-state metrics migration**: Move VM/VMI informer-based metrics from
    `virt-controller` to the new controller.
 6. **Recording rules and alerts migration**: Move `PrometheusRule` reconciliation to the new
@@ -406,6 +435,9 @@ compatibility.
 - Install/upgrade `kubevirt-observability-controller` independently (it is not managed by
   `virt-operator`).
 - Requires KubeVirt version with the new `GetMonitoringData` RPC.
+- `virt-operator` must have issued the controller's client certificate.
+- The controller needs RBAC access to read Secrets in the KubeVirt namespace for
+  the client certificate and CA.
 - Can be updated on its own release cadence without updating KubeVirt.
 
 ### Rollback Scenarios
