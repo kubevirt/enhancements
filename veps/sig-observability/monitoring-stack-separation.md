@@ -1,12 +1,30 @@
-# VEP: Monitoring Stack Separation via Hybrid Architecture
+# VEP #81: Monitoring Stack Separation via Hybrid Architecture
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+<!--
+A PR must update this section during the planning phase of a given release in order to track it.
+PRs that will not update the VEP during the planning phase will not be able to graduate the
+VEP by creating a code PR to kubevirt/kubevirt to bump the phase in-code.
+
+Please avoid targeting future releases in this section. Only capture the upcoming release.
+For example, during the planning phase for version v1.123, do **not** target beta for v.124 in advance.
+-->
+
+- This VEP targets alpha for version: v1.9
+- This VEP targets beta for version:
+- This VEP targets GA for version:
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [ ] (R) Beta target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
@@ -111,6 +129,7 @@ consolidating the gRPC data collection interface.
 ## Repos
 
 - kubevirt/kubevirt
+- kubevirt/kubevirt-observability-controller
 
 ## Design
 
@@ -255,60 +274,6 @@ Recording rules and alert definitions are currently managed by `virt-operator` a
 2. **Reconcile**: The new controller reconciles the `PrometheusRule` CRs, ensuring they match
    the desired state on every sync loop.
 
-## Scalability
-
-### kubevirt-observability-controller
-
-- Uses shared informers (list+watch) against the Kubernetes API server, the same pattern
-  used by `kube-state-metrics`. Memory footprint scales linearly with the number of VM/VMI
-  objects.
-- HA with leader election. Horizontal scaling is not required because metric
-  generation is CPU-light (serializing cached object state).
-- `/metrics` endpoint is scraped by Prometheus at the configured interval (typically 30s).
-  No additional load on the API server beyond the informer watches.
-
-### Unified gRPC
-
-- Significantly reduces per-VMI gRPC calls per scrape cycle regardless of how many data types
-  are requested.
-- Response size may increase per call since multiple data types are returned, but total bytes
-  transferred remains the same (or decreases slightly due to reduced framing overhead).
-- Selective serialization ensures the server only marshals requested fields.
-
-## Update/Rollback Compatibility
-
-The `kubevirt-observability-controller` is an **external** component, deployed and managed
-independently from `virt-operator`. It is not part of the core KubeVirt installation, has
-its own release lifecycle, and is installed/upgraded separately by the cluster administrator.
-This architectural decision provides clear separation of concerns and simplifies
-compatibility.
-
-### Upgrade Scenarios
-
-**Upgrading KubeVirt without monitoring:**
-
-- Core KubeVirt upgrade proceeds normally.
-- No metrics available (expected behavior).
-- No action required.
-
-**Upgrading KubeVirt with monitoring desired:**
-
-- Install/upgrade `kubevirt-observability-controller` independently (it is not managed by
-  `virt-operator`).
-- Requires KubeVirt version with the new `GetMonitoringData` RPC.
-- Can be updated on its own release cadence without updating KubeVirt.
-
-### Rollback Scenarios
-
-**Rolling back core KubeVirt:**
-
-- `kubevirt-observability-controller` is external and independently managed, so no action
-    required.
-- If rolling back to a version without the new `GetMonitoringData` RPC:
-  - `virt-controller`/`virt-handler` metrics endpoints will have VM/VMI metrics again.
-  - `kubevirt-observability-controller` can remain installed (but no metrics will be
-    collected), or be uninstalled.
-
 ## Migration Strategy
 
 Cluster-state metrics, recording rules, and alert definitions currently owned
@@ -396,11 +361,95 @@ install the new controller before upgrading to this release.
    `virt-operator` stops reconciling `PrometheusRule` CRs. Users must install
    `kubevirt-observability-controller` to retain metrics, recording rules, and alerts.
 
+## Scalability
+
+### kubevirt-observability-controller
+
+- Uses shared informers (list+watch) against the Kubernetes API server, the same pattern
+  used by `kube-state-metrics`. Memory footprint scales linearly with the number of VM/VMI
+  objects.
+- HA with leader election. Horizontal scaling is not required because metric
+  generation is CPU-light (serializing cached object state).
+- `/metrics` endpoint is scraped by Prometheus at the configured interval (typically 30s).
+  No additional load on the API server beyond the informer watches.
+
+### Unified gRPC
+
+- Significantly reduces per-VMI gRPC calls per scrape cycle regardless of how many data types
+  are requested.
+- Response size may increase per call since multiple data types are returned, but total bytes
+  transferred remains the same (or decreases slightly due to reduced framing overhead).
+- Selective serialization ensures the server only marshals requested fields.
+
+## Update/Rollback Compatibility
+
+<!--
+Does this impact update compatibility and how?)
+-->
+
+The `kubevirt-observability-controller` is an **external** component, deployed and managed
+independently from `virt-operator`. It is not part of the core KubeVirt installation, has
+its own release lifecycle, and is installed/upgraded separately by the cluster administrator.
+This architectural decision provides clear separation of concerns and simplifies
+compatibility.
+
+### Upgrade Scenarios
+
+**Upgrading KubeVirt without monitoring:**
+
+- Core KubeVirt upgrade proceeds normally.
+- No metrics available (expected behavior).
+- No action required.
+
+**Upgrading KubeVirt with monitoring desired:**
+
+- Install/upgrade `kubevirt-observability-controller` independently (it is not managed by
+  `virt-operator`).
+- Requires KubeVirt version with the new `GetMonitoringData` RPC.
+- Can be updated on its own release cadence without updating KubeVirt.
+
+### Rollback Scenarios
+
+**Rolling back core KubeVirt:**
+
+- `kubevirt-observability-controller` is external and independently managed, so no action
+    required.
+- If rolling back to a version without the new `GetMonitoringData` RPC:
+  - `virt-controller`/`virt-handler` metrics endpoints will have VM/VMI metrics again.
+  - `kubevirt-observability-controller` can remain installed (but no metrics will be
+    collected), or be uninstalled.
+
+## Functional Testing Approach
+
+<!--
+An overview on the approaches used to functional test this design)
+-->
+
 ## Implementation History
 
-<!-- Filled in as implementation progresses -->
+<!--
+For example:
+01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
+03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
+-->
 
 ## Graduation Requirements
+
+<!--
+The requirements for graduating to each stage.
+Example:
+### Alpha
+- [ ] Feature gate guards all code changes
+- [ ] Initial implementation supporting only X and Y use-cases
+
+### Beta
+- [ ] Implementation supports all X use-cases
+
+It is not necessary to have all the requirements for all stages in the initial VEP.
+They can be added later as the feature progresses, and there is more clarity towards its future.
+
+Refer to https://github.com/kubevirt/community/blob/main/design-proposals/feature-lifecycle.md#releases for more details
+-->
 
 ### Alpha
 
