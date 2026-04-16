@@ -107,14 +107,14 @@ A `push` mode (where the hypervisor writes out the data to the destination file,
 We will be implementing both modes in the following manner:
 * **Push mode**: In this mode, the user provides a filesystem-based PersistentVolumeClaim (PVC) to store the backup data for all relevant VM disks. Before the process begins, an estimation of the required backup size will be performed. If the provided PVC size is insufficient, an error will be returned.
 The PVC will be hot-plugged into the virt-launcher pod as a directory (rather than as a disk attached to the VM, as is typical for hot-plugged volumes). The backup process will then proceed, writing data directly to the mounted PVC. Once the backup is complete, the PVC will be detached. It is then the user’s responsibility to manage the backup data—for example, by transferring it to a remote storage location, if needed.
-* **Pull mode**: In this mode, the user also provides a filesystem-based PersistentVolumeClaim (PVC) to serve as temporary storage for scratch files that will be used to facilitate the backup process by storing writes during it for every disk that's included in the backup. Once the backup is initialized, libvirt creates a Unix domain socket that exposes the NBD export internally. A user-facing endpoint is then exposed to allow external components to interact with the backup, e.g., to retrieve the backup data or query the dirty bitmap of an export.
+* **Pull mode**: In this mode, the user also provides a filesystem-based PersistentVolumeClaim (PVC) to serve as temporary storage for scratch files that will be used to facilitate the backup process by storing writes during it for every disk that's included in the backup. Once the backup is initialized, libvirt creates a Unix domain socket that exposes the NBD export internally. A user-facing endpoint is then exposed to allow external components to interact with the backup over HTTP, e.g., to read the disk or query the associated bitmap.
 
 Once the backup is initialized, the controller will pass a backup command to the virt-launcher via the virt-handler using a subresource, containing all the relevant information. Before the backup begins, an FSFreeze command will be issued to ensure file system consistency during the backup. This will be the default behavior, with an option to skip filesystem quiescing if desired.
 Then, [`virDomainBackupBegin`](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainBackupBegin) will be invoked, which, as documented in libvirt, starts a point-in-time backup job for the desired disks of the running domain. This job captures the domain's disks state at the time of initiation, allowing to then call FSThaw (if needed). This minimizes guest downtime and enables the backup to be fetched while the guest continues its workload.
 
 In `push` mode, the backup job in libvirt automatically terminates once all data has been successfully backed up. The controller will be notified when the job completes and will update the `VirtualMachineBackup` phase to `Done`. At this stage, the PVC will be detached from the VM and made available for user operations. Since the `VirtualMachineBackup` resource is no longer needed, it can be safely deleted
 
-In `pull` mode, the backup job does not terminate on its own, because there is no inherent signal that the transfer has completed. Instead, the `VirtualMachineBackupStatus` gains a `Ready` condition to indicate that the backup data is prepared and available for retrieval. At that point, the client should begin interacting with the exposed endpoints to pull the backup. When the client has finished, it must explicitly delete the corresponding `VirtualMachineBackup` resource to signal that the process is complete. This deletion initiates the cleanup of all associated artifacts, including aborting the active libvirt backup job and deleting the Unix socket inside the virt-launcher.
+In `pull` mode, the backup job does not terminate on its own, because there is no inherent signal that the transfer has completed. Instead, the `VirtualMachineBackupStatus` gains a `ExportReady` condition to indicate that the backup data is available for retrieval and consequently, all of the volumes in `includedVolumes` list will gain the new `dataEndpoint` and `mapEndpoint` fields which will be populated with the links for disk read and bitmap query respectively. At that point, the client should begin interacting with the exposed endpoints to pull the backup. When the client has finished, it must explicitly delete the corresponding `VirtualMachineBackup` resource to signal that the process is complete. This deletion initiates the cleanup of all associated artifacts, including aborting the active libvirt backup job and deleting the Unix socket inside the virt-launcher.
 
 **Backup-PVC hotplugging**
 As mentioned, the PVC that will store the backup output in the case of `push` mode and scratch space file in the case of `pull` mode must be hot-plugged into the virt-launcher pod but without being attached to the guest. To achieve this, we will leverage [Utility Volumes](https://github.com/kubevirt/enhancements/pull/91).
@@ -306,7 +306,7 @@ Optional. If set to true, the VM's filesystem will not be quiesced before the ba
 Optional. If a backupTracker is provided and this field is set to true, force a full backup (instead of incremental using `latestCheckpoint`). The `latestCheckpoint` will be updated with the new full backup checkpoint.
 - `tokenSecretRef`<br>
 Optional. Required in `pull` mode. Specifies the name of the Secret containing the authentication token for the backup export. 
-- `ttl`<br>
+- `ttlDuration`<br>
 Optional. Only relevant for `pull` mode. Specifies the time to live for the backup, defaults to 2 hours if not specified.
 
 **Status:**
@@ -316,7 +316,7 @@ The name of the checkpoint created for the current backup. This field is updated
 Represents the current state of the backup process, such as `Initializing`, `Progressing`, `Ready`, `Done`, `Failed`, or `Deleting`.
 - `backupType` <br>
 Either `Full` or `Incremental`. Indicates the backup's scope, allowing users to confirm it aligns with their expectations or understand any deviation.
-- `cert`<br>
+- `endpointCert`<br>
 CA certificate used for connecting to the backup endpoints in pull mode.
 - `includedVolumes` <br>
 A list of the names of the volumes that were included for the backup, each entry containing:
@@ -326,9 +326,6 @@ A list of the names of the volumes that were included for the backup, each entry
     The URL for querying the bitmap of the volume.
   - `dataEndpoint` <br>
     The URL for querying and pulling the data of the volume.
-- `pullTunnelSecret` <br>
-The name of the secret that contains the token created by the backup controller that is used for authenticating the internal tunnel connection between the virt-launcher and the virt-exportserver.
-
 
 Examples:
 ```yaml
@@ -381,7 +378,7 @@ The follow diagrams depict the interaction flow with each of the endpoints:
 
 Method | Endpoint | Description
 -- | -- | --
-GET | /exports/{disk}/data | Streams raw disk data. Supports single Range: bytes=x-y header.
+GET | /exports/{disk}/data | Streams raw disk data. Supports `offset` and `length` to control read range.
 ```mermaid
 sequenceDiagram
     participant User
@@ -390,13 +387,13 @@ sequenceDiagram
     participant Launcher as virt-launcher
 
     Note over User, Server: HTTP/1.1 HTTPS
-    User->>Server: GET /exports/vda/data (Range: 0-512)
+    User->>Server: GET /exports/datavolumedisk1/data?offset=0&length=65536
     
     Note over Server, Launcher: gRPC over TLS
-    Server->>Tunnel: { "op": "read", "offset": 0, "len": 512 }
+    Server->>Tunnel: { "op": "read", "offset": 0, "len": 65536 }
     Tunnel->>Launcher: Forward Command
     
-    Launcher->>Launcher: exec(read ...)
+    Launcher->>Launcher: nbdClient Read
     Launcher-->>Tunnel: Binary Payload
     Tunnel-->>Server: [Payload]
     
@@ -405,7 +402,7 @@ sequenceDiagram
 
 Method | Endpoint | Description
 -- | -- | --
-GET | /exports/{disk}/map | Returns JSON bitmap of allocated regions. Params: `start` (Byte offset), `limit` (Max Bytes to scan).
+GET | /exports/{disk}/map | Returns JSON of extents (clean or dirty). Params: `offset` (byte offset), `length` (read all extents in the range of `offset`+`length`), `page_size` (max amount of extents to retrieve per query, defaults to 512).
 ```mermaid
 sequenceDiagram
     participant User
@@ -414,30 +411,29 @@ sequenceDiagram
     participant Launcher as virt-launcher
 
     Note over User, Server: HTTP/1.1 HTTPS (Page 1)
-    User->>Server: GET /exports/vda/map?start=0&limit=1073741824
+    User->>Server: GET /exports/datavolumedisk1/map?offset=0&length=1073741824&page_size=1
     
-    Note over Server, Launcher: gRPC over TLS
-    Server->>Tunnel: { "op": "map", "disk": "vda", "offset": 0, "length": 1073741824}
+    Note over Server, Launcher: gRPC over TLS tunnel
+    Server->>Tunnel: { "op": "map", "offset": 0, "length": 1073741824}
     Tunnel->>Launcher: Forward Command
     
-    Launcher->>Launcher: exec(qemu-img map --start-offset 0 --max-length 1G ...)
+    Launcher->>Launcher: nbdClient Map
     Launcher-->>Tunnel: JSON Payload (Chunk 1)
     Tunnel-->>Server: [Payload]
     
-    Server-->>User: {"regions": [...], "next_offset": 1073741824}
+    Server-->>User: {"extents": [...], "next_offset": 1073741824}
 
     Note over User, Server: HTTP/1.1 HTTPS (Page 2 - Follow Pointer)
+    User->>Server: GET /exports/datavolumedisk1/map?offset=1073741824&length=1073741824&page_size=1
     
-    User->>Server: GET /exports/vda/map?start=1073741824&limit=1073741824
-    
-    Server->>Tunnel: { "op": "map", "disk": "vda", "offset": 1073741824, "length": 1073741824 }
+    Server->>Tunnel: { "op": "map", "offset": 1073741824, "length": 1073741824 }
     Tunnel->>Launcher: Forward Command
     
-    Launcher->>Launcher: exec(qemu-img map --start-offset 1G ...)
+    Launcher->>Launcher: nbdClient Map
     Launcher-->>Tunnel: JSON Payload (Chunk 2 / EOF)
     Tunnel-->>Server: [Payload]
     
-    Server-->>User: { "regions": [...], "next_offset": null }
+    Server-->>User: { "extents": [...], "next_offset": null }
  ```
 
 ### Restore
@@ -499,19 +495,17 @@ The flow is as follows:
 2. The backup controller invokes the `Backup` RPC with `Start` cmd on the target virt-launcher. This triggers the creation of the associated libvirt backup job and spins up the NBD server inside the virt-launcher pod, listening on a Unix domain socket (e.g., `/run/kubevirt/sockets/backup-nbd.sock`).
 3. Once the backup job is progressing, the backup controller automatically creates an owned `VirtualMachineExport` CR, setting its source to the `VirtualMachineBackup`.
 4. The export-controller reconciles the new `VirtualMachineExport`. It identifies the source type and launches the virt-exportserver pod.
-  - Internal Listener: The server is configured to listen on a protected internal port (9090) for the backup tunnel.
-  - External Listener: The server listens on the standard external port (8443) for user HTTP traffic.
   - Configuration: The controller injects the included volume list (from the `VirtualMachineBackupStatus`) into the pod's environment variables.
-5. Once the export service is ready, the backup controller retrieves the service's name and the internal CA certificate. It then issues yet another `Backup` RPC, this time with the `Connect` cmd to the virt-launcher.
-6. The virt-launcher acts as the TLS client. It establishes a persistent, self-healing TLS tunnel to the virt-exportserver's internal port. This reverse-tunnel architecture ensures no network changes are required for the virt-launcher pod.
+5. Once the export service is ready, the backup controller retrieves the service's name and the internal CA certificate. It then issues yet another `Backup` RPC, this time with the `Export` cmd to the virt-launcher.
+6. The virt-launcher acts as the TLS client. It establishes a persistent, self-healing TLS tunnel to the virt-exportserver via HTTP CONNECT. This reverse-tunnel architecture ensures no network changes are required for either pod.
 7. Data Serving:
   - The virt-exportserver registers dynamic HTTP handlers for every volume included in the backup under the new `Backups` status field.
-  - The backup controller recognizes that the `VirtualMachineExport` is serving and updates the `Ready` condition of the `VirtualMachineBackupStatus` to true.
+  - The backup controller recognizes that the `VirtualMachineExport` is serving and updates the `ExportReady` condition of the `VirtualMachineBackupStatus` to true.
   - The `VirtualMachineBackupStatus` includes the created URLs for every volume in its `includedVolumes`'s list by populating the `mapEndpoint` and `dataEndpoint` fields respectively.
-  - When a client requests a specific endpoint, the server translates this into a JSON-RPC command (`read`, `map`, or `info`) and sends it over the TLS tunnel. 
-  - The virt-launcher receives the command, uses a native NBD client to query the local Unix socket, it then either:
-    1. Streams the raw binary data back in the case of a `read` command or;
-    2. Streams back the dirty bitmap in JSON format.
+  - When a client requests a specific endpoint, it invokes the relevant RPC over the tunnel. 
+  - The virt-launcher receives the command and uses an NBD client to query the local Unix socket, it then either:
+    1. Streams the raw binary data back in the case of a `ReadRequest` or;
+    2. Streams back the bitmap in JSON format.
 
 This architecture was chosen because:
 - It preserves pull mode semantics as the data flow remains consumer-driven.
@@ -573,9 +567,9 @@ sequenceDiagram
 ```
 
 **Security considerations and approaches**
-- Both internal traffic and external traffic are both secured using the existing export certificate API.
+- Both internal traffic and external traffic are secured using the existing export certificate API.
 - Authorization for external traffic is done via a user-provided token.
-- Authorization for the internal tunnel is established using a deterministic, runtime-generated token. This token is derived via HMAC using the Backup UID as the message and a lifecycle-managed key within the kubevirt namespace (whose lifecycle is bound to the `IncrementalBackup` feature gate status). To facilitate verification, the token is projected into a secret within the target backup namespace, allowing the virt-exportserver mount it and validate the incoming connection request. The backup controller updates the status of the backup with the name of the created secret.
+- Authentication for the tunnel is established using mTLS.
 
 **Q&A**
 
@@ -586,44 +580,32 @@ A: The changes are split to changes done to the export controller and changes do
 For the export controller:
 A new `sourceHandler` interface will be introduced to allow preparing an export that doesn't use PVCs:
 ```go
-type sourceHandler interface {
+type exportSource interface {
 	IsSourceAvailable() bool
 	HasContent() bool
-	Ports() []corev1.ServicePort
-	ConfigurePodManifest(pod *corev1.Pod)
-	AvailableMessage() string
-	UpdateStatus(vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, svc *corev1.Service, internalCert, externalCert, externalLinkHost string) (time.Duration, error)
-	GetLinks(vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, hostAndBase, linkType, cert string) (*exportv1.VirtualMachineExportLink, error)
-	GetExternalLinks(vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, externalLinkHost, cert string) (*exportv1.VirtualMachineExportLink, error)
-	GetInternalLinks(vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, svc *corev1.Service, internalCert string) (*exportv1.VirtualMachineExportLink, error)
+	SourceCondition() exportv1.Condition
+	ReadyCondition() exportv1.Condition
+	ServicePorts() []corev1.ServicePort
+	ConfigurePod(pod *corev1.Pod)
+	ConfigureExportLink(exportLink *exportv1.VirtualMachineExportLink, paths *ServerPaths, vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, hostAndBase, scheme string)
+	UpdateStatus(vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, svc *corev1.Service) (time.Duration, error)
 }
 ```
 
-Two concrete implementations that will fulfill this interface are:
-```go
-
-type volumeSourceHandler struct {
-	*sourceVolumes
-	isKubevirtContentType contentTypeChecker
-	updateStatus          updateVMExportStatusVolumeFunc
-}
-```
-
-And 
+Each source will have a concrete implementation, in the case of `VirtualMachineBackup`:
 
 ```go
-type backupSourceHandler struct {
-	vmBackup              *backupv1.VirtualMachineBackup
-	isKubevirtContentType contentTypeChecker
-	updateStatus          updateVMExportStatusBackupFunc
+type VMBackupSource struct {
+	vmBackup *backupv1.VirtualMachineBackup
+	caCert   string
 }
 ```
 
 For the virt-exportserver:
 Two new handlers will be added to the `ExportServerConfig`:
 ```go
-	BackupDataHandler  func(exportName string) http.Handler
-	BackupMapHandler   func(exportName string) http.Handler
+	backupDataHandler  func(exportName string) http.Handler
+	backupMapHandler   func(exportName string) http.Handler
 ```
 
 ```go
@@ -653,9 +635,7 @@ func (s *exportServer) getBackupHandlerMap(bi export.BackupInfo) map[string]http
 
 Q: How does the virt-launcher interact with the exposed NBD socket?
 
-A: 
-- Map: The launcher leverages the existing `qemu-img map` subcommand with JSON output to retrieve the dirty bitmap or allocation map.
-- Data: Since `qemu-img` does not support streaming raw binary data to stdout (it requires a seekable output file), the launcher will utilize a minimal, native NBD client implementation. This client connects directly to the Unix socket to perform read operations, copying the raw byte stream directly to the TLS tunnel buffer. This avoids the I/O overhead of temporary files and the complexity of CGO-based bindings (like libnbd).
+A: For both `Map` and `Read` requests, the virt-launcher leverages an internal nbd client implementation that relies on libnbd.
 
 Q: How are failures handled?
 
@@ -715,9 +695,6 @@ Same as the chosen method of operation.
 With certain storage providers, even when a small PVC size is requested, a larger volume may be provisioned based on the provider’s minimum volume size. When managing a large number of VMs, this behavior can lead to inefficient storage.
 **This is a general limitation that also affects VM state PVCs.**
 
-- Managing a large number of checkpoints.
-If too many checkpoints accumulate, the `CheckpointsList` CR can become large and difficult to manage. To keep it maintainable, it is recommended that users periodically delete old checkpoints. Realistically, once a checkpoint has been successfully backed up from, it is no longer needed and can be deleted.
-
 ## Update/Rollback Compatibility
 
 Since the new feature allows users to enable or disable it, upgrades will not pose any issues. Users must opt in by setting the changedBlockTracking to true. The rollback will not be a problem either, as it is essentially the same as setting the changedBlockTracking to false, which will be the default value.
@@ -734,7 +711,7 @@ Check failure scenario where incremental backup cannot be done and in such case 
 - Add/remove the qcow2 overlay
 - Subresource to initiate backup (full and incremental) including Libvirt wrapper backup functions.
 - New VirtualMachineBackup CR + controller for backups - online backup only
-- New VirtualMachineCheckpointsList CR, Handling restart of VM and redefinition of checkpoints.
+- New VirtualMachineBackupTracker CR, Handling restart of VM and redefinition of checkpoints.
 - Handle VM failure where bitmap is corrupted - next backup needs to be full.
 - Offline backup
 - API to allow to pull the backup over network.
