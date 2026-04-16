@@ -37,7 +37,7 @@ plane and its monitoring stack.
 
 To achieve this goal, this proposal refactors the gRPC interface between
 `virt-handler` and `virt-launcher` to consolidate the many separate monitoring
-RPCs into a unified, more flexible `GetMonitoringData` call, significantly
+RPCs into a unified, more flexible `GetVMStats` call, significantly
 reducing per-scrape round-trips and allowing more flexibility in what data is
 collected.
 
@@ -92,7 +92,7 @@ consolidating the gRPC data collection interface.
 - Introduce a `kubevirt-observability-controller` that generates cluster-state metrics from
   VM/VMI resource specs and status using Kubernetes informers.
 - Move recording rules and alert management out of `virt-controller` into the new component.
-- Consolidate the many existing monitoring gRPC RPCs into a unified `GetMonitoringData` RPC
+- Consolidate the many existing monitoring gRPC RPCs into a unified `GetVMStats` RPC
   between `virt-handler` and `virt-launcher`, significantly reducing per-VMI round-trips.
 - Simplify the approach for collecting and parsing monitoring data so that adding new libvirt
   domain fields or guest agent data does not require new RPCs or dedicated scrapers.
@@ -176,7 +176,7 @@ The controller exposes a `/metrics` endpoint scraped by Prometheus.
 **Runtime VM/VMI Metrics Generation:**
 
 The controller collects runtime data (libvirt domain stats, guest agent info)
-by calling the `GetMonitoringData` gRPC directly on each `virt-handler` pod,
+by calling the `GetVMStats` gRPC directly on each `virt-handler` pod,
 bypassing `virt-api`. This mirrors how Prometheus already reaches
 `virt-handler` today via the headless `kubevirt-prometheus-metrics` Service and
 avoids introducing `virt-api` as a data-forwarding middleman in the
@@ -185,7 +185,7 @@ observability path.
 *Discovery:* The controller uses VMI informers to determine which nodes
 currently host VMIs. For each active node it resolves the corresponding
 `virt-handler` pod endpoint through the headless Service and issues a
-`GetMonitoringData` call. Nodes with no running VMIs are skipped entirely.
+`GetVMStats` call. Nodes with no running VMIs are skipped entirely.
 
 *Data aggregation:* Each `virt-handler` aggregates the monitoring data from
 its local `virt-launcher` pods over the existing Unix-socket gRPC channel
@@ -235,7 +235,7 @@ This architecture has two compounding problems:
 
 #### Proposed Architecture
 
-A new `GetMonitoringData` RPC consolidates monitoring queries into fewer, more flexible calls.
+A new `GetVMStats` RPC consolidates monitoring queries into fewer, more flexible calls.
 The caller specifies which data categories it needs via boolean flags; the server only
 serializes and returns the requested fields from the existing caches. This drastically
 simplifies the approach, as new libvirt or guest agent fields can be appended to the existing
@@ -251,7 +251,7 @@ messages without introducing new RPCs, scrapers, or parsing pipelines.
 - **Backward compatible**: Existing RPCs remain in the proto definition and continue to work.
   Callers can be migrated incrementally.
 - **Extensible**: New libvirt domain fields and guest agent data can be appended to both
-  `MonitoringRequest` and `MonitoringResponse` without breaking the wire format or existing
+  `VMStatsRequest` and `VMStatsResponse` without breaking the wire format or existing
   callers.
 
 #### Proto Changes
@@ -261,19 +261,19 @@ In `pkg/handler-launcher-com/cmd/v1/cmd.proto`:
 ```protobuf
 service Cmd {
   // ... existing RPCs stay for backward compat ...
-  rpc GetMonitoringData(MonitoringRequest) returns (MonitoringResponse) {}
+  rpc GetVMStats(VMStatsRequest) returns (VMStatsResponse) {}
 }
 
 // Per-category request messages. Initially empty but can be extended later
 // to carry filters, pagination, or specific options without changing the
-// MonitoringRequest format.
+// VMStatsRequest format.
 message DomainStatsRequest      {}
 message GuestInfoRequest        {}
 message GuestFilesystemsRequest {}
 message GuestAgentRequest       {}
 message GuestUsersRequest       {}
 
-message MonitoringRequest {
+message VMStatsRequest {
   DomainStatsRequest      domainStats      = 1;
   GuestInfoRequest        guestInfo        = 2;
   GuestFilesystemsRequest guestFilesystems = 3;
@@ -282,7 +282,7 @@ message MonitoringRequest {
   ...
 }
 
-message MonitoringResponse {
+message VMStatsResponse {
   Response response         = 1;
   string   domainStats      = 2;
   string   guestInfo        = 3;
@@ -364,7 +364,7 @@ install the new controller before upgrading to this release.
   a fake Kubernetes API server, creates VM/VMI objects, and asserts the expected metrics are
   exposed on the `/metrics` endpoint.
 - **gRPC integration tests**: A test `virt-launcher` gRPC server verifies that
-  `GetMonitoringData` returns correct data for various flag combinations, and that the
+  `GetVMStats` returns correct data for various flag combinations, and that the
   fallback to legacy RPCs works when the new RPC is unimplemented.
 - **E2E tests**:
   - Deploy a cluster with the new controller and verify metrics appear in Prometheus.
@@ -375,9 +375,9 @@ install the new controller before upgrading to this release.
 
 ## Implementation Phases
 
-1. **Proto changes**: Add `GetMonitoringData` RPC, `MonitoringRequest`, and
-   `MonitoringResponse` messages. Regenerate Go code.
-2. **virt-launcher server**: Implement the `GetMonitoringData` handler, delegating to existing
+1. **Proto changes**: Add `GetVMStats` RPC, `VMStatsRequest`, and
+   `VMStatsResponse` messages. Regenerate Go code.
+2. **virt-launcher server**: Implement the `GetVMStats` handler, delegating to existing
    `DomainManager` methods.
 3. **virt-handler caller**: Update the domain stats scraper, downward metrics, and REST
    handlers to use the new RPC with version-negotiation fallback.
@@ -443,7 +443,7 @@ compatibility.
 
 - Install/upgrade `kubevirt-observability-controller` independently (it is not managed by
   `virt-operator`).
-- Requires KubeVirt version with the new `GetMonitoringData` RPC.
+- Requires KubeVirt version with the new `GetVMStats` RPC.
 - `virt-operator` must have issued the controller's client certificate.
 - The controller needs RBAC access to read Secrets in the KubeVirt namespace for
   the client certificate and CA.
@@ -455,7 +455,7 @@ compatibility.
 
 - `kubevirt-observability-controller` is external and independently managed, so no action
     required.
-- If rolling back to a version without the new `GetMonitoringData` RPC:
+- If rolling back to a version without the new `GetVMStats` RPC:
   - `virt-controller`/`virt-handler` metrics endpoints will have VM/VMI metrics again.
   - `kubevirt-observability-controller` can remain installed (but no metrics will be
     collected), or be uninstalled.
@@ -496,7 +496,7 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 - [ ] Feature gate `MonitoringStackSeparation` guards KubeVirt-side code changes
   (gRPC refactor in `virt-handler`/`virt-launcher`)
-- [ ] `GetMonitoringData` RPC implemented in `virt-launcher` and called by `virt-handler`
+- [ ] `GetVMStats` RPC implemented in `virt-launcher` and called by `virt-handler`
   with fallback to legacy RPCs
 - [ ] Cluster-state metrics emitted by the new controller (subset of metrics migrated)
 - [ ] Unit and integration test coverage for the new RPC and controller
