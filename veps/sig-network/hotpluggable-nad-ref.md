@@ -6,7 +6,7 @@
 
 - ~This VEP targets alpha for version:~
 - This VEP targets beta for version: v1.8
-- This VEP targets GA for version:
+- This VEP targets GA for version: v1.9
 
 ### Release Signoff Checklist
 
@@ -199,5 +199,5 @@ The following scenarios are to be added to the e2e tests:
 - [X]  Upstream documentation
 
 ### GA v1.9
-- [X] Positive feedback from the community
-- [X] Support for additional bindings are considered
+- [] Positive feedback from the community
+- [] Support for additional bindings are considered
