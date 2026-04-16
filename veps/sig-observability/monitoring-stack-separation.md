@@ -264,12 +264,21 @@ service Cmd {
   rpc GetMonitoringData(MonitoringRequest) returns (MonitoringResponse) {}
 }
 
+// Per-category request messages. Initially empty but can be extended later
+// to carry filters, pagination, or specific options without changing the
+// MonitoringRequest format.
+message DomainStatsRequest      {}
+message GuestInfoRequest        {}
+message GuestFilesystemsRequest {}
+message GuestAgentRequest       {}
+message GuestUsersRequest       {}
+
 message MonitoringRequest {
-  bool domainStats      = 1;
-  bool guestInfo        = 2;
-  bool guestFilesystems = 3;
-  bool guestAgent       = 4;
-  bool guestUsers       = 5;
+  DomainStatsRequest      domainStats      = 1;
+  GuestInfoRequest        guestInfo        = 2;
+  GuestFilesystemsRequest guestFilesystems = 3;
+  GuestAgentRequest       guestAgent       = 4;
+  GuestUsersRequest       guestUsers       = 5;
   ...
 }
 
