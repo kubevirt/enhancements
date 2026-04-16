@@ -22,7 +22,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [x] (R) Alpha target version is explicitly mentioned and approved
 - [ ] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
@@ -60,10 +60,10 @@ This creates several problems:
 - **Unclear ownership**: Recording rules and alert definitions live alongside operational
   controller logic, complicating code review, testing, and on-call responsibility boundaries.
 
-Separating monitoring into a dedicated component with a unified gRPC interface addresses
-all of these concerns, simplifying the overall approach, giving more flexibility to evolve
-what data is collected and how it is parsed, and preserving backward compatibility with
-existing deployments.
+Separating monitoring into a dedicated component in a separete repository with a
+unified gRPC interface addresses all of these concerns, simplifying the overall
+approach, giving more flexibility to evolve what data is collected and how it is
+parsed, and preserving backward compatibility with existing deployments.
 
 ### Background
 
@@ -235,11 +235,12 @@ This architecture has two compounding problems:
 
 #### Proposed Architecture
 
-A new `GetVMStats` RPC consolidates monitoring queries into fewer, more flexible calls.
-The caller specifies which data categories it needs via boolean flags; the server only
-serializes and returns the requested fields from the existing caches. This drastically
-simplifies the approach, as new libvirt or guest agent fields can be appended to the existing
-messages without introducing new RPCs, scrapers, or parsing pipelines.
+A new `GetVMStats` RPC consolidates monitoring queries into fewer, more flexible
+calls. The caller specifies which data categories it needs via per-category
+request messages. The server only serializes and returns the requested fields
+from the existing caches. This drastically simplifies the approach, as new
+libvirt or guest agent fields can be appended to the existing messages without
+introducing new RPCs, scrapers, or parsing pipelines.
 
 **Key properties:**
 
@@ -293,10 +294,8 @@ message VMStatsResponse {
 }
 ```
 
-All response fields are JSON-encoded strings (consistent with the current approach). The
-messages are designed to be extended over time, as additional libvirt domain data and guest
-agent fields will be appended as new boolean flags and response fields as monitoring
-coverage grows.
+All response fields are JSON-encoded strings (consistent with the current
+approach).
 
 ### 3. Recording Rules and Alerts Migration
 
