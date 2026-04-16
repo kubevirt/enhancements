@@ -1,4 +1,4 @@
-# VEP #81: Monitoring Stack Separation via Hybrid Architecture
+# VEP #143: Monitoring Stack Separation via Hybrid Architecture
 
 ## VEP Status Metadata
 
