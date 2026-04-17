@@ -106,19 +106,6 @@ The following deadlines are important for the VEP:
 2. Enhancement Freeze - The deadline for this milestone is Alpha release of KubeVirt. See [kubevirt/sig-release/releases](https://github.com/kubevirt/sig-release/releases)
 3. Code Freeze - This is tracked by each release [kubevirt/sig-release/releases](https://github.com/kubevirt/sig-release/releases)
 
-## Implementation Phases
-
-1. **Alpha Rollout (v1.5 Cycle)**:
-    - [x] Create the `kubevirt/enhancements` repository.
-    - [x] Introduce a template for VEP submissions.
-    - [x] Migrate one or two active designs to test the process.
-    - [ ] Refine the process based on feedback from initial VEPs.
-2. **Full Rollout (v1.6 Cycle)**:
-    - [ ] Transition all enhancements to the new process.
-    - [ ] Empower SIGs to take increased ownership while maintaining central prioritization.
-3. **Future Considerations**:
-    - [ ] Gradual reduction in centralized coordination as SIGs become self-sufficient.
-
 ## Exceptions
 
 Exceptions are served for any edge case that is not specified in this document, by the release team/repository or within
