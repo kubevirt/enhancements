@@ -134,4 +134,11 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 ### Beta
 
+#### On-By-Default Readiness
+
+<!--
+Beta features are enabled by default.
+In this section, please specify what needs to be done in order for the VEP to be ready to be enabled by default.
+-->
+
 ### GA
