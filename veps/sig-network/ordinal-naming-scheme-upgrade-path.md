@@ -203,5 +203,8 @@ the mechanism.
 
 ## Graduation
 
-In case no major issues will be reported, the feature gate will be graduated in v1.9.
+Graduation of this feature is dependent on the graduation of [VEP 141](https://github.com/kubevirt/enhancements/issues/141),
+as this VEP relies on the domain mutation hook mechanism introduced by VEP 141.
+
+In case no major issues will be reported, the feature gate will be graduated in v1.10.
 The network domain mutator will be removed in v1.11 concurrently with the remaining logic for the ordinal naming scheme.
