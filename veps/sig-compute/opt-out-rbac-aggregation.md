@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -237,18 +237,18 @@ This feature will follow the standard graduation process to allow consumers to e
 
 ### Alpha
 
-- [ ] Configuration option implemented
-- [ ] Unit tests covering all configuration scenarios
-- [ ] Basic E2E tests verifying aggregate label presence/absence based on configuration
+- [x] Configuration option implemented
+- [x] Unit tests covering all configuration scenarios
+- [x] Basic E2E tests verifying aggregate label presence/absence based on configuration
 - [ ] Initial documentation in the KubeVirt user guide
 
 ### Beta
 
-- [ ] Feature has been available for at least one release cycle
+- [x] Feature has been available for at least one release cycle
 - [ ] Feedback from consumers has been collected and addressed
-- [ ] E2E tests extended to cover upgrade scenarios
-- [ ] No major issues or bugs reported during Alpha phase
-- [ ] Documentation updated based on user feedback
+- [x] E2E tests extended to cover upgrade scenarios - https://github.com/kubevirt/kubevirt/pull/17540
+- [x] No major issues or bugs reported during Alpha phase
+- [x] Documentation added to kubevirt user guide - https://github.com/kubevirt/user-guide/pull/988
 
 ### GA
 
