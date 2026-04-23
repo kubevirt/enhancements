@@ -4,9 +4,10 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.6
-- This VEP targets beta for version:
-- This VEP targets GA for version:
+- This VEP targeted alpha for version: v1.6 (VMI-status based design)
+- This VEP targeted alpha2 for version: v1.8 (KEP-5304 device-metadata-file based design)
+- This VEP targets beta for version: v1.9
+- This VEP targets GA for version: TBD
 
 ### Release Signoff Checklist
 
@@ -26,6 +27,13 @@ and configuration.
 
 This VEP establishes the core DRA infrastructure in KubeVirt that will also be used by future VEPs
 for other device types (HostDevices, NetworkDevices, CPUs).
+
+In KubeVirt 1.8 (alpha2), this VEP consumes device attributes via the
+[Kubernetes DRA Device Attributes Downward API (KEP-5304)](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api).
+DRA drivers opt in to publishing per-claim, per-request metadata JSON files that are bind-mounted
+into consumer pods via CDI. Virt-launcher reads those files locally to build the libvirt domain
+XML. As a result, virt-controller does not need to watch `ResourceClaim` or `ResourceSlice`
+objects.
 
 ## Motivation
 
@@ -87,7 +95,7 @@ level of control when using Virtual Machines as they have with Containers.
 
 ## Repos
 
-kubevirt/kubevirt
+- `kubevirt/kubevirt`
 
 ## Design
 
@@ -178,207 +186,40 @@ DRA Attributes Downward API (defined by KEP-5304) to get device attributes and g
 
 ### Device Metadata via DRA Attributes Downward API
 
-> **Note:** This section describes the expected mechanism based on
-> [KEP-5304: DRA Device Attributes Downward API](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api).
+This design depends on
+[KEP-5304: DRA Device Attributes Downward API](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api).
+KubeVirt is a pure consumer of this mechanism: virt-launcher only reads the metadata files
+that the framework and the driver produce. For how drivers publish metadata and how pods
+consume it in general, refer to the upstream Kubernetes documentation:
 
-KEP-5304 requires drivers to populate device metadata files:
-1. DRA drivers opt-in by calling `AttributesJSON(true)` in their framework configuration
-2. During `NodePrepareResources`, drivers call the framework's `WriteDeviceMetadata` helper to write attribute files
-3. Files are mounted into pods via CDI (Container Device Interface)
-4. Workloads (virt-launcher) discover and read files via globbing or by claim name
+- Concept: [DRA → Device metadata](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-metadata)
+- Workload-side usage: [Allocate devices to workloads with DRA → Request devices in workloads](https://kubernetes.io/docs/tasks/configure-pod-container/assign-resources/allocate-devices-dra/#request-devices-workloads)
 
-#### File Location
+#### Container-Side File Layout
 
-Metadata files are written at a well-known path:
+Virt-launcher reads metadata files from this base directory inside the virt-launcher
+container:
 
 ```
-/var/run/dra-device-attributes/<driver-name>/<namespace>/<claim-name>/metadata.json
+/var/run/kubernetes.io/dra-device-attributes/
+├── resourceclaims/
+│   └── {claimName}/{requestName}/{driverName}-metadata.json     # pre-existing claims
+└── resourceclaimtemplates/
+    └── {podClaimName}/{requestName}/{driverName}-metadata.json  # template-generated claims
 ```
 
-Example for a GPU claim:
-```
-/var/run/dra-device-attributes/gpu.example.com/gpu-test1/my-gpu-claim/metadata.json
-```
+The two top-level subdirectories (`resourceclaims/` vs `resourceclaimtemplates/`) let
+virt-launcher locate the file without having to learn the generated claim name for
+template-based claims.
 
-#### Example: Kubernetes Objects to Metadata File
+In **alpha2 (v1.8)**, virt-launcher carries its own copy of the metadata types and decode
+logic in `pkg/dra/metadata/types.go` and `pkg/dra/utils.go`, mirroring the upstream
+`k8s.io/dynamic-resource-allocation/api/metadata` shape.
 
-Given the following Kubernetes objects:
-
-```yaml
-# Pod requesting a GPU via DRA
-apiVersion: v1
-kind: Pod
-metadata:
-  name: virt-launcher-vmi-fedora-9bjwb
-  namespace: gpu-test1
-spec:
-  containers:
-  - name: compute
-    resources:
-      claims:
-      - name: gpu-resource-claim
-  resourceClaims:
-  - name: gpu-resource-claim
-    resourceClaimTemplateName: single-gpu
-status:
-  resourceClaimStatuses:
-  - name: gpu-resource-claim
-    resourceClaimName: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28
----
-# ResourceClaim created from template
-apiVersion: resource.k8s.io/v1alpha3
-kind: ResourceClaim
-metadata:
-  annotations:
-    resource.kubernetes.io/pod-claim-name: gpu-resource-claim
-  generateName: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-
-  name: virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28
-  namespace: gpu-test1
-  ownerReferences:
-  - apiVersion: v1
-    blockOwnerDeletion: true
-    controller: true
-    kind: Pod
-    name: virt-launcher-vmi-fedora-9bjwb
-spec:
-  devices:
-    requests:
-    - exactly:
-        allocationMode: ExactCount
-        count: 1
-        deviceClassName: gpu.example.com
-      name: gpu
-status:
-  allocation:
-    devices:
-      results:
-      - device: gpu-2
-        driver: gpu.example.com
-        pool: dra-example-driver-cluster-worker
-        request: gpu
-    nodeSelector:
-      nodeSelectorTerms:
-      - matchFields:
-        - key: metadata.name
-          operator: In
-          values:
-          - dra-example-driver-cluster-worker
-  reservedFor:
-  - name: virt-launcher-vmi-fedora-9bjwb
-    resource: pods
-    uid: 8ffb7e04-6c4b-4fc7-bbaa-c60d9a1e0eaa
----
-# ResourceSlice published by the DRA driver
-apiVersion: resource.k8s.io/v1
-kind: ResourceSlice
-metadata:
-  generateName: kind-dra-control-plane-gpu.example.com-
-  name: kind-dra-control-plane-gpu.example.com-drr27
-  ownerReferences:
-  - apiVersion: v1
-    controller: true
-    kind: Node
-    name: kind-dra-control-plane
-spec:
-  devices:
-  - basic:
-      attributes:
-        driverVersion:
-          version: 1.0.0
-        index:
-          int: 0
-        model:
-          string: LATEST-GPU-MODEL
-        uuid:
-          string: gpu-8e942949-f10b-d871-09b0-ee0657e28f90
-        resource.kubernetes.io/pciBusID:
-          string: "0000:01:00.0"
-    name: pgpu-0
-  driver: gpu.example.com
-  nodeName: kind-1.31-dra-control-plane
-  pool:
-    generation: 0
-    name: kind-1.31-dra-control-plane
-    resourceSliceCount: 1
-```
-
-The DRA driver generates the following metadata file at:
-`/var/run/dra-device-attributes/gpu.example.com/gpu-test1/virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28/metadata.json`
-
-```json
-{
-  "apiVersion": "resource.k8s.io/v1alpha1",
-  "kind": "DeviceMetadata",
-  "metadata": {
-    "name": "virt-launcher-vmi-fedora-9bjwb-gpu-resource-claim-m4k28",
-    "namespace": "gpu-test1",
-    "uid": "8ffb7e04-6c4b-4fc7-bbaa-c60d9a1e0eaa"
-  },
-  "requests": [
-    {
-      "name": "gpu",
-      "devices": [
-        {
-          "driver": "gpu.example.com",
-          "pool": "kind-1.31-dra-control-plane",
-          "device": "pgpu-0",
-          "attributes": {
-            "driverVersion": { "string": "1.0.0" },
-            "index": { "int": 0 },
-            "model": { "string": "LATEST-GPU-MODEL" },
-            "uuid": { "string": "gpu-8e942949-f10b-d871-09b0-ee0657e28f90" },
-            "resources.kubernetes.io/pciBusID": { "string": "0000:01:00.0" }
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-#### JSON Schema
-
-```json
-{
-  "apiVersion": "resource.k8s.io/v1alpha1",
-  "kind": "DeviceMetadata",
-  "metadata": {
-    "name": "my-gpu-claim",
-    "namespace": "gpu-test1",
-    "uid": "abc-123-def"
-  },
-  "requests": [
-    {
-      "name": "pgpu-request",
-      "devices": [
-        {
-          "driver": "gpu.example.com",
-          "pool": "node-1",
-          "device": "pgpu-0",
-          "attributes": {
-            "index": { "int": 0 },
-            "uuid": { "string": "gpu-18db0e85-..." },
-            "model": { "string": "A100" },
-            "resources.kubernetes.io/pciBusID": { "string": "0000:65:00.0" }
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-#### Field Reference
-
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `metadata.name` | string | Automatic | Claim name |
-| `metadata.namespace` | string | Automatic | Claim namespace |
-| `requests[].name` | string | Automatic | Request name from ResourceClaim |
-| `requests[].devices[].driver` | string | Automatic | Driver name |
-| `requests[].devices[].pool` | string | Automatic | Pool name from allocation |
-| `requests[].devices[].device` | string | Automatic | Device name within the pool |
-| `requests[].devices[].attributes` | map | Automatic | Device attributes from ResourceSlice |
+In **beta**, kubevirt will drop the local copy and consume the metadata via the upstream
+[`k8s.io/dynamic-resource-allocation/devicemetadata`](https://pkg.go.dev/k8s.io/dynamic-resource-allocation/devicemetadata)
+consumer library, which handles path resolution, file globbing, and multi-version JSON
+stream decoding on behalf of the consumer.
 
 #### Required Attributes for KubeVirt
 
@@ -393,34 +234,72 @@ DRA GPU drivers that want to support KubeVirt must include the following attribu
 > [kubernetes/kubernetes#135552](https://github.com/kubernetes/kubernetes/issues/135552) for standardization discussion.
 > The attribute name may change once standardization is complete.
 
+If both attributes are present on the same device, KubeVirt treats the device as a mediated
+device (UUID takes precedence), because a parent mediated device may also expose a PCI address.
+
 #### Virt-Launcher Parsing
 
-Virt-launcher discovers and parses metadata files using the following steps:
+For each GPU or HostDevice entry in `vmi.spec.domain.devices.{gpus,hostDevices}[]` whose
+`ClaimRequest` is set, virt-launcher performs the following step in alpha2 (KubeVirt)
 
-1. Glob for metadata files at `/var/run/dra-device-attributes/*/<namespace>/<claim-name>/metadata.json`
-2. Read and parse each JSON file as `DeviceMetadata`
-3. Iterate through `requests[]` to find the matching request name
-4. Iterate through `devices[]` within each request
-5. Extract the appropriate attribute based on device type:
-   - Passthrough GPU: `attributes["resources.kubernetes.io/pciBusID"].stringValue`
-   - Mediated device: `attributes["mdevUUID"].stringValue`
-6. Use the extracted attribute to generate the libvirt domain XML
+1. Find the matching entry `rc` in `vmi.spec.resourceClaims[]` where `rc.name ==
+   ClaimRequest.claimName`. (`rc.name` is the pod-local claim name, a.k.a. `podClaimName` in
+   KEP-5304 terminology.)
+2. Build the claim subdirectory:
+   - If `rc.resourceClaimName` is set (pre-existing claim), use
+     `resourceclaims/<rc.resourceClaimName>/<requestName>/` — the path segment is the actual
+     `ResourceClaim` object name.
+   - If `rc.resourceClaimTemplateName` is set (template-generated claim), use
+     `resourceclaimtemplates/<rc.name>/<requestName>/` — the path segment is the pod-local
+     `podClaimName`, not the generated `ResourceClaim` name.
+3. Glob `*-metadata.json` in that directory. KubeVirt expects exactly one match (one driver
+   per request); zero or more-than-one is an error.
+4. Decode the JSON stream and pick the first object whose `apiVersion` is supported.
+5. Locate the single element of `requests[]` whose `name` equals the `requestName`. KubeVirt
+   expects exactly one device in `devices[]` (count > 1 not supported).
+6. Extract `mdevUUID` first, then fall back to `resource.kubernetes.io/pciBusID`, and build
+   the appropriate libvirt domain element.
 
-### Webhook changes
+In **beta**, steps 2–4 will be replaced by a single call to the upstream
+[`k8s.io/dynamic-resource-allocation/devicemetadata`](https://pkg.go.dev/k8s.io/dynamic-resource-allocation/devicemetadata)
+library:
 
-1. Allow the VMI only if vmi spec is correct, i.e. resource claims for requested devices are specified
+- Pre-existing claim: `devicemetadata.ReadResourceClaimMetadata(rc.resourceClaimName, requestName)`
+- Template-generated claim: `devicemetadata.ReadResourceClaimTemplateMetadata(rc.name, requestName)`
 
-Note: The feature gate verification when VMI requesting DRA device will either be done in webhook or controller, TBD
+Steps 1, 5, and 6 from alpha2 will remain in beta. The KubeVirt-local types in
+`pkg/dra/metadata/` and the decode helpers in `pkg/dra/utils.go` will be removed.
+
+### Webhook Changes
+
+A dedicated DRA admitter validates DRA-related fields on VMI creation / update:
+
+1. `vmi.spec.resourceClaims[].name` entries must be unique.
+2. Every `claimName` referenced from `gpus[]` / `hostDevices[]` must exist in
+   `vmi.spec.resourceClaims[]`.
+3. A GPU / HostDevice entry must be either device-plugin (`DeviceName` set, `ClaimRequest`
+   nil) or DRA (`DeviceName` empty, `ClaimRequest` set), never both and never neither.
+4. For DRA GPUs, the VMI may not mix DRA and non-DRA GPUs on the same node, because GPU
+   device-plugins and GPU DRA drivers typically cannot coexist on the same node. For DRA
+   HostDevices, mixing is allowed.
+5. If any DRA GPU is present, `GPUsWithDRA` must be enabled. If any DRA HostDevice is present,
+   `HostDevicesWithDRA` must be enabled.
+6. Each DRA device must set both `claimName` and `requestName`.
+7. The `(claimName, requestName)` pair must be unique across DRA devices in the VMI, so that a
+   given allocated device is never consumed by two domain entries.
 
 
 ### Virt controller changes
 
 1. If devices are requested using DRA, virt controller needs to render the virt-launcher manifest such that
    `pod.spec.resourceClaims` and `pod.spec.containers.resources.claim` sections are filled out.
-2. Virt-controller does NOT need to configure any attribute requests in the pod spec - the DRA driver handles
-   attribute exposure via framework coordination (KEP-5304).
-3. Virt-controller does NOT need to watch ResourceClaims or ResourceSlices. Device attributes are made available to
-   virt-launcher via CDI-mounted metadata files written by the DRA driver.
+2. Starting in alpha2 (v1.8), virt-controller does NOT need to configure any attribute requests in the pod spec -
+   the DRA driver handles attribute exposure via framework coordination (KEP-5304).
+3. Starting in alpha2 (v1.8), virt-controller does NOT watch ResourceClaims or ResourceSlices. Device attributes
+   are made available to virt-launcher via CDI-mounted metadata files written by the DRA driver. The
+   `DRAStatusController` and the `ResourceClaim` / `ResourceSlice` informers that existed in alpha (v1.6) were
+   removed as part of this transition.
+4. Starting in beta (v1.8) virt-controller will skip the `permittedHostDevices` validation for DRA-managed devices
 
 ### Virt launcher changes
 
@@ -576,7 +455,7 @@ spec:
 ```
 
 The user will then wait for devices to be allocated. Once the virt-launcher pod is running, it will read the device
-metadata from the DRA Downward API and use the attributes (e.g.,
+metadata using KEP-5304 and use the attributes (e.g.,
 `resources.kubernetes.io/pciBusID`) to generate the domain XML.
 
 ## Alternatives
@@ -853,6 +732,9 @@ writing an e2e test with a real GPU driver is outside the scope of alpha.
 - KEP-5304 merged and available in Kubernetes
 - Alpha2 design validated
 - Design must be proven stable with no major changes required during one full release cycle
+  - This is a general rule, however an exception can be made
+if the API can be used
+    for CPU and Network devices without any major changes
 
 **Documentation:**
 - User guide for consuming GPUs via DRA in KubeVirt VMs
@@ -870,7 +752,7 @@ writing an e2e test with a real GPU driver is outside the scope of alpha.
 - Consider additional GPU use cases (vGPU, MIG)
 
 ### GA
-- Upgrade/downgrade testing
+- Upgrade/downgrade testing.
 
 ## Related VEPs
 
@@ -880,13 +762,14 @@ This VEP establishes the core DRA infrastructure for KubeVirt. The following VEP
 - **NetworkDevicesWithDRA**: Support for network devices via DRA
 - **CPUsWithDRA**: Support for CPU resources via DRA 
 
-# References
+## References
 
-- Structured parameters
-  https://github.com/kubernetes/kubernetes/pull/123516
-- Structured parameters KEP
-  https://github.com/kubernetes/enhancements/issues/4381
-- DRA
-  https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-- NVIDIA DRA driver
-  https://github.com/NVIDIA/k8s-dra-driver
+- Dynamic Resource Allocation (DRA):
+  <https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/>
+- KEP-5304 DRA Device Attributes Downward API:
+  <https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api>
+- Structured parameters KEP: <https://github.com/kubernetes/enhancements/issues/4381>
+- `mdevUUID` standardization tracking issue:
+  <https://github.com/kubernetes/kubernetes/issues/135552>
+- NVIDIA DRA driver: <https://github.com/NVIDIA/k8s-dra-driver-gpu>
+- dra-example-driver: <https://github.com/kubernetes-sigs/dra-example-driver>
