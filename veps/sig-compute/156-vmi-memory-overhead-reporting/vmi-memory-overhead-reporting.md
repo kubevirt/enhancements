@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -192,7 +192,9 @@ During an upgrade, the new fields will be added to the VMI status when the featu
 - Add tests to verify that the new fields are correctly reported.
 
 ### Beta
-- revisit the API
+- Revisit the API
+- Implement functional tests
+- Add documentation
 
 ### GA
 
