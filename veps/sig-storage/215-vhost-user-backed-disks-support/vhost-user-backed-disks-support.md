@@ -116,7 +116,6 @@ Secondary scope (follow-on work):
 The proposed API uses a dedicated `VolumeSource`:
 
 - `volumes[].vhostUser.claimName`: PVC backing the vhost-user disk.
-- `volumes[].vhostUser.type`: backend kind. Currently only `blk` is supported.
 - `volumes[].vhostUser.socket.path`: path to the Unix socket, relative to the root of the mounted PVC.
 - `volumes[].vhostUser.reconnectTimeoutSeconds`: how long QEMU should keep retrying reconnects.
 - `volumes[].vhostUser.queues`: optional queue count.
@@ -154,7 +153,6 @@ type VolumeSource struct {
 
 type VhostUserVolumeSource struct {
     ClaimName               string          `json:"claimName"`
-    Type                    VhostUserDiskType `json:"type,omitempty"`
     Socket                  VhostUserSocket `json:"socket"`
     Queues                  *uint           `json:"queues,omitempty"`
     ReconnectTimeoutSeconds *uint           `json:"reconnectTimeoutSeconds,omitempty"`
@@ -221,9 +219,16 @@ This avoids leaking KubeVirt-private mount paths such as `/run/kubevirt-private/
 
 ### Shared memory requirement
 
-`vhost-user-blk` requires shared guest memory.
+`vhost-user-blk` requires the QEMU process and the external vhost-user backend to access the same guest memory. Without shared guest memory, libvirt rejects the domain configuration with an error similar to `'vhostuser' requires shared memory`.
 
-The PoC therefore enables shared `memfd`-backed memory for VMIs that use vhost-user disks, similarly to the existing virtiofs shared-memory handling.
+For VMIs that use vhost-user disks, KubeVirt configures the domain memory backing as shared and memfd-backed:
+
+```xml
+<memoryBacking>
+  <source type='memfd'/>
+  <access mode='shared'/>
+</memoryBacking>
+```
 
 ### Migration note
 
@@ -253,7 +258,6 @@ spec:
   - name: data0
     vhostUser:
       claimName: pvc-data0
-      type: blk
       socket:
         path: nbs.sock
       reconnectTimeoutSeconds: 1
