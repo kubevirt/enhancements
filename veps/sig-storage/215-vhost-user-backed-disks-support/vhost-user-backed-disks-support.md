@@ -32,7 +32,7 @@ This enhancement proposes first-class upstream support for PVC-backed vhost-user
 
 This proposal models vhost-user as a `VolumeSource`. The intent is to keep the storage identity and lifecycle at the volume layer, while still presenting the disk to the guest as a regular virtio block device whose dataplane is provided over a Unix socket (for example, `vhost-user-blk`).
 
-Hotplug support and full live migration support are not part of the initial contract proposed here. The first-class outcome targeted by this VEP is a clear API and runtime contract for non-hotplug VM disks backed by a PVC and exposed to QEMU through vhost-user.
+This VEP covers both regular attachment and declarative hotplug for VM disks backed by a PVC and exposed to QEMU through vhost-user. Live migration behavior is expected to follow the same PVC-backed volume semantics KubeVirt already relies on for other storage types.
 
 ## Motivation
 
@@ -53,6 +53,7 @@ Upstream support is needed to:
 - Represent vhost-user as a `VolumeSource`.
 - Map the API to libvirt/QEMU domain configuration in a well-defined way.
 - Introduce validation rules for supported vhost-user disk options.
+- Support declarative hotplug of vhost-user volumes through the existing declarative volume hotplug model.
 - Guard the feature behind a feature gate during Alpha and Beta.
 - Keep non-vhost disk behavior unchanged.
 
@@ -62,8 +63,7 @@ Upstream support is needed to:
 - Requiring a specific sidecar implementation.
 - Redesigning the whole disk subsystem.
 - Supporting standalone vhost-user sources with no PVC/PV behind them.
-- Delivering full live migration orchestration for vhost-user disks in the initial implementation.
-- Supporting hotplugging of such volumes in the first implementation increment.
+- Adding vhost-user-specific live migration orchestration or provider contracts beyond existing PVC-backed volume semantics.
 
 ## Definition of Users
 
@@ -77,6 +77,7 @@ Upstream support is needed to:
 1. As a cluster operator, I want to define a PVC-backed vhost-user disk using an explicit KubeVirt API contract.
 2. As a VM user, I want this disk to appear as a regular virtio disk in guest while backend connectivity is handled through vhost-user.
 3. As a contributor, I want API validation and converter behavior to be explicit and testable.
+4. As an operator, I want the same volume source to work for declarative hotplug so VM spec changes can add or remove vhost-user volumes consistently with other declarative hotplug storage types.
 
 ## Repos
 
@@ -95,21 +96,20 @@ Upstream support is needed to:
 - Keep storage identity and lifecycle at the volume layer.
 - Keep guest-facing disk model aligned with existing virtio expectations.
 - Keep runtime mapping deterministic and observable.
-- Avoid exposing KubeVirt-private mount paths in the user-facing API.
 
 ### Scope split
 
 Primary scope (this VEP):
 
 - General upstream support for PVC-backed vhost-user disks.
-- API representation of vhost-user source, socket location, number of queues, and reconnect timeout.
+- API representation of vhost-user source, socket location, number of queues, reconnect timeout, and declarative hotplug intent.
 - Runtime conversion to libvirt `type='vhostuser'` disk XML.
-- Validation and tests for core non-hotplug behavior.
+- Declarative hotplug support using the existing spec-driven hotplug flow.
+- Validation and tests for both regular and declarative-hotplug behavior.
 
 Secondary scope (follow-on work):
 
-- Hotplug support using the same volume-based API model.
-- Live migration support with explicit target-side backend/socket handoff semantics.
+- Validation of live migration behavior using the existing PVC-backed volume model.
 
 ### Proposed model
 
@@ -119,6 +119,7 @@ The proposed API uses a dedicated `VolumeSource`:
 - `volumes[].vhostUser.socket.path`: path to the Unix socket, relative to the root of the mounted PVC.
 - `volumes[].vhostUser.reconnectTimeoutSeconds`: how long QEMU should keep retrying reconnects.
 - `volumes[].vhostUser.queues`: optional queue count.
+- `volumes[].vhostUser.hotpluggable`: indicates that the volume may participate in declarative hotplug flows.
 
 The matching disk remains a regular virtio disk attachment:
 
@@ -132,6 +133,7 @@ This means the API contract is effectively:
 - socket location relative to volume root: `socket.path`
 - reconnect timeout: `reconnectTimeoutSeconds`
 - optional queue count: `queues`
+- declarative hotplug intent: `hotpluggable`
 
 The runtime mapping should produce:
 
@@ -156,6 +158,7 @@ type VhostUserVolumeSource struct {
     Socket                  VhostUserSocket `json:"socket"`
     Queues                  *uint           `json:"queues,omitempty"`
     ReconnectTimeoutSeconds *uint           `json:"reconnectTimeoutSeconds,omitempty"`
+    Hotpluggable            bool            `json:"hotpluggable,omitempty"`
 }
 
 type VhostUserSocket struct {
@@ -164,6 +167,8 @@ type VhostUserSocket struct {
 ```
 
 The matching disk continues to use existing disk structs. No vhost-user-specific field is added to `Disk`; instead, vhost-user behavior is inferred from the matching volume source and constrained by disk validation rules.
+
+For declarative hotplug, `hotpluggable` follows the same role that it already has for PVC/DataVolume-backed storage: it marks the volume as eligible for spec-driven add/remove handling when `DeclarativeHotplugVolumes` feature gate is enabled.
 
 ### Disk field applicability and validation
 
@@ -184,6 +189,8 @@ Fields that do not apply to vhost-user disks should be rejected by validation ra
 
 If additional disk options are found to be unsupported by the libvirt/QEMU vhost-user path, they should be treated the same way: explicitly documented and rejected during admission.
 
+For declarative hotplug, validation must also ensure that a hotpluggable `vhostUser` volume is PVC-backed, uses a matching `virtio` disk entry, and only participates in the declarative VM-spec-driven hotplug path.
+
 ### Why `VolumeSource`
 
 The design uses `VolumeSource.vhostUser`.
@@ -194,14 +201,17 @@ This aligns with the implementation constraints and intended storage model:
 - the socket path is resolved relative to the mounted PVC root inside `virt-launcher`, and
 - KubeVirt already reasons about storage identity and lifecycle primarily at the volume layer.
 
-This is also a good fit for future work around migration semantics, even though this proposal does not yet implement dedicated live migration support.
+This is also a good fit for migration semantics because it keeps vhost-user disks anchored to the same PVC-backed storage model KubeVirt already uses for other volumes.
 
-### Feature gate
+It is also compatible with the declarative hotplug direction in KubeVirt, because the source of truth remains `spec.volumes` and the hotplug controller can reason about `vhostUser` volumes the same way it already reasons about other PVC-backed hotpluggable sources once the source type is added to the declarative hotplug checks.
 
-Proposed gate name: `VhostUserDisks`.
+### Feature gates
 
-- Alpha/Beta: gate required.
-- GA: gate removed.
+Proposed gate name for this feature: `VhostUserVolumes`.
+
+- Alpha/Beta: `VhostUserVolumes` gate required.
+- Declarative hotplug behavior additionally depends on `DeclarativeHotplugVolumes` while that feature remains gated upstream.
+- GA: `VhostUserVolumes` gate removed.
 
 ### Reconnect semantics
 
@@ -211,11 +221,9 @@ At runtime, reconnect is always enabled in the emitted libvirt XML. The API does
 
 ### Socket path semantics
 
-The API does not expose a pod-visible absolute socket path.
+`socket.path` is interpreted relative to the root of the mounted PVC backing the volume. KubeVirt resolves that relative path to the launcher-visible path internally when rendering the libvirt domain.
 
-Instead, `socket.path` is interpreted relative to the root of the mounted PVC backing the volume. KubeVirt resolves that relative path to the launcher-visible path internally when rendering the libvirt domain.
-
-This avoids leaking KubeVirt-private mount paths such as `/run/kubevirt-private/...` into user manifests.
+Validation must reject absolute paths, symlinks, and path traversal outside the mounted volume root, so the contract remains volume-relative and does not permit references to arbitrary filesystem locations.
 
 ### Shared memory requirement
 
@@ -230,11 +238,19 @@ For VMIs that use vhost-user disks, KubeVirt configures the domain memory backin
 </memoryBacking>
 ```
 
+### Declarative hotplug note
+
+This VEP includes declarative hotplug support for `vhostUser` volumes. The intent is that VM or VMI spec changes can add or remove a hotpluggable `vhostUser` volume using the same declarative reconciliation model as other hotpluggable storage sources.
+
+This requires extending the declarative hotplug source checks to recognize `VolumeSource.vhostUser`, teaching the hotplug controller to treat `claimName` as the backing PVC identity, and carrying the same disk-side validation rules into hotplug reconciliation.
+
 ### Migration note
 
-This proposal does not add dedicated live migration support for vhost-user disks.
+This proposal does not introduce any vhost-user-specific migration API, controller flow, or readiness contract.
 
-It reuses existing volume-based migratability checks, but it does not yet define or implement the target-side backend/socket handoff needed for vhost-user as a fully supported migratable storage type.
+Migration is expected to follow the same rules KubeVirt already applies to PVC-backed volumes. If the backing PVC is considered live-migratable by existing KubeVirt checks, and the storage provider exposes the configured `socket.path` when the volume is mounted in the target launcher pod, then migration should work without additional KubeVirt-side orchestration.
+
+The socket lifecycle remains the responsibility of the storage provider or CSI integration, not KubeVirt. This VEP therefore does not define provider internals for migration; it only relies on the existing expectation that a mounted PVC exposes the data and endpoints required by the workload.
 
 ## API Examples
 
@@ -264,7 +280,36 @@ spec:
       queues: 4
 ```
 
-### Example 2: Resulting libvirt disk intent
+### Example 2: VM with a declaratively hotpluggable vhost-user volume
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: vm-vhost-user-hotplug
+spec:
+  runStrategy: Always
+  template:
+    spec:
+      domain:
+        devices:
+          disks:
+          - name: data0
+            disk:
+              bus: virtio
+      volumes:
+      - name: data0
+        vhostUser:
+          claimName: pvc-data0
+          socket:
+            path: nbs.sock
+          reconnectTimeoutSeconds: 1
+          hotpluggable: true
+```
+
+When `DeclarativeHotplugVolumes` is enabled, adding or removing this volume from the VM template is expected to follow the same declarative reconciliation model used for other hotpluggable storage volumes.
+
+### Example 3: Resulting libvirt disk intent
 
 ```xml
 <disk type='vhostuser' device='disk'>
@@ -286,7 +331,7 @@ spec:
 ### Alternative B: disk-level backend fields
 
 - Pros: smaller API delta and easy to explain as a disk transport override.
-- Cons: storage identity and lifecycle remain anchored elsewhere, which makes the PVC-backed socket contract and future migration semantics harder to express cleanly.
+- Cons: storage identity and lifecycle remain anchored elsewhere, which makes the PVC-backed socket contract and future declarative hotplug and migration semantics harder to express cleanly.
 - Rejected in favor of `VolumeSource.vhostUser`.
 
 ### Alternative C: standalone vhost-user source with no PVC/PV
@@ -341,33 +386,34 @@ API stability:
 
 - Non-hotplug lifecycle with a PVC-backed vhost-user disk.
 - VM start/stop/restart behavior with a vhost-user-backed disk.
+- Declarative hotplug add/remove flows for hotpluggable `vhostUser` volumes.
+- Reconnect behavior when socket endpoints are recreated during declarative hotplug flows.
 - Multi-disk scenarios and queue count variations.
+- Live migration coverage for RWX PVC-backed vhost-user volumes under the existing migratability rules.
 
-### Deferred tests
-
-- Live migration with explicit vhost-user backend handoff.
-- Hotplug add/remove volume flows using the same model.
-- Reconnect behavior when socket endpoints are recreated during hotplug flows.
+For integration with existing KubeVirt CI, a lightweight [NBS](https://github.com/ydb-platform/nbs) setup could be used as a storage provider.
 
 ## Implementation History
 
-[TBD]
+[TBD?]
 
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] Feature gate `VhostUserDisks` guards all new behavior.
+- [ ] Feature gate `VhostUserVolumes` guards all new behavior.
 - [ ] API fields for PVC-backed vhost-user disks are defined and validated.
-- [ ] Converter/runtime support for non-hotplug vhost-user-backed disks is merged.
-- [ ] Unit tests for API + converter behavior are merged.
-- [ ] Initial integration tests for non-hotplug lifecycle are merged.
+- [ ] Converter/runtime support for vhost-user-backed disks is merged.
+- [ ] Unit tests for API validation, XML generation, PVC mount wiring, and socket path resolution are merged.
 - [ ] User docs for feature-gated base support are merged.
 
 ### Beta
 
 - [ ] API shape is stable, with only additive changes needed.
-- [ ] Reliability and scaling tests are expanded and stable.
+- [ ] Integration tests are merged, including:
+  - [ ] Full guest IO e2e's.
+  - [ ] Hotplug e2e's.
+  - [ ] Live migration e2e's.
 - [ ] Known critical issues are resolved or documented with mitigations.
 
 ### GA
