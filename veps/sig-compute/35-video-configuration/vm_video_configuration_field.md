@@ -4,9 +4,9 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.6
-- This VEP targets beta for version: v1.7
-- This VEP targets GA for version:
+- This VEP targets alpha for version: v1.6.0
+- This VEP targets beta for version: v1.7.0
+- This VEP targets GA for version: v1.9.0
 
 ### Release Signoff Checklist
 
@@ -17,7 +17,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
-# Overview
+## Overview
 - We want to allow VM-owners to explicitly set the video device type when needed.
 
 ## Motivation
@@ -97,7 +97,7 @@ This change would provide higher resolutions, and improved compatibility with mo
 - **Backward Compatibility:** we need to adjust a fall-back logic to maintain full backward-computability
 - **pre-requisite driver** `virtio` driver must be installed for `virtio` video to enable the benefits over bochs
 - The hard coded `virtio` would not enable the windows on arm user story
-- 
+
 ### Option 2: Annotation-Based Configuration
 #### Description
 This approach proposes introducing an annotation, kubevirt.io/video-device,
@@ -152,53 +152,44 @@ We only provide a field for the user to specify explicitly if they want somethin
 ## Functional Testing Approach
 * Create a VM with video.Type set to `virtio` and expect launch successfully.
 
-## Feature Stage
-We are targeting this feature to be introduced in **Alpha**.
+## Implementation History
 
-- During Alpha:
-   - The `video` field will be **optional**.
-   - Users can opt into the new functionality without affecting existing behavior.
+- 2025-05-08: Initial VEP merged. PR: https://github.com/kubevirt/enhancements/pull/36
+- 2025-06-17: Alpha implementation merged (feature gated under `VideoConfig`). PR: https://github.com/kubevirt/kubevirt/pull/14673
+- 2025-09-04: VEP updated with Beta and GA graduation criteria. PR: https://github.com/kubevirt/enhancements/pull/87
+- 2025-10-28: Promoted `VideoConfig` feature gate from Alpha to Beta. PR: https://github.com/kubevirt/kubevirt/pull/15939
 
-- During Beta:
+## Graduation Requirements
 
-  - Document supported video models per architecture, including multi-head
-    support where applicable.
+### Alpha
 
-  - Test that Windows guests (including Windows 11 on ARM) can take advantage
-    of the `virtio` adapter to achieve higher resolutions.
+- [x] Feature gate `VideoConfig` guards all code changes
+- [x] The `video` field is optional
+- [x] Users can opt into the new functionality without affecting existing behavior
 
-  - Explore and measure the overhead of each video model to provide guidance
-    for users.
+### Beta
 
-  - Add the missing documentation from Alpha into the USER_GUIDE, with
-    practical examples and usage notes.
+- [x] Document supported video models per architecture, including multi-head
+  support where applicable
+- [x] Test that Windows guests (including Windows 11 on ARM) can take advantage
+  of the `virtio` adapter to achieve higher resolutions
+- [x] Explore and measure the overhead of each video model to provide guidance
+  for users
+- [x] Add the missing documentation from Alpha into the USER_GUIDE, with
+  practical examples and usage notes
+- [x] Support matrix documented (see below)
 
+### GA
 
-- For GA, the `video` configuration field will be considered stable and fully supported.
+- [ ] The `video` configuration field is considered stable and fully supported
+- [ ] Feature gate `VideoConfig` is removed and functionality is enabled by default
+- [ ] **API Stability:** The `video` field under `spec.template.spec.domain.devices` is part of the stable VM API. Any changes follow Kubernetes API deprecation policies.
+- [ ] **Default Behavior:** Architecture-specific defaults (e.g., VGA/Bochs for AMD64, virtio for Arm/s390x) remain in place if no `video` field is specified. Explicit configuration always overrides defaults.
+- [ ] **Validation & Documentation:** All supported video device models are documented per architecture. The API rejects unsupported combinations (e.g., devices not available for the VM's architecture). User guides provide compatibility matrices and best-practice recommendations.
+- [ ] **Backward Compatibility:** Existing VMs that do not specify a `video` field continue to behave as before. No migration or updates are required.
+- [ ] **Testing:** The feature is covered by unit tests validating correct video device assignment and rejection of unsupported models per architecture.
 
-  - **API Stability**  
-    The `video` field under `spec.template.spec.domain.devices` will be part of the stable VM API. Any changes will follow Kubernetes API deprecation policies.
-
-  - **Default Behavior**  
-    The architecture-specific defaults (e.g., VGA/Bochs for AMD64, virtio for Arm/s390x) will remain in place if no `video` field is specified. Explicit configuration will always override defaults.
-
-  - **Validation & Documentation**  
-    All supported video device models will be documented per architecture. The API will reject unsupported combinations (e.g., devices not available for the VM’s architecture). User guides will provide compatibility matrices and best-practice recommendations.
-
-  - **Backward Compatibility**  
-    Existing VMs that do not specify a `video` field will continue to behave as before. No migration or updates are required.
-
-  - **Testing & Support**  
-    GA status will be backed by comprehensive e2e and conformance tests across all supported architectures, operating systems (Linux and Windows), and major hypervisor backends (QEMU/KVM).  
-    Performance characteristics and overhead of different video devices will be documented.
-
-
-- **Feature Gate Lifecycle**  
-  The `VideoConfig` feature gate will guard this functionality during Alpha and Beta stages.  
-  Once the feature reaches GA, the feature gate will be removed and the functionality will be enabled by default.
-
-
-## Support Matrix (Pre-requisite for Beta)
+## Support Matrix
 
 The following matrix summarizes the current default and supported video devices across architectures, firmware types, and guest OS categories.  
 This will serve as a reference for VM creators when selecting a video device.
@@ -225,7 +216,3 @@ This will serve as a reference for VM creators when selecting a video device.
 - **s390x**
     - Default is **virtio**.
     - `ramfb` is **not supported**.
-
-
-
-Depending on adoption and feedback, we aim to promote the feature to **Beta** in a subsequent release, followed by **GA** once it is stable and widely used.
