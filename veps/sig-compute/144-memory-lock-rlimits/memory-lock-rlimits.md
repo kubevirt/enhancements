@@ -133,26 +133,26 @@ specify the memlock RLimit needs of a VM.
 
 The new field will be `spec.domain.memory.reservedOverhead`. It will
 contain two optional subfields:
-- `requiresLock` (`string`): An enum indicating whether or not to extend
-  the exiting memory lock RLimits of the `virt-launcher` pod and its
-  qemu process.
-- `value` ([`Quantity`][k8s-resource-quantity]): An optional field to
-  let users specify how much memory could be locked apart from the VM's
-  memory size. Note this could be larger than the guest's maximum memory
-  and even larger than the maximum memory allowed for the
+- `memLock` (`string`): An enum indicating whether or not to extend the
+  exiting memory lock RLimits of the `virt-launcher` pod and its qemu
+  process. It supports two values: `Required` and `NotRequired`.
+- `addedOverhead` ([`Quantity`][k8s-resource-quantity]): An optional
+  field to let users specify how much memory could be locked apart from
+  the VM's memory size. Note this could be larger than the guest's
+  maximum memory and even larger than the maximum memory allowed for the
   `virt-launcher`.
 
-If `requiresLock: "true"`, the logic that adjusts `virt-launcher` pod's
-memory lock RLimits will be triggered. By default (when `value` is empty
-or zero), the RLimits will be updated to match expected minimum value of
-it. This base will equal the sum of VM's base memory size and whatever
-other needs that KubeVirt might consider internally (see
+If `memLock: "Required"`, the logic that adjusts `virt-launcher` pod's
+memory lock RLimits will be triggered. By default (when `addedOverhead`
+is empty or zero), the RLimits will be updated to match expected minimum
+value of it. This base will equal the sum of VM's base memory size and
+whatever other needs that KubeVirt might consider internally (see
 [`GetMemoryOverhead`][kbvirt-getMemOverhead] logic).  Whatever value
-that `value` has will be added to that base.
+that `addedOverhead` has will be added to that base.
 
-Note that if the expected memory RLimit is $2 * Mem_{VM}$, `value` only
-needs to carry $Mem_{VM}$, as the base RLimit will already consider the
-memory size of the VM once.
+Note that if the expected memory RLimit is $2 * Mem_{VM}$,
+`addedOverhead` only needs to carry $Mem_{VM}$, as the base RLimit will
+already consider the memory size of the VM once.
 
 Users could set those fields by themselves. Mutating admission webhooks
 could also watch for creation of VMs and compute memlock RLimit
@@ -182,9 +182,10 @@ the calculation existing for VFIO, SEV and RT VMs.
 ## API Examples
 
 Users can specify that a `VirtualMachine` could require to lock memory
-through `spec.domain.memory.reservedOverhead.requiresLock`. If any other
+through `spec.domain.memory.reservedOverhead.memLock`. If any other
 region apart from the VM memory could be locked too, the user can
-specify it by setting `spec.domain.memory.reservedOverhead.value`.
+specify it by setting
+`spec.domain.memory.reservedOverhead.addedOverhead`.
 
 An example with both fields set:
 
@@ -198,9 +199,9 @@ spec:
     spec:
       domain:
         memory:
-          value:
-            value: 1G
-            requiresLock: "true"
+          reservedOverhead:
+            addedOverhead: 1G
+            memLock: "Required"
   ...
 ```
 
@@ -289,7 +290,8 @@ current stage.
 Apart from that, users could set these fields by themselves, but we
 expect this general mechanism to be consumed mainly by mutating
 admission webhooks not to require the user to run some of the
-mathematical operations needed to come up with proper `value` values.
+mathematical operations needed to come up with proper `addedOverhead`
+values.
 
 Note that mutating admission webhooks do introduce certain latency
 during pod admission. This means that in case the number of devices and
@@ -309,9 +311,9 @@ Unit tests should cover that `virt-handler` specifies the right memory
 lock RLimit value for different `spec.domain.memory.reservedOverhead`
 values:
 - The field does not exist or is empty.
-- It exists with `requiresLock: "true"` but an empty `value`.
-- It exists with `requiresLock: "true"` and a valid `value`.
-- It exists with `requiresLock: "false"` and a valid `value`.
+- It exists with `memLock: "Required"` but an empty `addedOverhead`.
+- It exists with `memLock: "Required"` and a valid `addedOverhead`.
+- It exists with `memLock: "NotRequired"` and a valid `addedOverhead`.
 - Other conditions such as SEV/RT/SR-IOV are met and there are other
   requirements present in `reservedOverhead`.
 
@@ -347,7 +349,7 @@ The following e2e scenarios should be considered:
   `spec.domain.memory.reservedOverhead` and apply the memory lock limits
   to `virt-launcher` and QEMU processes accordingly under a feature
   gate.
-- Add feature gate `MemLockRLimitConfiguration`.
+- Add feature gate `ReservedOverheadMemlock`.
 
 ### Beta
 - Implement functional tests.
@@ -356,5 +358,5 @@ The following e2e scenarios should be considered:
 - Documentation.
 
 ### GA
-- Remove the `MemLockRLimitConfiguration` feature gate.
+- Remove the `ReservedOverheadMemlock` feature gate.
 - Deprecate other memory extension mechanisms.
