@@ -5,16 +5,16 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -253,6 +253,9 @@ For example:
 01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
 03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
 -->
+
+2026-02-11: [VEP 171: Add rebootPolicy to VMI](https://github.com/kubevirt/kubevirt/pull/16579)
+2026-04-30: Moving to Beta, the API and implementation have proven themselves in kubevirt-redfish OpenShift deployment tests
 
 ## Graduation Requirements
 
