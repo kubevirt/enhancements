@@ -4,11 +4,29 @@
 
 ### Target releases (WorkloadEncryptionSEV)
 
+<!--
+A PR must update this section during the planning phase of a given release in order to track it.
+PRs that will not update the VEP during the planning phase will not be able to graduate the
+VEP by creating a code PR to kubevirt/kubevirt to bump the phase in-code.
+
+Please avoid targeting future releases in this section. Only capture the upcoming release.
+For example, during the planning phase for version v1.123, do **not** target beta for v.124 in advance.
+-->
+
 - This VEP targets alpha for version: v1.7
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Target releases (WorkloadEncryptionTDX)
+
+<!--
+A PR must update this section during the planning phase of a given release in order to track it.
+PRs that will not update the VEP during the planning phase will not be able to graduate the
+VEP by creating a code PR to kubevirt/kubevirt to bump the phase in-code.
+
+Please avoid targeting future releases in this section. Only capture the upcoming release.
+For example, during the planning phase for version v1.123, do **not** target beta for v.124 in advance.
+-->
 
 - This VEP targets alpha for version: v1.7
 - This VEP targets beta for version:
@@ -20,7 +38,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -228,31 +246,33 @@ spec:
 - Since TDX & SEV-SNP do not have support for nested virtualization this will
   require bare metal hardware to conduct e2e testing.
 
-## Implementation Phases
-### Intel TDX Phases:
-The initial phase of implementation will focus on integrating basic
-functionality in kubevirt thus allowing the creation and deployment of
-confidential VMs using the TDX technology. The initial phase also includes the
-e2e tests. The subsequent phase will involve adding any missing use cases
-aligned with other confidential VM technologies.
+## Implementation History
 
-### AMD SEV-SNP Phases:
-The initial phase of implementation will focus on integrating basic
-functionality. The initial phase also includes the e2e tests. The subsequent
-phase will involve adding any missing use cases and necessary checks to prevent
-the creation of improperly configured VMs (e.g., preventing users from setting
-KernelHashes without configuring kernel booting).
+<!--
+For example:
+01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
+03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
+-->
 
-## Feature lifecycle Phases
+- v1.7: Alpha implementation of TDX and SEV-SNP support.
+- v1.9: Beta implementation of SEV-SNP support. 
+
+## Graduation Requirements
+
+<!--
+The requirements for graduating to each stage.
+-->
 
 ### Alpha
-The feature will be implemented in Alpha. We do not know if it will be possible
-to have e2e tests in Alpha due to lack of TDX hardware. We expect the feature
-to be merged without the e2e tests.
+- [x] Feature gate guards all code changes
+- [x] Initial implementation supporting TDX and SEV-SNP VM creation and deployment
+- [ ] e2e TDX tests (may be deferred to Beta due to lack of TDX/SEV-SNP hardware in CI)
+- [x] e2e SEV-SNP tests 
 
 ### Beta
-The requirements for graduating to Beta include having hardware available, CI
-lanes created, and e2e tests that can run.
+- [ ] Hardware available for CI
+- [ ] CI lanes created for TDX and SEV-SNP
+- [ ] e2e tests passing
 
 ### GA
-Remove feature gate
+- [ ] Remove feature gates
