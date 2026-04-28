@@ -216,7 +216,7 @@ In **alpha2 (v1.8)**, virt-launcher carries its own copy of the metadata types a
 logic in `pkg/dra/metadata/types.go` and `pkg/dra/utils.go`, mirroring the upstream
 `k8s.io/dynamic-resource-allocation/api/metadata` shape.
 
-In **beta**, kubevirt will drop the local copy and consume the metadata via the upstream
+In **beta (v1.9)**, kubevirt will drop the local copy and consume the metadata via the upstream
 [`k8s.io/dynamic-resource-allocation/devicemetadata`](https://pkg.go.dev/k8s.io/dynamic-resource-allocation/devicemetadata)
 consumer library, which handles path resolution, file globbing, and multi-version JSON
 stream decoding on behalf of the consumer.
@@ -240,7 +240,7 @@ device (UUID takes precedence), because a parent mediated device may also expose
 #### Virt-Launcher Parsing
 
 For each GPU or HostDevice entry in `vmi.spec.domain.devices.{gpus,hostDevices}[]` whose
-`ClaimRequest` is set, virt-launcher performs the following step in alpha2 (KubeVirt)
+`ClaimRequest` is set, virt-launcher performs the following steps in alpha2 (KubeVirt):
 
 1. Find the matching entry `rc` in `vmi.spec.resourceClaims[]` where `rc.name ==
    ClaimRequest.claimName`. (`rc.name` is the pod-local claim name, a.k.a. `podClaimName` in
@@ -299,7 +299,10 @@ A dedicated DRA admitter validates DRA-related fields on VMI creation / update:
    are made available to virt-launcher via CDI-mounted metadata files written by the DRA driver. The
    `DRAStatusController` and the `ResourceClaim` / `ResourceSlice` informers that existed in alpha (v1.6) were
    removed as part of this transition.
-4. Starting in beta (v1.8) virt-controller will skip the `permittedHostDevices` validation for DRA-managed devices
+4. Starting in beta (v1.9), virt-controller will skip the `permittedHostDevices` validation for DRA-managed
+   devices. `permittedHostDevices` assumes each device can be represented by a single permitted key
+   (the device-plugin API's model), which does not fit well with the DRA API. Equivalent allow-list
+   semantics for DRA-managed devices can be added later if desired; for now, they are not supported.
 
 ### Virt launcher changes
 
@@ -732,9 +735,9 @@ writing an e2e test with a real GPU driver is outside the scope of alpha.
 - KEP-5304 merged and available in Kubernetes
 - Alpha2 design validated
 - Design must be proven stable with no major changes required during one full release cycle
-  - This is a general rule, however an exception can be made
-if the API can be used
-    for CPU and Network devices without any major changes
+  - This is a general rule; however, an exception can be made if the API
+    can be consumed by CPU and Network device types without breaking
+    changes to the existing GPU interface.
 
 **Documentation:**
 - User guide for consuming GPUs via DRA in KubeVirt VMs
@@ -761,6 +764,294 @@ This VEP establishes the core DRA infrastructure for KubeVirt. The following VEP
 - **HostDevicesWithDRA**: Support for generic host devices via DRA
 - **NetworkDevicesWithDRA**: Support for network devices via DRA
 - **CPUsWithDRA**: Support for CPU resources via DRA 
+
+## Appendix: Future Extension Points
+
+This appendix records design directions for problems that are already known and have
+been intentionally left out of scope for VEP-10. Its purpose is to demonstrate that
+the API graduating with this VEP is sufficient, functional, and forward-compatible
+with these future changes i.e., that picking up any of the items below will not
+require an API-breaking change to the types VEP-10 graduates.
+
+### A. Multi-device DRA usage with the graduating API
+
+The following VMI spec is an example of how the API graduating in beta (v1.9)
+will be used with different types of devices (CPU, network and host devices).
+The example uses the Network DRA shape from
+[VEP-183](https://github.com/kubevirt/enhancements/pull/185) and the CPU DRA
+shape from the CPUsWithDRA POC done as part of
+[VEP-152](https://github.com/kubevirt/enhancements/issues/152), both of which
+are layered onto the shared `ClaimRequest` type from this VEP without
+modifying it:
+
+```yaml
+spec:
+  resourceClaims:
+  - name: gpu-nic-host-device-cpu
+    resourceClaimTemplateName: all-resource-template
+
+  domain:
+    cpu:
+      cores: 8
+      dra:
+        claimName: gpu-nic-host-device-cpu
+        requestName: cpu
+    devices:
+      gpus:
+      - name: gpu0
+        claimName: gpu-nic-host-device-cpu
+        requestName: gpu
+      hostDevices:
+      - name: hostdevice0
+        claimName: gpu-nic-host-device-cpu
+        requestName: hostdev
+      interfaces:
+      - name: sriov-nic
+        sriov: {}
+    resources:
+      requests:
+        memory: 32Gi
+
+  networks:
+  - name: sriov-nic
+    resourceClaim:
+      claimName: gpu-nic-host-device-cpu
+      requestName: nic
+```
+
+This single VMI references one shared claim from four different consumer
+sites: for CPU, GPU, HostDevice, and Network. Co-location constraints
+(NUMA alignment, PCI-root alignment) live in the underlying
+`ResourceClaimTemplate.spec.devices.constraints[]`. See
+[dra-driver-cpu#114](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/114)
+for a worked CPU/NIC PCI-root alignment example using
+`matchAttribute: "resource.kubernetes.io/pcieRoot"`.
+
+All four places can use the same `ClaimRequest` type, and other
+improvements to the user experience can be added as purely additive changes
+(for example, the `managedClaim` extension in
+[Appendix C](#c-managed-resource-claims)).
+
+### B. Integration with CPU DRA devices
+
+CPU DRA is the most complex follow-on integration. Two threads are worth
+examining for VEP-10's API: how the upstream CPU driver exposes devices, and
+how VEP-10's graduating API relates to those exposure modes.
+
+**Driver modes — grouped vs individual.** The
+[`dra-driver-cpu`](https://github.com/kubernetes-sigs/dra-driver-cpu) supports
+two device-exposure modes via the `--cpu-device-mode` flag, with a worked
+Pod manifest in the upstream repo for each.
+
+***Grouped mode (default).*** The driver publishes one device per NUMA node
+(or socket) carrying `dra.cpu/cpu`
+[consumable capacity](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#consumable-capacity),
+and the claim requests *N* CPUs from the group. Collapsing N CPUs into a
+single device entry scales well on large nodes; the trade-off is that
+granular selection of each CPU is not possible. Translating
+[`pod_with_resource_claim_grouped_mode.yaml`](https://github.com/kubernetes-sigs/dra-driver-cpu/blob/main/hack/examples/pod_with_resource_claim_grouped_mode.yaml)
+to a VMI:
+
+```yaml
+# ResourceClaim (verbatim from the upstream example)
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: claim-cpu-capacity-10
+spec:
+  devices:
+    requests:
+    - name: req-cpu-slice
+      exactly:
+        deviceClassName: dra.cpu
+        capacity:
+          requests:
+            dra.cpu/cpu: "10"
+---
+# VMI consumes it via VEP-10's domain.cpu.dra ClaimRequest
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  name: vmi-with-grouped-cpu
+spec:
+  resourceClaims:
+  - name: cpu-claim
+    resourceClaimName: claim-cpu-capacity-10
+  domain:
+    cpu:
+      cores: 10
+      dra:
+        claimName: cpu-claim
+        requestName: req-cpu-slice    # matches devices.requests[].name above
+    resources:
+      requests:
+        memory: 8Gi
+```
+
+***Individual mode.*** The driver publishes one device per allocatable CPU,
+and the claim selects them by count and optionally by CEL expressions over
+per-CPU attributes. Each CPU is independently addressable, enabling
+granular selection; the trade-off is that the `ResourceSlice` grows
+linearly with core count, and selectors require node-topology knowledge.
+A NUMA-aligned individual-mode example — pin 4 CPUs to NUMA node 0 via a
+CEL selector — adapted from
+[`pod_with_resource_claim_individual_mode.yaml`](https://github.com/kubernetes-sigs/dra-driver-cpu/blob/main/hack/examples/pod_with_resource_claim_individual_mode.yaml):
+
+```yaml
+# ResourceClaim: 4 CPUs aligned to NUMA node 0
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: cpu-numa0-4cpus
+spec:
+  devices:
+    requests:
+    - name: numa0-cpus
+      exactly:
+        deviceClassName: dra.cpu
+        count: 4
+        selectors:
+        - cel:
+            expression: device.attributes["dra.cpu"].numaNodeID == 0
+---
+# VMI consumes it via VEP-10's domain.cpu.dra ClaimRequest — same shape as above
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  name: vmi-numa0-aligned
+spec:
+  resourceClaims:
+  - name: cpu-claim
+    resourceClaimName: cpu-numa0-4cpus
+  domain:
+    cpu:
+      cores: 4
+      dra:
+        claimName: cpu-claim
+        requestName: numa0-cpus       # matches devices.requests[].name above
+    resources:
+      requests:
+        memory: 8Gi
+```
+
+**The graduating API is mode-agnostic.** As demonstrated in the examples
+above, the graduating API does not constrain the driver's exposure model,
+and any KubeVirt-side support for choosing between modes can be layered on
+additively (for example, a future `managedClaim` policy in
+[Appendix C](#c-managed-resource-claims) could synthesize either claim
+shape without touching the `ClaimRequest` surface VEP-10 graduates).
+
+### C. Managed Resource Claims
+
+The DRA APIs are complex for users authoring VMIs. Take a concrete
+scenario: a user wants their VMI's GPU and SR-IOV NIC to land on the same
+PCIe root for performance. The VMI spec already declares "I have a GPU and
+a NIC", but expressing the alignment intent requires hand-authoring a
+`ResourceClaim` (or template) with
+`constraints[].matchAttribute: resource.kubernetes.io/pcieRoot` and the
+matching per-device requests (see
+[dra-driver-cpu#114](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/114)
+for a worked example), then referencing it from the VMI by name — the
+author re-expresses intent the VMI spec already carries.
+
+Making this easier for the user is an unexplored problem. One option is
+for KubeVirt to manage `ResourceClaim` generation from the VMI spec.
+
+The CPUsWithDRA POC done as part of
+[VEP-152](https://github.com/kubevirt/enhancements/issues/152) solves the
+equivalent UX problem for the CPU side with a CPU-specific
+`cpu.dra.auto: true` flag; the mechanism generalizes across all DRA-backed
+device types.
+
+To solve this issue, an additional field, `managedClaim`, can be added
+alongside `resourceClaimName` and `resourceClaimTemplateName`, letting
+KubeVirt own the claim's lifecycle and shape it from a small set of
+high-level policies:
+
+| Field                           | Type   | Meaning                                              |
+| ------------------------------- | ------ | ---------------------------------------------------- |
+| `resourceClaimName`             | string | Reference to a pre-existing claim                    |
+| `resourceClaimTemplateName`     | string | Reference to a pre-existing template                 |
+| `managedClaim`                  | struct | KubeVirt constructs and owns the claim               |
+
+A VMI spec example that solves this issue:
+
+```yaml
+spec:
+  resourceClaims:
+  - name: gpu-nic
+    managedClaim:                              # NEW additive field 1: KubeVirt-managed claim wrapper
+      policies:
+      - policy: Aligned
+        attribute: kubernetes.io/pciRoot
+  domain:
+    devices:
+      gpus:
+      - name: gpu0
+        claimName: gpu-nic
+        requestName: gpu
+        deviceClassName: gpu.nvidia.com    # NEW additive field 2: per-consumer DRA class
+      interfaces:
+      - name: sriov-nic
+        sriov: {}
+  networks:
+  - name: sriov-nic
+    resourceClaim:
+      claimName: gpu-nic
+      requestName: nic
+      deviceClassName: dranet              # NEW additive field 2: per-consumer DRA class
+---
+# ResourceClaim: generated and owned by KubeVirt
+#
+# Generated from the managedClaim policy above. Reference to an example
+# NVIDIA DRA-net GPU+NIC alignment example:
+#   https://github.com/kubernetes-sigs/dranet/blob/f359add7df198f466f63352e98c177a7ed01371d/examples/demo_nvidia_dranet/resourceclaims.yaml#L37
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: <vmi-name>-gpu-nic                 # owned by the VMI
+spec:
+  devices:
+    requests:
+    - name: gpu                            # = vmi.spec.domain.devices.gpus[].requestName
+      exactly:
+        deviceClassName: gpu.nvidia.com    # = gpus[].deviceClassName above
+        count: 1                           # = #gpus[] sharing this claimName
+    - name: nic                            # = vmi.spec.networks[].resourceClaim.requestName
+      exactly:
+        deviceClassName: dranet            # = networks[].resourceClaim.deviceClassName above
+        count: 1                           # = #networks[] sharing this claimName
+    constraints:
+    - matchAttribute: resource.kubernetes.io/pcieRoot   # = managedClaim.policies[].attribute
+```
+
+The example demonstrates two properties:
+
+1. **The change is additive.** All new fields introduced above extend
+   existing structs without modifying them. Existing VMIs that don't use
+   the new fields are unaffected, and the `(claimName, requestName)`
+   consumer shape VEP-10 graduates is unchanged.
+2. **The graduating API tolerates unexplored problems.** Several design
+   decisions remain open and unexplored. As the example above demonstrates,
+   none of them should require a change to the APIs graduating through
+   this VEP.
+
+### D. Live migration of DRA-backed devices
+
+VEP-10 lists live migration as future work for GPUs and notes that the
+metadata-file approach (KEP-5304) simplifies it because each virt-launcher
+pod independently reads its own metadata. VEP-183 (Network DRA) explicitly
+defers migration. CPU DRA migration is fundamentally constrained because
+host-pinned cpusets are not node-portable, the same way
+`dedicatedCpuPlacement` is not migration-friendly today.
+
+A dedicated VEP for "live migration with DRA devices" should cover: device
+compatibility checks pre-migration, target-side claim allocation,
+target-side metadata-file mounting, and the CPU-specific impossibility of
+migrating a hard cpuset. This is a future VEP, not an API change to this
+one — the `ClaimRequest` types VEP-10 graduates do not need any extension to
+support migration; the additions live elsewhere (migration controller,
+admitter, KEP-5304 helpers).
 
 ## References
 
