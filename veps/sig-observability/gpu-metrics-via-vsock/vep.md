@@ -243,6 +243,31 @@ The host uses QGA `guest-exec` to run a metrics collection command inside the gu
 - Common SELinux issues blocking executed commands.
 - Output is base64-encoded and must be polled, adding latency.
 
+### Exposing DCGM via regular Kubernetes Networking
+
+Instead of using VSOCK, DCGM inside the guest could listen on a standard network
+interface and be exposed to Prometheus via Kubernetes Services and
+ServiceMonitors.
+
+**Rejected because:**
+
+- **Additional resource overhead**: Each VM would need a dedicated Service and
+ServiceMonitor created and deleted in sync with the VM lifecycle. This scales
+with the number of GPU VMs and adds complexity that does not exist with the
+VSOCK approach.
+
+- **Network dependency**: Requires the guest to have a network interface on the
+pod network. Not all VM use-cases will have usable network configurations.
+SR-IOV only, isolated via Multus, or no network connectivity at all. VSOCK is
+independent of the networking configuration.
+
+- **Security**: With VSOCK, communication is scoped to host-guest only and is
+managed entirely by KubeVirt. virt-handler's Service and ServiceMonitor are the
+only externally reachable endpoints where this data will be exposed, and their
+security is handled by KubeVirt. Exposing DCGM on a network interface shifts
+this responsibility to the user, who must secure DCGM against access from other
+sources.
+
 ## Scalability
 
 - **Caching**: GPU metrics are cached in virt-launcher with a 3.25-second TTL, so multiple Prometheus scrapes within that window reuse the
