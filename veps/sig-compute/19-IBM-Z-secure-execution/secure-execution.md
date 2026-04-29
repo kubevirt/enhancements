@@ -67,3 +67,31 @@ This feature would not affect existing/new VMs as long as they do not depent on 
 ## Functional Testing Approach
 - As much as possible should the feature be tested in unit-tests
 - Upstream tests would be difficult and likely require additional hardware, as Secure Execution does not work with nested virtualization and requires being run on LPAR (Bare Metal).
+
+## Implementation History
+
+16-06-2025: Initial implementation of the Feature with feature gate and unit-tests. PR: https://github.com/kubevirt/kubevirt/pull/14040
+20-08-2025: Adding documentation on how to use IBM Secure Execution with kubevirt. PR: https://github.com/kubevirt/user-guide/pull/910
+30-10-2025: Added periodic test lane for running e2e tests. PR: https://github.com/kubevirt/project-infra/pull/4452
+02-11-2025: Adding e2e test for IBM Secure Execution. PR: https://github.com/kubevirt/kubevirt/pull/15482
+03-11-2025: Promoted Feature Gate to Beta. PR: https://github.com/kubevirt/kubevirt/pull/15934
+
+## Graduation Requirements
+
+### Alpha (v1.6.0)
+
+- [x] Implement Feature Gate
+- [x] Initial implementation for IBM Secure Execution on s390x
+- [x] Add unit-tests for feature
+- [x] Documentation on how to use it
+
+### Beta (v1.7.0)
+
+- [x] Add LPAR (bare-metal) cluster with IBM Secure Execution Support to CI
+- [x] Enable periodic e2e tests of the feature
+- [x] Promote feature gate to beta phase
+
+### GA (v1.9.0)
+
+- [ ] Remove feature gate for graduation
+- [ ] Update documentation to include which version contains the stable feature
