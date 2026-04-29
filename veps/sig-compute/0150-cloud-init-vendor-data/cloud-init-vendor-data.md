@@ -4,18 +4,18 @@
 
 ### Target releases
 
-- This VEP targets alpha for version:
+- This VEP targets alpha for version: v1.9
 - This VEP targets beta for version:
-- This VEP targets GA for version: v1.9
+- This VEP targets GA for version:
 
 ### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements](https://github.com/kubevirt/enhancements/issues/150)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [x] (R) Alpha target version is explicitly mentioned and approved
 - [ ] (R) Beta target version is explicitly mentioned and approved
-- [x] (R) GA target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
@@ -23,7 +23,7 @@ This VEP proposes adding vendor-data support to the cloud-init NoCloud and Confi
 
 ## Motivation
 
-The cloud-init NoCloud and ConfigDrive datasources support four types of data:
+The cloud-init NoCloud and ConfigDrive datasources support three types of data:
 - **user-data**: User-provided configuration (already supported)
 - **network-data**: Network configuration (already supported)
 - **vendor-data**: Vendor/operator-provided configuration (**not yet supported**)
@@ -86,16 +86,7 @@ The implementation adds three new optional fields to both `CloudInitNoCloudSourc
 
 ```go
 type CloudInitNoCloudSource struct {
-    // Existing fields for user-data
-    UserDataSecretRef    *v1.LocalObjectReference `json:"secretRef,omitempty"`
-    UserDataBase64       string                   `json:"userDataBase64,omitempty"`
-    UserData             string                   `json:"userData,omitempty"`
-    
-    // Existing fields for network-data
-    NetworkDataSecretRef *v1.LocalObjectReference `json:"networkDataSecretRef,omitempty"`
-    NetworkDataBase64    string                   `json:"networkDataBase64,omitempty"`
-    NetworkData          string                   `json:"networkData,omitempty"`
-    
+    ...
     // New fields for vendor-data
     VendorDataSecretRef  *v1.LocalObjectReference `json:"vendorDataSecretRef,omitempty"`
     VendorDataBase64     string                   `json:"vendorDataBase64,omitempty"`
@@ -107,22 +98,19 @@ type CloudInitNoCloudSource struct {
 
 ```go
 type CloudInitConfigDriveSource struct {
-    // Existing fields for user-data
-    UserDataSecretRef    *v1.LocalObjectReference `json:"secretRef,omitempty"`
-    UserDataBase64       string                   `json:"userDataBase64,omitempty"`
-    UserData             string                   `json:"userData,omitempty"`
-    
-    // Existing fields for network-data
-    NetworkDataSecretRef *v1.LocalObjectReference `json:"networkDataSecretRef,omitempty"`
-    NetworkDataBase64    string                   `json:"networkDataBase64,omitempty"`
-    NetworkData          string                   `json:"networkData,omitempty"`
-    
+    ...
     // New fields for vendor-data
     VendorDataSecretRef  *v1.LocalObjectReference `json:"vendorDataSecretRef,omitempty"`
     VendorDataBase64     string                   `json:"vendorDataBase64,omitempty"`
     VendorData           string                   `json:"vendorData,omitempty"`
 }
 ```
+
+### Operational Mechanism
+
+Since `vendorData` is a field on the VM/VMI spec, the standard way for a platform operator to inject it cluster-wide — independently from the VM owner — is through a **MutatingAdmissionPolicy** (or MutatingAdmissionWebhook). The admission controller intercepts VM/VMI creation requests and injects the `vendorData` field before the object is persisted. From the VM owner's perspective, cloud-init simply applies additional platform configuration at boot; they do not need to include vendor-data in their spec at all.
+
+This follows the same Kubernetes-native pattern used for sidecar injection, default tolerations, and resource limits. The vendor-data secret is owned and managed by the cluster admin; VM owners have no access to modify it.
 
 ### Implementation Details
 
@@ -155,52 +143,9 @@ Following the design pattern established in VEP #100 (custom metadata support), 
 
 ## API Examples
 
-### NoCloud Examples
+### Example 1: Platform operator injecting vendor-data via secret (NoCloud)
 
-#### Example 1: Inline vendor-data (NoCloud)
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: my-vm
-spec:
-  template:
-    spec:
-      volumes:
-        - name: cloudinit
-          cloudInitNoCloud:
-            userData: |
-              #cloud-config
-              packages:
-                - nginx
-            vendorData: |
-              #cloud-config
-              packages:
-                - monitoring-agent
-                - security-scanner
-              runcmd:
-                - systemctl enable monitoring-agent
-```
-
-#### Example 2: Base64 encoded vendor-data (NoCloud)
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: my-vm
-spec:
-  template:
-    spec:
-      volumes:
-        - name: cloudinit
-          cloudInitNoCloud:
-            userDataBase64: I2Nsb3VkLWNvbmZpZwpwYWNrYWdlczoKICAtIG5naW54Cg==
-            vendorDataBase64: I2Nsb3VkLWNvbmZpZwpwYWNrYWdlczoKICAtIG1vbml0b3JpbmctYWdlbnQK
-```
-
-#### Example 3: Secret reference for vendor-data (NoCloud)
+A cluster admin creates a secret containing the platform configuration, then a MutatingAdmissionPolicy injects `vendorDataSecretRef` into all VMs at admission time. The VM owner's spec does not need to reference vendor-data at all.
 
 ```yaml
 apiVersion: v1
@@ -229,42 +174,13 @@ spec:
       volumes:
         - name: cloudinit
           cloudInitNoCloud:
-            userDataSecretRef:
-              name: my-user-data
             vendorDataSecretRef:
               name: platform-vendor-data
 ```
 
-#### Example 4: Combined with network-data (NoCloud)
+### Example 2: Platform operator injecting vendor-data via secret (ConfigDrive)
 
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: my-vm
-spec:
-  template:
-    spec:
-      volumes:
-        - name: cloudinit
-          cloudInitNoCloud:
-            userData: |
-              #cloud-config
-              hostname: my-vm
-            networkData: |
-              version: 2
-              ethernets:
-                eth0:
-                  dhcp4: true
-            vendorData: |
-              #cloud-config
-              packages:
-                - qemu-guest-agent
-```
-
-### ConfigDrive Examples
-
-#### Example 5: Inline vendor-data (ConfigDrive)
+Same pattern using the ConfigDrive datasource, where the vendor-data file is written as `vendor_data.json` in the ISO.
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -277,96 +193,8 @@ spec:
       volumes:
         - name: cloudinit
           cloudInitConfigDrive:
-            userData: |
-              #cloud-config
-              packages:
-                - nginx
-            vendorData: |
-              #cloud-config
-              packages:
-                - monitoring-agent
-                - security-scanner
-              runcmd:
-                - systemctl enable monitoring-agent
-```
-
-#### Example 6: Base64 encoded vendor-data (ConfigDrive)
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: my-vm
-spec:
-  template:
-    spec:
-      volumes:
-        - name: cloudinit
-          cloudInitConfigDrive:
-            userDataBase64: I2Nsb3VkLWNvbmZpZwpwYWNrYWdlczoKICAtIG5naW54Cg==
-            vendorDataBase64: I2Nsb3VkLWNvbmZpZwpwYWNrYWdlczoKICAtIG1vbml0b3JpbmctYWdlbnQK
-```
-
-#### Example 7: Secret reference for vendor-data (ConfigDrive)
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: platform-vendor-data
-type: Opaque
-stringData:
-  vendordata: |
-    #cloud-config
-    packages:
-      - monitoring-agent
-    write_files:
-      - path: /etc/platform/config.yaml
-        content: |
-          cluster: production
-          region: us-east-1
----
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: my-vm
-spec:
-  template:
-    spec:
-      volumes:
-        - name: cloudinit
-          cloudInitConfigDrive:
-            userDataSecretRef:
-              name: my-user-data
             vendorDataSecretRef:
               name: platform-vendor-data
-```
-
-#### Example 8: Combined with network-data (ConfigDrive)
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: my-vm
-spec:
-  template:
-    spec:
-      volumes:
-        - name: cloudinit
-          cloudInitConfigDrive:
-            userData: |
-              #cloud-config
-              hostname: my-vm
-            networkData: |
-              version: 2
-              ethernets:
-                eth0:
-                  dhcp4: true
-            vendorData: |
-              #cloud-config
-              packages:
-                - qemu-guest-agent
 ```
 
 ## Alternatives
@@ -422,26 +250,6 @@ This change is fully backward compatible:
 - Existing VMs without vendor-data continue to work unchanged
 - No changes to existing API field semantics
 
-### Rollback Safety
-
-Rolling back KubeVirt to a version without vendor-data support is safe and causes graceful degradation:
-
-**What happens on rollback:**
-- VMs with vendor-data specified in their spec will have those fields ignored by the older KubeVirt version
-- The vendor-data file will not be included in the generated NoCloud or ConfigDrive ISO
-- VMs will boot and function normally, but without vendor-data configuration applied
-- No VM failures, crashes, or data loss will occur
-
-**Why this is safe:**
-- vendor-data is optional configuration; its absence does not prevent VMs from starting
-- Cloud-init gracefully handles missing vendor-data (it simply skips that merge step)
-- VMs retain their user-data, network-data, and meta-data configuration
-- After upgrade back to a vendor-data-capable version, vendor-data will be processed again
-
-**Recommendation:**
-- Platform operators should be aware that vendor-data-dependent configuration (e.g., mandatory monitoring agents) will not be applied to VMs during rollback
-- Consider testing rollback scenarios if vendor-data provides critical platform functionality
-
 ### Upgrade Path
 
 No special upgrade considerations. The feature is additive and optional.
@@ -469,13 +277,7 @@ No special upgrade considerations. The feature is additive and optional.
 
 ### Functional/E2E Tests
 
-1. **VM boot with vendor-data**:
-   - Create VM with vendor-data (NoCloud)
-   - Create VM with vendor-data (ConfigDrive)
-   - Verify VM boots successfully
-   - Verify cloud-init processes vendor-data
-
-2. **Vendor-data content verification**:
+1. **Vendor-data content verification**:
    - Create VM with known vendor-data content
    - Verify vendor-data file exists in NoCloud/ConfigDrive ISO
    - Verify content matches what was specified
@@ -493,22 +295,9 @@ No special upgrade considerations. The feature is additive and optional.
 
 ## Graduation Requirements
 
-### GA
+### Alpha
 
-**Rationale for direct GA graduation:**
-
-This enhancement proposes direct GA graduation without an Alpha/Beta phase. The rationale includes:
-
-- **Simple, additive API changes**: Three optional fields (`VendorData`, `VendorDataBase64`, `VendorDataSecretRef`) following established patterns for user-data and network-data, added to both NoCloud and ConfigDrive
-- **Built-in resource protection**: Content size limits (256 KB maximum) enforced through API validation
-- **Low risk nature**: 
-  - Optional fields with no impact on existing VMs
-  - Identical processing pattern to user-data (proven at scale)
-  - Graceful rollback behavior (VMs boot without vendor-data)
-- **Well-understood functionality**: Vendor-data is a standard cloud-init feature with established semantics
-- **No feature gate needed**: Simple extension of existing cloud-init support; no experimental behavior or complex interactions
-
-**GA Requirements:**
+**Alpha Requirements:**
 - [x] Implementation complete with all three input methods (inline, base64, secret ref) for NoCloud
 - [x] Implementation complete with all three input methods (inline, base64, secret ref) for ConfigDrive
 - [x] Content size validation enforced in API (256 KB limit)
@@ -516,7 +305,11 @@ This enhancement proposes direct GA graduation without an Alpha/Beta phase. The 
 - [ ] VEP approved and merged
 - [ ] Code PR approved and merged
 - [ ] Functional e2e tests added and passing
-- [ ] Documentation updated in kubevirt/user-guide
+
+### GA
+
+**GA Requirements (future, pending real-world adoption):**
 - [ ] Stable for at least 2 releases
-- [ ] No breaking changes required
 - [ ] Positive feedback from adopters
+- [ ] Documentation updated in kubevirt/user-guide
+- [ ] No breaking changes required
