@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.6
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [X] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -315,8 +315,18 @@ Maintain backwards compatibility with existing live migrations.
 
 Including feature gate.
 
+Alpha is complete, moving to beta
+
+
 ### Beta
 API is mature and stable and maintains backwards compatilibity with existing live migrations.
+Stable defined as:
+- [Revert disabling expectations in the decentralized live migration flows](https://github.com/kubevirt/kubevirt/pull/15117)
+- Unquarantine cancellation flaky tests:
+-- `should be able to cancel a migration by deleting the migration resource` delete source migration
+-- `should be able to cancel a migration by deleting the migration resource` delete target migration
+
+Current phase
 
 ### GA
 Remove feature gate
