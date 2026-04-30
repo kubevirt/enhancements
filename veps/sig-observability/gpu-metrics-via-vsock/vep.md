@@ -44,7 +44,7 @@ alerting.
 
 - Expose per-VM, per-GPU utilization metrics as Prometheus metrics from the observability-controller.
 - Support both GPU passthrough and vGPU devices.
-- Support Linux and Windows guests.
+- Support Linux guests.
 - Leverage DCGM's native VSOCK support to avoid maintaining a custom guest agent.
 - Integrate with the unified `GetVMStats` gRPC call rather than introducing a separate RPC.
 
@@ -54,6 +54,7 @@ alerting.
 - Supporting non-NVIDIA GPUs (AMD, Intel) in the initial implementation.
 - Alerting rules or Grafana dashboards (these can be added separately).
 - Collecting GPU metrics from the host side (e.g., via DCGM on the host).
+- Windows guest support (see [Future Work](#future-work)).
 
 ## Definition of Users
 
@@ -101,10 +102,27 @@ Guest VM (QEMU)                     virt-launcher                      virt-hand
                                     +----------------------------+     +---------------------+     +-------------------------+
 ```
 
-### 1. Prerequisites: VSOCK Enablement
+### 1. Opting In: Annotation and VSOCK Enablement
 
-Users must enable VSOCK on the VM spec to allow guest-host communication. VSOCK (`AF_VSOCK`) is a socket address family for guest-host
-communication using the virtio-vsock transport. KubeVirt already has VSOCK support with per-VMI CID assignment by virt-controller.
+Users must annotate the VM to enable GPU metrics collection and enable VSOCK on the VM spec. The annotation
+`kubevirt.io/gpu-metrics-collector` signals to virt-launcher that it should connect to DCGM via VSOCK and collect GPU metrics. Without this
+annotation, virt-launcher does not attempt any GPU metrics collection, regardless of whether the VM has GPUs or VSOCK enabled.
+
+```yaml
+annotations:
+  kubevirt.io/gpu-metrics-collector: "dcgm-vsock"
+```
+
+The annotation serves three purposes:
+
+1. **virt-launcher trigger**: virt-launcher only attempts DCGM VSOCK connections on VMIs carrying this annotation, avoiding unnecessary
+connection attempts and timeouts on VMs with non-NVIDIA GPUs or VMs where DCGM is not installed.
+2. **virt-api VSOCK conflict warning**: virt-api can check for this annotation and warn users when they attempt to use VSOCK via the
+KubeVirt client (`virtctl vsock`) that the VSOCK device is also in use for GPU metrics collection on the DCGM port.
+3. **Explicit opt-in**: Keeps GPU metrics collection strictly opt-in, making it clear which VMs are participating.
+
+Users must also enable VSOCK on the VM spec. VSOCK (`AF_VSOCK`) is a socket address family for guest-host communication using the
+virtio-vsock transport. KubeVirt already has VSOCK support with per-VMI CID assignment by virt-controller.
 
 DCGM 4.5.0 added native support for listening on the VSOCK protocol. The DCGM daemon (`nv-hostengine`) inside the guest can be configured
 to listen on a VSOCK port, allowing virt-launcher on the host to connect and query GPU metrics using DCGM's client protocol. This provides
@@ -119,6 +137,21 @@ proper socket semantics including flow control and connection state detection.
 **Downsides:**
 - Requires Linux kernel 4.8+ in the guest; older kernels have no support.
 - Windows guests require virtio-win drivers with VSOCK support.
+
+**Shared VSOCK usage:**
+
+KubeVirt already uses VSOCK for two purposes: an internal gRPC service on VSOCK port 1 for TLS certificate distribution to guests, and
+user-initiated port-forwarding via `virtctl vsock`. GPU metrics collection adds another consumer on the same virtio-vsock device.
+Limitations to be aware of:
+
+- **Bandwidth sharing**: All VSOCK traffic (KubeVirt internal, `virtctl vsock`, and DCGM metrics) shares a single virtio-vsock device per
+VM. There is no QoS or prioritization between consumers.
+- **No connection isolation**: VSOCK multiplexes connections by port number on the same device.
+- **Port management**: DCGM must listen on a VSOCK port that does not conflict with port 1 (reserved by KubeVirt for its internal gRPC
+service) or other guest services listening on VSOCK.
+
+In practice, the GPU metrics payload is small (a few KB per scrape) and collected at most once every 3.25 seconds, so contention is unlikely
+under normal operation.
 
 ### 2. Guest: DCGM with VSOCK
 
@@ -137,10 +170,11 @@ GPU metrics are integrated into the `GetVMStats` gRPC handler introduced by [VEP
 A new `GpuStatsRequest` / `gpuStats` field is added to `VMStatsRequest` / `VMStatsResponse`, following the same pattern as the other data
 categories (domain stats, guest info, filesystems, etc.).
 
-**DomainManager (`LibvirtDomainManager`)**: A `gpuMetricsCache` (`TimeDefinedCache[string]`, 3250ms TTL) caches the metrics from DCGM.
-The recalculation function (`scrapeGPUMetrics`) connects to the guest's DCGM via VSOCK (using the VMI's CID and a well-known port), queries
-GPU metrics through the DCGM client protocol, and returns the response. This follows the same caching pattern as `domainStatsCache` for
-domain stats.
+**DomainManager (`LibvirtDomainManager`)**: When the VMI carries the `kubevirt.io/gpu-metrics-collector: "dcgm-vsock"` annotation,
+a `gpuMetricsCache` (`TimeDefinedCache[string]`, 3250ms TTL) caches the metrics from DCGM. The recalculation function
+(`scrapeGPUMetrics`) connects to the guest's DCGM via VSOCK (using the VMI's CID and a well-known port), queries GPU metrics through the
+DCGM client protocol, and returns the response. This follows the same caching pattern as `domainStatsCache` for domain stats. If the
+annotation is absent, no VSOCK connection is attempted.
 
 **GetVMStats handler**: When the caller includes `GpuStatsRequest` in the `VMStatsRequest`, the handler reads from `gpuMetricsCache` and
 populates the `gpuStats` field in the response. This keeps GPU metrics collection consistent with the unified monitoring data pipeline.
@@ -187,6 +221,8 @@ apiVersion: kubevirt.io/v1
 kind: VirtualMachineInstance
 metadata:
   name: gpu-workload
+  annotations:
+    kubevirt.io/gpu-metrics-collector: "dcgm-vsock"
 spec:
   domain:
     devices:
@@ -293,9 +329,9 @@ virt-handler and virt-launcher.
 - VSOCK must be enabled per-VMI by the user. Once the `GPUMetrics` feature gate is implemented, disabling it or rolling back will stop GPU
 metrics collection for new VMIs; existing running VMIs are unaffected.
 - This VEP depends on the `GetVMStats` RPC from VEP #143. If VEP #143 is not yet implemented, GPU metrics cannot be collected.
-- DCGM inside the guest is an opt-in installation by the VM user. If DCGM is not installed or not listening on VSOCK, virt-launcher returns
-empty `gpuStats` and no GPU metrics are emitted for that VMI.
-- No API changes beyond requiring `autoattachVSOCK: true`; no migration compatibility concerns.
+- GPU metrics collection is opt-in via the `kubevirt.io/gpu-metrics-collector` annotation. If the annotation is absent, DCGM is not
+installed, or VSOCK is not enabled, virt-launcher returns empty `gpuStats` and no GPU metrics are emitted for that VMI.
+- No API changes beyond the annotation and requiring `autoattachVSOCK: true`; no migration compatibility concerns.
 
 ## Functional Testing Approach
 
@@ -303,6 +339,13 @@ empty `gpuStats` and no GPU metrics are emitted for that VMI.
 - **Unit tests**: Test VSOCK connection setup for VMIs with GPU devices and VSOCK enabled vs. absent.
 - **Integration tests**: Start a VMI with a mock DCGM VSOCK listener, verify `kubevirt_vmi_gpu_*` metrics are emitted from the
 observability-controller metrics endpoint.
+
+## Future Work
+
+### Windows Guest Support
+
+Windows VSOCK driver support was added recently in virtio-win build 285. Once the driver matures and DCGM's VSOCK support on Windows is
+validated, Windows guest support can be added as a follow-up.
 
 ## Implementation History
 
@@ -319,7 +362,6 @@ observability-controller metrics endpoint.
 
 ### Beta
 
-- [ ] Windows guest support validated
 - [ ] Integration tests with mock DCGM VSOCK listener in kubevirtci
 - [ ] Prometheus recording rules and/or alerts for common GPU failure scenarios
 - [ ] DCGM version compatibility validated (minimum version requirements documented)
