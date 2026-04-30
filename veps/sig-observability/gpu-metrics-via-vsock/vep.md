@@ -24,8 +24,9 @@ GPU utilization, memory usage, temperature, power consumption, or error counts f
 
 This VEP introduces a mechanism for collecting GPU metrics from inside the guest and exposing them as Prometheus metrics on the host. NVIDIA
 DCGM (Data Center GPU Manager) 4.5.0 added native support for listening on the VSOCK protocol, enabling direct guest-to-host communication
-without a custom guest agent. virt-launcher connects to DCGM inside the guest via VSOCK, and virt-handler scrapes virt-launcher on each
-Prometheus collection cycle to produce `kubevirt_vmi_gpu_*` metrics.
+without a custom guest agent. virt-launcher connects to DCGM inside the guest via VSOCK and exposes the GPU metrics data through the unified
+`GetVMStats` gRPC call ([VEP #143](https://github.com/kubevirt/enhancements/pull/81)). virt-handler queries virt-launcher via `GetVMStats`,
+and the observability-controller queries virt-handler to produce `kubevirt_vmi_gpu_*` metrics.
 
 ## Motivation
 
@@ -41,10 +42,11 @@ alerting.
 
 ## Goals
 
-- Expose per-VM, per-GPU utilization metrics as Prometheus metrics from virt-handler.
+- Expose per-VM, per-GPU utilization metrics as Prometheus metrics from the observability-controller.
 - Support both GPU passthrough and vGPU devices.
 - Support Linux and Windows guests.
 - Leverage DCGM's native VSOCK support to avoid maintaining a custom guest agent.
+- Integrate with the unified `GetVMStats` gRPC call rather than introducing a separate RPC.
 
 ## Non Goals
 
@@ -76,34 +78,33 @@ hardware failure.
 ## Repos
 
 - https://github.com/kubevirt/kubevirt
+- https://github.com/kubevirt/kubevirt-observability-controller
 
 ## Design
 
-The design has three components spanning three processes:
+The design integrates GPU metrics into the existing monitoring data pipeline established by
+[VEP #143](https://github.com/kubevirt/enhancements/pull/81). GPU metrics become a new data category within the unified `GetVMStats` gRPC
+call, following the same pattern as domain stats, guest info, and filesystem data.
 
 ```
-Guest VM (QEMU)                     virt-launcher                         virt-handler
-+--------------------------+        +-------------------------------+     +---------------------------+
-|                          |        |  DomainManager                |     |                           |
-|                          |        |    gpuMetricsCache            |     |                           |
-|  DCGM (nv-hostengine)   |        |      TimeDefinedCache (3.25s) |     |                           |
-|  - collects GPU metrics  | <====> |    scrapeGPUMetrics()         |     |  domainstats scraper      |
-|  - listens on VSOCK      | vsock  |                               |     |  - GetDomainStats()       |
-|                          |        |  cmd-server (gRPC)            |     |  - GetFilesystems()       |
-+--------------------------+        |    GetGPUMetrics() RPC        | <-- |  - GetGPUMetrics()        |
-                                    +-------------------------------+     |                           |
-                                                                          |  resourceMetrics:         |
-                                                                          |    gpuMetrics.Collect()   |
-                                                                          |    → kubevirt_vmi_gpu_*   |
-                                                                          +---------------------------+
+Guest VM (QEMU)                     virt-launcher                      virt-handler                observability-controller
++--------------------------+        +----------------------------+     +---------------------+     +-------------------------+
+|                          |        |                            |     |                     |     |                         |
+|  DCGM (nv-hostengine)   |         |  DomainManager             |     |                     |     |                         |
+|  - collects GPU metrics  | <====> |    gpuMetricsCache         |     |                     |     |                         |
+|  - listens on VSOCK      | vsock  |      TimeDefinedCache      |     |                     |     |                         |
+|                          |        |    scrapeGPUMetrics()      |     |                     |     |  queries virt-handler   |
++--------------------------+        |                            |     |  GetVMStats()       | <-- |  for all VMI data       |
+                                    |  cmd-server (gRPC)         |     |   includes gpuStats |     |                         |
+                                    |    GetVMStats() handler    | <-- |                     |     |  emits:                 |
+                                    |      includes gpuStats     |     |                     |     |    kubevirt_vmi_gpu_*   |
+                                    +----------------------------+     +---------------------+     +-------------------------+
 ```
 
-### 1. Guest-Host Communication
+### 1. Prerequisites: VSOCK Enablement
 
-#### VSOCK (chosen)
-
-VSOCK (`AF_VSOCK`) is a socket address family for guest-host communication using the virtio-vsock transport. KubeVirt already has VSOCK
-support with per-VMI CID assignment by virt-controller.
+Users must enable VSOCK on the VM spec to allow guest-host communication. VSOCK (`AF_VSOCK`) is a socket address family for guest-host
+communication using the virtio-vsock transport. KubeVirt already has VSOCK support with per-VMI CID assignment by virt-controller.
 
 DCGM 4.5.0 added native support for listening on the VSOCK protocol. The DCGM daemon (`nv-hostengine`) inside the guest can be configured
 to listen on a VSOCK port, allowing virt-launcher on the host to connect and query GPU metrics using DCGM's client protocol. This provides
@@ -122,7 +123,7 @@ proper socket semantics including flow control and connection state detection.
 ### 2. Guest: DCGM with VSOCK
 
 NVIDIA DCGM runs inside the guest VM as the GPU metrics provider. The DCGM daemon (`nv-hostengine`) is configured to listen on a VSOCK
-port, accepting connections from the host.
+port, accepting connections from the host. Users are responsible for installing and configuring DCGM in the guest.
 
 DCGM collects GPU metrics via NVML and exposes them through its client API. The guest only needs DCGM installed and configured to listen
 on VSOCK; no additional KubeVirt-specific agent is required.
@@ -130,35 +131,33 @@ on VSOCK; no additional KubeVirt-specific agent is required.
 The metrics collected from DCGM include GPU utilization, memory usage, temperature, power consumption, ECC errors, encoder/decoder
 utilization, and running process counts.
 
-### 3. virt-launcher: DomainManager and gRPC
+### 3. virt-launcher: GPU Metrics in GetVMStats
 
-Two layers handle GPU metrics on the virt-launcher side:
+GPU metrics are integrated into the `GetVMStats` gRPC handler introduced by [VEP #143](https://github.com/kubevirt/enhancements/pull/81).
+A new `GpuStatsRequest` / `gpuStats` field is added to `VMStatsRequest` / `VMStatsResponse`, following the same pattern as the other data
+categories (domain stats, guest info, filesystems, etc.).
 
 **DomainManager (`LibvirtDomainManager`)**: A `gpuMetricsCache` (`TimeDefinedCache[string]`, 3250ms TTL) caches the metrics from DCGM.
 The recalculation function (`scrapeGPUMetrics`) connects to the guest's DCGM via VSOCK (using the VMI's CID and a well-known port), queries
 GPU metrics through the DCGM client protocol, and returns the response. This follows the same caching pattern as `domainStatsCache` for
 domain stats.
 
-**cmd-server (`GetGPUMetrics` RPC)**: A new `GetGPUMetrics` method on the `Cmd` gRPC service delegates to `DomainManager.GetGPUMetrics()`,
-which returns the cached value. This follows the same pattern as `GetDomainStats`, keeping the cmd-server thin.
+**GetVMStats handler**: When the caller includes `GpuStatsRequest` in the `VMStatsRequest`, the handler reads from `gpuMetricsCache` and
+populates the `gpuStats` field in the response. This keeps GPU metrics collection consistent with the unified monitoring data pipeline.
 
-### 4. Prometheus Collector (virt-handler)
+### 4. virt-handler: Requesting GPU Stats
 
-GPU metrics are collected as part of the existing **domainstats** collector, following the same `resourceMetrics` pattern used for CPU,
-memory, block, network, and filesystem metrics. No separate collector is needed.
+virt-handler includes `GpuStatsRequest` when calling `GetVMStats` on each virt-launcher. The GPU metrics data is returned alongside domain
+stats and other monitoring data in the same `GetVMStats` response.
 
-On each Prometheus scrape, the domainstats scraper:
+### 5. observability-controller: Emitting Prometheus Metrics
 
-1. Connects to each VMI's virt-launcher via its cmd-client socket (same as for domain stats).
-2. Calls `cli.GetGPUMetrics()` alongside `GetDomainStats()` and `GetFilesystems()` within the same scrape.
-3. Parses the response into `GPUMetricsResponse` and stores it in `VirtualMachineInstanceStats.GPUStats`.
-4. The `gpuMetrics` resource metrics implementation emits collector results for each GPU device.
+The observability-controller ([VEP #143](https://github.com/kubevirt/enhancements/pull/81)) queries virt-handler to collect runtime VM data.
+GPU metrics are collected as part of this existing flow. The controller parses the `gpuStats` data from `GetVMStats` responses and emits
+`kubevirt_vmi_gpu_*` Prometheus metrics.
 
-GPU metric scrape failures are logged at warning verbosity and do not block the rest of the domain stats collection. If DCGM is not
-installed or not running inside the guest, `GPUStats` is nil and no GPU metrics are emitted for that VMI.
-
-This approach reuses the existing `ConcurrentCollector` infrastructure (concurrency limiting, per-VMI timeouts, socket discovery) rather
-than duplicating it.
+The `gpuMetrics` resource metrics implementation emits collector results for each GPU device found in the response. This follows the same
+`resourceMetrics` pattern used for CPU, memory, block, network, and filesystem metrics.
 
 ### Metrics Emitted
 
@@ -181,7 +180,7 @@ All per-device metrics carry labels: `node`, `namespace`, `name`, `gpu_index`, `
 
 ## API Examples
 
-No changes to the KubeVirt API are required. The setup is enabled when GPUs are present in the VMI spec:
+Users must enable VSOCK on the VM spec and have DCGM installed and listening on VSOCK inside the guest:
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -191,6 +190,7 @@ metadata:
 spec:
   domain:
     devices:
+      autoattachVSOCK: true
       gpus:
         - name: gpu1
           deviceName: nvidia.com/A100
@@ -268,30 +268,41 @@ security is handled by KubeVirt. Exposing DCGM on a network interface shifts
 this responsibility to the user, who must secure DCGM against access from other
 sources.
 
+### Dedicated GetGPUMetrics gRPC RPC
+
+A separate `GetGPUMetrics` RPC on the `Cmd` gRPC service, called by virt-handler alongside `GetDomainStats` and `GetFilesystems`.
+
+**Rejected because:**
+- VEP #143 introduces a unified `GetVMStats` RPC that consolidates all monitoring data into a single call. Adding a separate RPC for GPU
+metrics would work against that consolidation goal.
+- GPU metrics fit naturally as a new data category within `GetVMStats`, following the same pattern as domain stats, guest info, and
+filesystems.
+
 ## Scalability
 
-- **Caching**: GPU metrics are cached in virt-launcher with a 3.25-second TTL, so multiple Prometheus scrapes within that window reuse the
-same data without reconnecting to DCGM.
-- **Concurrency**: GPU metrics are fetched as part of the existing domainstats scraper, which scrapes all VMIs in parallel using the
-`ConcurrentCollector` infrastructure.
+- **Caching**: GPU metrics are cached in virt-launcher with a 3.25-second TTL, so multiple scrapes within that window reuse the same data
+without reconnecting to DCGM.
+- **Unified collection**: GPU metrics are fetched as part of the `GetVMStats` call, adding no additional gRPC round-trips between
+virt-handler and virt-launcher.
 - **No persistent connections**: The host does not maintain long-lived connections to DCGM in the guest.
-- **Scale**: Comparable to the existing domain stats and filesystem stats collection, which already scrape per-VMI data on each Prometheus
-collection.
+- **Scale**: Comparable to the existing domain stats and filesystem stats collection, which already collect per-VMI data as part of
+`GetVMStats`.
 
 ## Update/Rollback Compatibility
 
-- VSOCK is enabled per-VMI via KubeVirt's existing VSOCK infrastructure. Once the `GPUMetrics` feature gate is implemented, disabling it or
-rolling back will stop GPU metrics collection for new VMIs; existing running VMIs are unaffected.
-- DCGM inside the guest is an opt-in installation by the VM user. If DCGM is not installed or not listening on VSOCK, virt-handler logs
-a connection failure and emits no GPU metrics for that VMI.
-- No API changes; no migration compatibility concerns.
+- VSOCK must be enabled per-VMI by the user. Once the `GPUMetrics` feature gate is implemented, disabling it or rolling back will stop GPU
+metrics collection for new VMIs; existing running VMIs are unaffected.
+- This VEP depends on the `GetVMStats` RPC from VEP #143. If VEP #143 is not yet implemented, GPU metrics cannot be collected.
+- DCGM inside the guest is an opt-in installation by the VM user. If DCGM is not installed or not listening on VSOCK, virt-launcher returns
+empty `gpuStats` and no GPU metrics are emitted for that VMI.
+- No API changes beyond requiring `autoattachVSOCK: true`; no migration compatibility concerns.
 
 ## Functional Testing Approach
 
-- **Unit tests**: Test the collector callback with mock VSOCK responses (success, error, timeout, DCGM not running).
-- **Unit tests**: Test VSOCK connection setup for VMIs with GPU devices present vs. absent.
-- **Integration tests**: Start a VMI with a mock DCGM VSOCK listener, verify `kubevirt_vmi_gpu_*` metrics are emitted from the virt-handler
-metrics endpoint.
+- **Unit tests**: Test the GPU stats handler within `GetVMStats` with mock VSOCK responses (success, error, timeout, DCGM not running).
+- **Unit tests**: Test VSOCK connection setup for VMIs with GPU devices and VSOCK enabled vs. absent.
+- **Integration tests**: Start a VMI with a mock DCGM VSOCK listener, verify `kubevirt_vmi_gpu_*` metrics are emitted from the
+observability-controller metrics endpoint.
 
 ## Implementation History
 
@@ -300,10 +311,11 @@ metrics endpoint.
 ### Alpha
 
 - [ ] Feature gate `GPUMetrics` guards all code changes
-- [ ] virt-launcher connects to guest DCGM via VSOCK and queries GPU metrics
-- [ ] virt-handler collector scrapes virt-launcher and emits Prometheus metrics
-- [ ] Unit tests for collector, VSOCK connection, and DCGM protocol handling
-- [ ] Documentation for installing and configuring DCGM with VSOCK in the guest
+- [ ] `GpuStatsRequest` / `gpuStats` field added to `GetVMStats` proto messages (depends on VEP #143)
+- [ ] virt-launcher connects to guest DCGM via VSOCK and populates `gpuStats` in `GetVMStats` response
+- [ ] observability-controller parses GPU stats and emits Prometheus metrics
+- [ ] Unit tests for GPU stats collection, VSOCK connection, and DCGM protocol handling
+- [ ] Documentation for enabling VSOCK and installing/configuring DCGM in the guest
 
 ### Beta
 
