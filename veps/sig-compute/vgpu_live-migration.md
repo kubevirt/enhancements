@@ -4,9 +4,18 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
-- This VEP targets GA for version:
+<!--
+A PR must update this section during the planning phase of a given release in order to track it.
+PRs that will not update the VEP during the planning phase will not be able to graduate the
+VEP by creating a code PR to kubevirt/kubevirt to bump the phase in-code.
+
+Please avoid targeting future releases in this section. Only capture the upcoming release.
+For example, during the planning phase for version v1.123, do **not** target beta for v.124 in advance.
+-->
+
+- This VEP targets alpha for version: v1.9
+- This VEP targets beta for version: TBD
+- This VEP targets GA for version: TBD
 
 ### Release Signoff Checklist
 
@@ -19,7 +28,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-This is a proposal to allow live migrations in KubeVirt to work for VMs with a single NVIDIA vGPU, exposed by mdev, between two nodes in the same cluster with identical GPUs and GPU drivers.
+This is a proposal to allow live migrations in KubeVirt to work for VMs with a single NVIDIA vGPU, exposed by mdev, between two nodes in the same cluster with identical GPUs, matching ECC memory configurations, and compatible GPU drivers.
 
 ## Motivation
 
@@ -53,7 +62,15 @@ https://github.com/kubevirt/kubevirt
 
 ## Design
 
-For Alpha, GPU driver versions on all worker nodes must be identical. The migration will not be successful if there is a version mismatch, so users must ensure this. This will be addressed and updated during Beta.
+### NVIDIA vGPU Migration Requirements
+
+KubeVirt live migration relies on NVIDIA's underlying support, which has the following requirements as documented in [vGPU Migration Support (RHEL with KVM release notes)](https://docs.nvidia.com/vgpu/latest/grid-vgpu-release-notes-red-hat-el-kvm/index.html#vgpu-migration-support):
+* **Virtual GPU Manager:** Must be identical across source and destination on RHEL KVM 9.4. From 9.6 onward, different versions are supported (unless NVIDIA states otherwise in release notes).
+* **ECC Memory:** Must be configured identically (both enabled or disabled) on source and destination GPUs.
+* **Guest Drivers:** Must be compatible with the host Virtual GPU Manager.
+* **Limitations:** Migration will fail for GPUs with a GPU System Processor (GSP) or if the guest has CUDA unified memory, debuggers, or profilers enabled.
+
+For Alpha, KubeVirt requires identical Virtual GPU Manager versions and ECC settings across all nodes to satisfy the strictest NVIDIA requirements. This simplifies scheduling and will be addressed during Beta.
 
 [VEP 141](https://github.com/kubevirt/enhancements/issues/141) introduces a feature gate in KubeVirt, TargetSideMigrationHooks, to register and write QEMU hooks for the target `virt-launcher`. We will use this new infrastructure to mutate the domain XML with the updated mdev UUID, which will be the one assigned to the target `virt-launcher` by `gpu.CreateHostDevices()` in `manager.go`. VGPU live migration will only be available with the TargetSideMigrationHooks feature gate enabled. 
 
@@ -116,13 +133,14 @@ N/A
 
 * Implement basic functionality and testing.
 * Limitations
-    * Users must ensure all worker nodes have identical GPU driver versions since KubeVirt will not take this into account when scheduling the migration
+    * Users must ensure all worker nodes have identical NVIDIA Virtual GPU Manager versions and matching GPU ECC configurations.
+    * Users must comply with NVIDIA's other migration limitations (e.g., no GSP GPUs, no CUDA unified memory in the guest).
     * KubeVirt is unable to estimate the maximum period for the migration. Use a hard limit that is equal to the existing   calculated values (which ignore gpu info)
 * Figure out how to handle any data loss during the migration.
 
 ### Beta
 
-* No longer require users to ensure all worker nodes have identical GPU driver versions. KubeVirt will take driver version into account when scheduling the migration
+* KubeVirt will take hypervisor OS, Virtual GPU Manager version, and ECC configuration into account when scheduling migrations, relaxing the identical version requirement where NVIDIA allows (e.g., RHEL KVM 9.6+).
 * Find a way to estimate the maximum period for the migration 
 * Needs [VEP 141](https://github.com/kubevirt/enhancements/issues/141) to be in Beta.
 
