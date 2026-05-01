@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.7
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.9
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
   - [+] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
   - [x] (R) Alpha target version is explicitly mentioned and approved
-  - [ ] (R) Beta target version is explicitly mentioned and approved
+  - [x] (R) Beta target version is explicitly mentioned and approved
   - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -280,6 +280,7 @@ Note: This transition is not part of this VEP. This VEP focuses exclusively on e
 ### Beta
 
 - **Feature Gate**: `UtilityVolumes` feature gate enabled by default
+- **Migrate memory dump to use `utilityVolumes`** - Change memory dump API to use `utilityVolumes` API instead of regular volume hotplug.
 - **Maturity Criteria**: Feature has been tested and proven stable in real-world scenarios for at least one release
 
 ### GA
