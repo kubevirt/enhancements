@@ -7,7 +7,7 @@ Implement support for IBM Z Secure Execution VMs in kubevirt
 
 - This VEP targets alpha for version: v1.6
 - This VEP targets beta for version: v1.7
-- This VEP targets GA for version:
+- This VEP targets GA for version: v1.9
 
 ## Motivation
 To enable customers to deploy secure workloads on their IBM Z machines using kubevirt.
