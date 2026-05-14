@@ -14,6 +14,8 @@ At present KubeVirt can only be used to create and manage virtual machines (VMs)
 
 Therefore, to maximize the adoption of alternative virtualization stacks within KubeVirt, the most preferable design is to decouple it entirely from the underlying virtualization stack components - and make the virt-stack pluggable. Core KubeVirt would provide the orchestration-related functionalities and offload virtualization-related functionalities to the plugin.
 
+This VEP is a continuation of the discussion carried out in a previous VEP: https://github.com/kubevirt/enhancements/pull/83
+
 ## Motivation
 
 There are multiple reasons to decouple KubeVirt from the underlying virtualization stack components.
@@ -93,3 +95,30 @@ The proposed plugin-based virtualization stack architecture is intended for adva
 - Additional repositories containing implementation of plugin components (e.g., virt-launcher and admission webhooks) for alternative virtualization stacks.
 
 
+## Proposed Design
+
+This VEP defines the top-level design direction for introducing a plugin-based virtualization stack model in KubeVirt. Because this effort requires a broad refactoring of tightly coupled areas in the KubeVirt codebase, it is not practical to capture all detailed design changes in a single document.
+
+Therefore, this VEP serves as a tracking VEP for a set of smaller, focused VEPs. Each of those VEPs will propose and document the detailed design for one specific area of tight coupling in KubeVirt (for example, virt-launcher interfaces, domain representation, node capability discovery, and control-plane assumptions).
+
+The intent is to keep this document focused on overall architecture and coordination, while delegating implementation-level design details to targeted follow-up VEPs.
+
+### Pluggable Node Labeler
+
+TBD
+
+### Refactoring Virt-Launcher to make it pluggable
+
+TBD
+
+### Pluggable Admission Webhooks
+
+TBD
+
+### Pluggable Virt-Handler Runtime
+
+TBD
+
+### Pluggable LauncherHypervisorResources for `virt-launcher` rendering by `virt-controller`
+
+TBD
