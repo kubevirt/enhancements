@@ -237,11 +237,21 @@ spec:
 
 ## Implementation Phases
 
-1. Define and document the versioned `NodeLabeller` RPC API.
-2. Implement plugin registration and discovery in virt-handler using the well-known UNIX socket.
-3. Add `KubeVirtConfiguration` virtstack declarations and deployment wiring for node-labeller plugins.
-4. Implement label prefixing in virt-handler using virtstack IDs and add collision/conflict handling.
-5. Keep default Libvirt/QEMU/KVM behavior as the fallback path.
+1. Define the NodeLabeller API contract and versioning model. This phase establishes protobuf message schemas, RPC method semantics, and registration payload fields so plugins and virt-handler have a stable, testable interface with explicit compatibility rules.
+
+2. Implement plugin registration and lifecycle management in virt-handler. This phase adds the well-known UNIX socket registration endpoint, tracks plugin liveness and reconnects, and enforces deterministic one-active-plugin-per-virtstack behavior on each node.
+
+3. Build the label synthesis pipeline in virt-handler. This phase converts plugin RPC output into node labels, enforces virtstack-based label prefixing, and implements idempotent reconciliation and cleanup so stale labels do not persist after plugin failures or removals.
+
+4. Extend KubeVirtConfiguration and add admission validation. This phase introduces per-virtstack plugin deployment fields in the API and a validating webhook that rejects duplicate virtualization profile IDs and malformed plugin declarations.
+
+5. Add virt-operator reconciliation for per-virtstack DaemonSets. This phase maps each declared virtstack to one managed DaemonSet, renders required socket and device mounts including the hypervisor char device, and supports safe rolling updates for plugin image or config changes.
+
+6. Preserve default-stack behavior and upgrade safety. This phase ensures clusters without plugin declarations continue using the existing Libvirt/QEMU/KVM labeling path and that upgrades do not regress existing node-label semantics.
+
+7. Execute comprehensive validation and hardening. This phase covers unit, integration, end-to-end, and performance testing for multi-plugin registration, failure handling, conflict behavior, reconciliation correctness, and API server write impact.
+
+8. Finalize operational readiness and graduation gates. This phase adds observability signals, operator-facing troubleshooting guidance, and explicit Alpha/Beta exit criteria for stability and correctness in multi-virtstack deployments.
 
 ## KubeVirtConfiguration Validation
 
@@ -266,11 +276,8 @@ This deployment pattern is also aligned with the expected plugin needed for runt
 
 ## Feature Lifecycle Phases
 
-### Alpha
-- Initial implementation of the `NodeLabeller` RPC contract, plugin registration flow, and default Libvirt/QEMU/KVM node-labeller plugin path.
+1. **Alpha**: Introduce the versioned `NodeLabeller` RPC contract, node-local plugin registration and discovery in virt-handler, and operator-managed DaemonSet deployment for declared virtstacks while preserving the default Libvirt/QEMU/KVM fallback behavior.
 
-### Beta
-- Feedback-driven hardening of registration/discovery and support for at least one additional virtstack-specific node-labeller plugin.
+2. **Beta**. Harden multi-plugin behavior based on real-world feedback, including conflict resolution, degraded-mode handling, upgrade safety, and observability, and validate support for at least one additional non-default virtstack plugin.
 
-### GA
-- Stable API, registration semantics, and operational guidance for multi-virtstack deployments.
+3. **GA**. Promote the API and operational model to stable with documented compatibility guarantees, mature day-2 guidance, and proven correctness/performance for multi-virtstack node labeling at production scale.
