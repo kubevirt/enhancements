@@ -119,6 +119,7 @@ This yields the following relationship:
   - Registration against virt-handler's well-known UNIX socket.
   - Serving the plugin's own endpoint UNIX socket.
   - Read-only host introspection paths needed by the plugin.
+  - The virtstack-specific hypervisor device declared in configuration (for example, `/dev/kvm`).
 - On startup, each plugin registers the following with virt-handler:
   - `virtstackID`
   - supported RPC API version
@@ -126,6 +127,12 @@ This yields the following relationship:
 - virt-handler connects to all registered plugin endpoints on the node and executes the `NodeLabeller` RPCs.
 - Label writes are always prefixed by virtstack ID to avoid collisions.
 - If duplicate registrations are observed for the same virtstack ID on a node, virt-handler applies deterministic conflict resolution and keeps a single active registration.
+
+#### Declaring Hypervisor Device Access
+
+- Each virtstack declaration in `KubeVirtConfiguration` includes the host device path required by that virtstack's node-labeller plugin.
+- virt-operator projects that path into the reconciled DaemonSet as a `hostPath` volume of type `CharDevice` and mounts it into the plugin container at the same path.
+- This keeps device requirements declarative and per-virtstack, while avoiding hardcoded device paths in virt-operator logic.
 
 #### CRD YAML Skeleton
 
@@ -138,6 +145,8 @@ spec:
   configuration:
     virtualizationProfiles:
     - id: qemu-kvm
+      virtualizationComponents:
+        hypervisorDevice: /dev/kvm
       nodeLabeller:
         image: quay.io/example/node-labeller-qemu-kvm:v1.0.0
         apiVersion: v1alpha1
@@ -148,6 +157,8 @@ spec:
           operator: Exists
           effect: NoSchedule
     - id: cloudhypervisor-kvm
+      virtualizationComponents:
+        hypervisorDevice: /dev/kvm
       nodeLabeller:
         image: quay.io/example/node-labeller-ch-kvm:v1.0.0
         apiVersion: v1alpha1
@@ -187,6 +198,7 @@ spec:
         image: quay.io/example/node-labeller-qemu-kvm:v1.0.0
         args:
         - --virtstack-id=qemu-kvm
+        - --hypervisor-device=/dev/kvm
         - --register-socket=/var/lib/kubevirt/plugins/registration.sock
         - --endpoint-socket=/var/lib/kubevirt/plugins/qemu-kvm.sock
         volumeMounts:
@@ -195,6 +207,8 @@ spec:
         - name: sysfs
           mountPath: /sys
           readOnly: true
+        - name: hypervisor-device
+          mountPath: /dev/kvm
       volumes:
       - name: plugin-dir
         hostPath:
@@ -204,6 +218,10 @@ spec:
         hostPath:
           path: /sys
           type: Directory
+      - name: hypervisor-device
+        hostPath:
+          path: /dev/kvm
+          type: CharDevice
 ```
 
 ### Backward Compatibility
@@ -224,6 +242,22 @@ spec:
 3. Add `KubeVirtConfiguration` virtstack declarations and deployment wiring for node-labeller plugins.
 4. Implement label prefixing in virt-handler using virtstack IDs and add collision/conflict handling.
 5. Keep default Libvirt/QEMU/KVM behavior as the fallback path.
+
+## KubeVirtConfiguration Validation
+
+To prevent ambiguous plugin deployment and label namespacing behavior, this proposal includes a new validating webhook for the `KubeVirtConfiguration` CRD.
+
+- The webhook validates that all virtualization profile IDs declared in configuration are unique.
+- If duplicate IDs are detected, the admission request is rejected with a clear validation error.
+- This guarantees a one-to-one mapping between virtstack ID and node-labeller plugin deployment semantics.
+
+## Virtstack Packaging and Node-Level Plugin Consolidation
+
+Each node-labeller plugin image is expected to include the user-space components required for its virtstack-specific capability discovery workflow. For example, the default `libvirt-qemu-kvm` node-labeller plugin image includes the required Libvirt and QEMU binaries, while the KVM device is provided from the host via the declared hypervisor device mount.
+
+Per virtstack, the deployment remains singleton per node (one Pod instance per node for that virtstack's DaemonSet), which provides deterministic behavior for registration and label production.
+
+This deployment pattern is also aligned with the expected plugin needed for runtime adjustment operations consumed by virt-handler. As a follow-on design direction, these two node-local capabilities (node labeling and runtime adjustment) can be consolidated into a single node-level plugin per virtstack with multiple RPC services exposed over the same registration channel.
 
 ## Open Questions
 
