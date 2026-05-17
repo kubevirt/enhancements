@@ -94,6 +94,118 @@ service NodeLabeller {
 - Based on this declaration, KubeVirt deploys the corresponding node-labeller plugins to nodes where they are applicable.
 - The default Libvirt/QEMU/KVM virtstack remains available when no additional virtstack declarations are provided.
 
+### Deployment Model for Node-Labeller Plugins
+
+For `N` declared virtstacks in `KubeVirtConfiguration`, virt-operator will reconcile `N` dedicated DaemonSets, one DaemonSet per virtstack. Each DaemonSet runs exactly one node-labeller plugin Pod on each eligible node.
+
+This yields the following relationship:
+
+- `N` virtstack declarations
+- `N` node-labeller plugin DaemonSets
+- Up to `N` node-labeller plugin Pods per node (subject to node eligibility)
+
+#### Why This Model Fits Kubernetes Best
+
+- Native scheduling semantics: DaemonSet provides the required one-Pod-per-node behavior.
+- Failure isolation: a crash loop in one virtstack plugin does not restart or block others.
+- Independent lifecycle: image updates and rollbacks are performed per virtstack plugin.
+- Reconciliation clarity: virt-operator has a direct, declarative mapping from CRD entries to DaemonSet objects.
+- Operability: each plugin has distinct Pod identity, events, and status for troubleshooting.
+
+#### Implementation Shape
+
+- virt-operator watches `KubeVirtConfiguration` and reconciles one DaemonSet per declared virtstack.
+- Each plugin Pod mounts host paths required for:
+  - Registration against virt-handler's well-known UNIX socket.
+  - Serving the plugin's own endpoint UNIX socket.
+  - Read-only host introspection paths needed by the plugin.
+- On startup, each plugin registers the following with virt-handler:
+  - `virtstackID`
+  - supported RPC API version
+  - plugin endpoint socket path
+- virt-handler connects to all registered plugin endpoints on the node and executes the `NodeLabeller` RPCs.
+- Label writes are always prefixed by virtstack ID to avoid collisions.
+- If duplicate registrations are observed for the same virtstack ID on a node, virt-handler applies deterministic conflict resolution and keeps a single active registration.
+
+#### CRD YAML Skeleton
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: KubeVirt
+metadata:
+  name: kubevirt
+spec:
+  configuration:
+    virtualizationProfiles:
+    - id: qemu-kvm
+      nodeLabeller:
+        image: quay.io/example/node-labeller-qemu-kvm:v1.0.0
+        apiVersion: v1alpha1
+        nodeSelector:
+          kubernetes.io/os: linux
+        tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+    - id: cloudhypervisor-kvm
+      nodeLabeller:
+        image: quay.io/example/node-labeller-ch-kvm:v1.0.0
+        apiVersion: v1alpha1
+        nodeSelector:
+          kubernetes.io/os: linux
+```
+
+#### DaemonSet YAML Skeleton (Reconciled per Virtstack)
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kubevirt-node-labeller-qemu-kvm
+  namespace: kubevirt
+  labels:
+    kubevirt.io/component: node-labeller-plugin
+    kubevirt.io/virtstack-id: qemu-kvm
+spec:
+  selector:
+    matchLabels:
+      kubevirt.io/component: node-labeller-plugin
+      kubevirt.io/virtstack-id: qemu-kvm
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        kubevirt.io/component: node-labeller-plugin
+        kubevirt.io/virtstack-id: qemu-kvm
+    spec:
+      serviceAccountName: kubevirt-node-labeller-plugin
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+      - name: node-labeller-plugin
+        image: quay.io/example/node-labeller-qemu-kvm:v1.0.0
+        args:
+        - --virtstack-id=qemu-kvm
+        - --register-socket=/var/lib/kubevirt/plugins/registration.sock
+        - --endpoint-socket=/var/lib/kubevirt/plugins/qemu-kvm.sock
+        volumeMounts:
+        - name: plugin-dir
+          mountPath: /var/lib/kubevirt/plugins
+        - name: sysfs
+          mountPath: /sys
+          readOnly: true
+      volumes:
+      - name: plugin-dir
+        hostPath:
+          path: /var/lib/kubevirt/plugins
+          type: DirectoryOrCreate
+      - name: sysfs
+        hostPath:
+          path: /sys
+          type: Directory
+```
+
 ### Backward Compatibility
 
 - If no virtstack plugins are declared, the default Libvirt/QEMU/KVM node-labeller path is used.
