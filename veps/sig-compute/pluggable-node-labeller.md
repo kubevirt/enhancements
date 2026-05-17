@@ -39,21 +39,47 @@ This proposal introduces a pluggable architecture for the node-labeller componen
 
 ## Design
 
-### Pluggable Capability Provider Interface
+### Pluggable Node-Labeller Architecture
 
-- Define a standard interface (e.g., CapabilityProvider) for extracting node virtualization capabilities.
-- The node-labeller loads the appropriate provider based on configuration.
-- Each provider implements methods to extract and report capabilities (e.g., supported machine types, CPU models, features).
+In this design, the node-labeller component itself is implemented as a pluggable module. The virt-handler component interacts directly with the node-labeller to obtain node capability information, which it then uses to apply labels to the node. The node-labeller is responsible for querying the underlying virtualization stack, extracting the required capabilities, and exposing them via a well-defined, versioned RPC API. This API is consumed by virt-handler.
+
+#### Node-Labeller RPC API
+
+The node-labeller exposes the following RPC API to virt-handler:
+
+- **GetHypervFeatures**: Returns a list of Hyper-V compatible features exposed by the hypervisor for optimized guest OS functionality.
+- **GetSupportedMachineTypes**: Returns a list of machine types supported by the VMM.
+- **GetSupportedCpuModels**: Returns a list of named CPU models that the VMM can expose to the VM.
+- **GetHostCpuModelInfo**: Returns the name of the host-model CPU model and the set of additional features required with the host-model CPU.
+- **GetSupportedCpuFeatures**: Returns a list of CPU features available on the node.
+- **GetNodeTscInfo**: Returns the TSC (Time Stamp Counter) frequency and whether it is scalable.
+- **GetNodeSevFeatures**: Returns whether the node supports AMD SEV and SEV+ES.
+
+The API is defined using Protobuf (or similar IDL), versioned with KubeVirt, and is the contract between virt-handler and the node-labeller plugin. The node-labeller implementation is responsible for all virt-stack-specific logic.
+
+#### Example (Protobuf-like) API Definition
+
+```protobuf
+service NodeLabeller {
+  rpc GetHypervFeatures(Empty) returns (HypervFeaturesResponse);
+  rpc GetSupportedMachineTypes(Empty) returns (MachineTypesResponse);
+  rpc GetSupportedCpuModels(Empty) returns (CpuModelsResponse);
+  rpc GetHostCpuModelInfo(Empty) returns (HostCpuModelInfoResponse);
+  rpc GetSupportedCpuFeatures(Empty) returns (CpuFeaturesResponse);
+  rpc GetNodeTscInfo(Empty) returns (TscInfoResponse);
+  rpc GetNodeSevFeatures(Empty) returns (SevFeaturesResponse);
+}
+```
 
 ### Integration and Configuration
 
-- Node-labeller is configured to use a specific capability provider (default: Libvirt/QEMU/KVM).
-- New providers can be added as plugins and selected via configuration or CRD.
+- The node-labeller is deployed as a plugin and selected via configuration or CRD (default: Libvirt/QEMU/KVM).
+- New node-labeller plugins can be added to support additional virtualization stacks.
 
 ### Backward Compatibility
 
-- If no plugin is specified, node-labeller defaults to the current Libvirt/QEMU/KVM logic.
-- No changes required for existing users.
+- If no plugin is specified, the default Libvirt/QEMU/KVM node-labeller is used.
+- No changes are required for existing users.
 
 ## API Changes
 
