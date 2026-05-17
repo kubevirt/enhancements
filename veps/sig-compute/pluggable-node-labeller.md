@@ -12,19 +12,21 @@ This proposal introduces a pluggable architecture for the node-labeller componen
 
 ## Motivation
 
-- Enable KubeVirt to support multiple virtualization stacks by allowing node-labeller to consume capabilities from stack-specific providers.
+- Enable KubeVirt to support multiple virtualization stacks by making the node-labeller implementation pluggable per virtstack.
 - Reduce hardcoded dependencies on Libvirt/QEMU/KVM in node labeling logic.
-- Allow integrators and downstreams to provide custom capability extraction logic for new or proprietary virtualization stacks.
+- Allow integrators and downstreams to provide stack-specific node-labeller plugins for new or proprietary virtualization stacks.
 
 ## Goals
 
-- Refactor node-labeller to use a pluggable capability provider interface.
-- Allow alternative implementations to supply node capabilities for labeling.
+- Define a versioned RPC contract between virt-handler and pluggable node-labeller plugins.
+- Allow multiple node-labeller plugins to run on the same node when multiple virtstacks are present.
+- Ensure labels emitted for one virtstack cannot overwrite labels emitted for another virtstack.
 - Preserve backward compatibility with the current Libvirt/QEMU/KVM-based node-labeller.
 
 ## Non-Goals
 
 - Refactoring other KubeVirt components for pluggability.
+- Defining arbitrary label schemas beyond the set of KubeVirt API-aligned capabilities for a given release.
 - Implementing plugins for specific alternative virtualization stacks (only the interface and integration points).
 
 ## Definition of Users
@@ -71,39 +73,58 @@ service NodeLabeller {
 }
 ```
 
+#### Plugin Registration and Discovery
+
+- Each node-labeller plugin registers with virt-handler through a well-known UNIX socket, following a device-plugin-like registration flow.
+- Registration includes plugin identity, the associated virtstack ID, supported RPC API version, and the plugin endpoint socket.
+- virt-handler maintains an in-memory registry of active node-labeller plugins per node, keyed by virtstack ID.
+- virt-handler establishes RPC connections to each registered plugin endpoint and periodically reconciles registration state (add/update/remove) based on plugin liveness.
+
+#### Label Namespacing and Collision Avoidance
+
+- virt-handler applies labels returned by each plugin using a deterministic prefix derived from that plugin's virtstack ID declared in `KubeVirtConfiguration`.
+- Label keys from different virtstacks are therefore namespaced and cannot overwrite one another.
+- The prefixing logic is enforced in virt-handler, so plugin implementations do not control global label key space.
+- If two plugins attempt to register the same virtstack ID on a node, virt-handler treats it as a conflict and keeps only one active registration according to deterministic conflict resolution rules.
+
 ### Integration and Configuration
 
-- The node-labeller is deployed as a plugin and selected via configuration or CRD (default: Libvirt/QEMU/KVM).
-- New node-labeller plugins can be added to support additional virtualization stacks.
+- `KubeVirtConfiguration` is the authoritative declaration point for virtstacks expected in the cluster.
+- The configuration includes a list of virtstack entries, each with a unique virtstack ID and node-labeller plugin image/reference.
+- Based on this declaration, KubeVirt deploys the corresponding node-labeller plugins to nodes where they are applicable.
+- The default Libvirt/QEMU/KVM virtstack remains available when no additional virtstack declarations are provided.
 
 ### Backward Compatibility
 
-- If no plugin is specified, the default Libvirt/QEMU/KVM node-labeller is used.
+- If no virtstack plugins are declared, the default Libvirt/QEMU/KVM node-labeller path is used.
 - No changes are required for existing users.
 
 ## API Changes
 
-- (TBD) If configuration is exposed via CRD, document the new fields.
+- Extend `KubeVirtConfiguration` with virtstack declarations used for node-labeller plugin deployment and virtstack ID assignment.
+- Define a versioned `NodeLabeller` RPC API contract used by virt-handler.
+- Document registration payload fields for plugin-to-virt-handler registration over the well-known UNIX socket.
 
 ## Implementation Phases
 
-1. Define and document the CapabilityProvider interface.
-2. Refactor node-labeller to use the interface for capability extraction.
-3. Implement the default Libvirt/QEMU/KVM provider.
-4. Add plugin loading and configuration logic.
+1. Define and document the versioned `NodeLabeller` RPC API.
+2. Implement plugin registration and discovery in virt-handler using the well-known UNIX socket.
+3. Add `KubeVirtConfiguration` virtstack declarations and deployment wiring for node-labeller plugins.
+4. Implement label prefixing in virt-handler using virtstack IDs and add collision/conflict handling.
+5. Keep default Libvirt/QEMU/KVM behavior as the fallback path.
 
 ## Open Questions
 
-- What is the best mechanism for plugin discovery and loading (sidecar, dynamic import, etc.)?
-- Should the configuration be part of the KubeVirt CRD or a separate resource?
+- Should plugin registration be node-local only, or should virt-handler surface registration status into a cluster-visible condition for operability?
+- What should the exact conflict-resolution policy be when duplicate registrations for the same virtstack ID are observed?
 
 ## Feature Lifecycle Phases
 
 ### Alpha
-- Initial implementation of the pluggable node-labeller interface and default provider.
+- Initial implementation of the `NodeLabeller` RPC contract, plugin registration flow, and default Libvirt/QEMU/KVM node-labeller plugin path.
 
 ### Beta
-- Feedback-driven improvements, support for at least one alternative provider.
+- Feedback-driven hardening of registration/discovery and support for at least one additional virtstack-specific node-labeller plugin.
 
 ### GA
-- Stable interface, documentation, and upgrade path.
+- Stable API, registration semantics, and operational guidance for multi-virtstack deployments.
