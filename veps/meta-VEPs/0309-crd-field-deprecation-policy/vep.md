@@ -31,6 +31,17 @@ This VEP proposes establishing a policy for CRD field deprecation and removal
 that ensures stored data is not silently lost during storage version migration,
 regardless of the upgrade path taken by consumers.
 
+The Kubernetes project maintains a
+[deprecation policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/)
+and [API change guidelines](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-architecture/api_changes.md)
+that govern how built-in API fields are deprecated and removed. These policies
+rely on mechanisms unavailable to CRD authors — specifically, internal type
+representations, star-topology conversion functions, and protobuf serialization
+with tombstone tag reservation. This VEP adapts the principles behind those
+upstream policies to the constraints of CRDs using `NoneConverter`, where the
+API server performs no field transformation and relies solely on structural
+schema pruning.
+
 ## Motivation
 
 KubeVirt uses `Strategy: NoneConverter` for every multi-version CRD:
@@ -135,6 +146,10 @@ the before and after state. The demo covers:
 - Define what migration steps must occur before a field can be removed
 - Document the interaction between `NoneConverter`, the storage version
   migrator, and field deprecation
+- Align with the principles of the upstream Kubernetes
+  [deprecation policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/)
+  and [API change guidelines](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-architecture/api_changes.md),
+  adapted for CRDs
 
 ## Non Goals
 
@@ -199,6 +214,41 @@ virt-controller actively reconciles (e.g. ControllerRevision upgrades for
 instancetype references). Standalone CRs — preferences, snapshots, clones,
 backups — have no such path.
 
+### Relationship to upstream Kubernetes compatibility rules
+
+The Kubernetes
+[API change guidelines](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-architecture/api_changes.md#on-compatibility)
+define six backward compatibility rules. Rule 4 requires that "it must be
+possible to round-trip your change (convert to different API versions and back)
+with no loss of information." The Kubernetes
+[deprecation policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/)
+formalizes this as Rule #2: "API objects must be able to round-trip between API
+versions in a given release without information loss."
+
+For built-in Kubernetes types, round-trip fidelity is enforced by conversion
+functions that transform objects between versioned representations via an
+internal (hub) type. When a field is deprecated in one version, the conversion
+function maps it to the replacement field in the internal type, preserving data
+across versions.
+
+CRDs using `NoneConverter` have no internal type and no conversion functions.
+The API server stores and serves objects using structural schema pruning alone.
+This means that the round-trip guarantee is violated whenever a field is removed
+from the schema of the stored version: objects written with the old field cannot
+be read back with their data intact. The data loss described in this VEP is, in
+upstream terms, a round-trip fidelity violation.
+
+The upstream
+[deprecation policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/#fields-of-rest-resources)
+for fields of REST resources (Rule #5a) states that individual fields may be
+deprecated with appropriate documentation, and Rule #5b states that deprecated
+fields that were previously required must become optional. Rule #1 states that
+"once an API element has been added to an API group at a particular version, it
+can not be removed from that version or have its behavior significantly
+changed." For CRDs, this translates to: a field must not be removed from any
+served API version's schema until all stored objects have been migrated away
+from that field.
+
 ### Proposed policy
 
 Before a deprecated field can be removed from a CRD schema, **all stored
@@ -225,6 +275,105 @@ Concretely, the field removal process would be:
 The minimum gap between step 2 and step 3 (one release) ensures that any
 consumer doing a sequential N+1 upgrade has gone through the migration step
 before the field is removed. 
+
+### How to mark a field as deprecated
+
+When deprecating a CRD field (Release N in the policy above), the following
+markers are required. These align with the upstream Kubernetes convention
+described in
+[Rule #5a](https://kubernetes.io/docs/reference/using-api/deprecation-policy/#fields-of-rest-resources)
+and the
+[API change guidelines](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-architecture/api_changes.md).
+
+1. **Go doc comment**: Add a `// Deprecated:` comment to the Go struct field.
+   The comment must state the replacement field and the earliest version in
+   which the old field may be removed:
+
+   ```go
+   // Deprecated: Use PreferredEfi instead. This field will be removed no
+   // earlier than KubeVirt v1.X+2. Added in v1.W, deprecated in v1.X.
+   DeprecatedPreferredUseEfi *bool `json:"preferredUseEfi,omitempty"`
+   ```
+
+2. **Go field name prefix**: Prefix the Go struct field name with `Deprecated`
+   (e.g., `DeprecatedPreferredUseEfi`). This is a KubeVirt convention that
+   makes deprecated fields visually distinct in code. The JSON serialization
+   name (`json:"preferredUseEfi"`) must NOT change, as changing it would break
+   existing stored objects and clients.
+
+3. **Admission webhook warning**: Add an admission warning that is returned
+   when a user creates or updates an object that sets the deprecated field.
+   This follows the pattern already established by `warnDeprecatedAPIs` in the
+   validating webhook admitters and aligns with the upstream Kubernetes practice
+   of returning `Warning` headers for deprecated API usage (introduced in
+   Kubernetes v1.19). Example warning text:
+
+   > Field .spec.firmware.preferredUseEfi is deprecated; use
+   > .spec.firmware.preferredEfi instead. This field will be removed in
+   > KubeVirt v1.X+2.
+
+4. **OpenAPI description**: Include the deprecation notice in the field's
+   OpenAPI/Swagger description so that it appears in API discovery and
+   generated documentation. This is achieved via the existing swagger doc
+   generation from Go doc comments.
+
+**Note on JSON Schema limitations:** The CRD structural schema
+(`JSONSchemaProps`) does not support a per-field `deprecated` boolean. The
+`Deprecated` flag on CRD versions applies to entire API versions, not
+individual fields. Per-field deprecation can only be communicated through
+description text and admission warnings.
+
+**Note on tombstone markers:** The upstream Kubernetes codebase uses
+`// +k8s:deprecated=fieldname,protobuf=N` tombstone comments to reserve field
+names and protobuf tag numbers after a field is removed. KubeVirt CRD types do
+not use protobuf serialization. For CRDs, the relevant concern is JSON field
+name reservation, not protobuf tag reservation. When a field is removed from
+the Go struct (Release N+2), a tombstone comment should be left in its place to
+prevent the JSON field name from being reused:
+
+```go
+// Deprecated: preferredUseEfi was removed in v1.X+2. Do not reuse this
+// JSON field name. Replacement: PreferredEfi.
+```
+
+This is a lightweight adaptation of the upstream tombstone convention that
+addresses the JSON-relevant concern (field name reuse would cause
+deserialization conflicts with old stored data that has not yet been cleaned
+up) without the protobuf tag portion that does not apply.
+
+### Deprecation timeline
+
+The Kubernetes
+[deprecation policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/)
+specifies minimum API lifetimes by stability level:
+
+- **GA**: API elements may not be removed within a major version
+- **Beta**: Deprecated after no more than 9 months or 3 minor releases
+  (whichever is longer)
+- **Alpha**: May be removed in any release without prior notice
+
+For CRD fields, the stability level of the field inherits from the stability
+level of the CRD API version it belongs to. A field in a `v1beta1` CRD version
+is a beta field; a field in a `v1` CRD version is a GA field.
+
+This VEP's 3-release process (add replacement in N, migrate in N+1, remove in
+N+2) provides a minimum of 2 releases between deprecation and removal. For
+KubeVirt's current quarterly release cadence, this amounts to approximately 6
+months — shorter than the upstream 9-month minimum for beta APIs.
+
+The VEP does not mandate a minimum calendar duration because the critical
+safety guarantee is the migration step, not the passage of time. The 3-release
+minimum ensures that:
+
+1. Users have at least one full release cycle to observe deprecation warnings
+   and update their usage
+2. The migration step has shipped and been tested in production before the
+   field is removed
+3. Sequential N-to-N+1 upgraders always pass through the migration release
+
+SIGs may choose to extend the deprecation window beyond the 3-release minimum
+for widely-used fields, particularly for fields in GA API versions. The review
+checklist should document the rationale for the chosen timeline.
 
 ### What this means for non-sequential upgrades
 
@@ -256,6 +405,36 @@ version. The upstream project does not need to adopt any specific skip-level
 window for this to work; it only needs to make the migration lifecycle
 **explicit and documented** rather than implicit and silent.
 
+### Differences from upstream Kubernetes API deprecation
+
+The following table summarizes how upstream Kubernetes deprecation mechanisms
+map to the CRD context:
+
+| Upstream mechanism | Built-in API types | KubeVirt CRDs (`NoneConverter`) |
+|---|---|---|
+| Conversion functions (hub-and-spoke) | Internal type with bidirectional conversion | Not available; virt-operator migration substitutes |
+| Round-trip fidelity tests | Fuzz-based tests via internal type | Round-trip tests exist but do not cover cross-version conversion (no conversion exists) |
+| `+k8s:deprecated=field,protobuf=N` tombstone | Reserves JSON name and protobuf tag | Adapted: reserve JSON name only (CRD types do not use protobuf) |
+| Per-field `deprecated` in JSON Schema | N/A (built-in types use OpenAPI generated from code) | Not supported by CRD structural schema (`JSONSchemaProps` has no per-field `deprecated`) |
+| Warning header on deprecated API version | Automatic via apiserver | Available via CRD version `deprecated: true` + `deprecationWarning` field |
+| Warning on deprecated field usage | Admission webhook warnings | Available via validating/mutating webhook `Warnings` response field |
+| Storage version advancement ([Rule #4b](https://kubernetes.io/docs/reference/using-api/deprecation-policy/)) | Enforced by apiserver | Must be enforced by virt-operator: do not change storage version in the same release a new version is introduced |
+| Minimum deprecation window | 9 months / 3 releases for beta | 3-release process (2 releases between deprecation and removal) |
+
+Key constraints:
+
+- **No per-field schema annotation**: The CRD `JSONSchemaProps` does not
+  support a `deprecated` boolean on individual properties. Field-level
+  deprecation can only be signaled through description text and admission
+  warnings, not through the schema itself.
+- **No protobuf for CRD types**: Most KubeVirt CRD types do not use protobuf
+  serialization. The `+k8s:deprecated` tombstone's `protobuf=N` component is
+  not applicable. Only JSON field name reservation matters.
+- **No conversion functions**: The fundamental reason this VEP exists. Without
+  conversion functions, the API server cannot transform deprecated fields to
+  their replacements during storage migration. The virt-operator migration step
+  in this VEP substitutes for what conversion functions provide in upstream.
+
 ### Review checklist for field removal PRs
 
 Any PR that removes a field from a CRD schema must:
@@ -268,8 +447,15 @@ Any PR that removes a field from a CRD schema must:
       before the CRD schema is applied
 - [ ] Confirm that at least one release has shipped with the migration step
       before the field is removed
+- [ ] Confirm that an admission warning was added in the deprecation release
+      (Release N) that notifies users when the deprecated field is set
+- [ ] Confirm that a tombstone comment is left in the Go struct at the
+      location of the removed field, reserving the JSON field name from reuse
+- [ ] Confirm that the `// Deprecated:` Go doc comment included the removal
+      target version and was present for at least the minimum deprecation window
 - [ ] Document in the PR description which release contains the migration and
       which releases cannot be safely skipped
+- [ ] Update the KubeVirt release notes to note the field removal
 
 ## API Examples
 
@@ -294,6 +480,10 @@ proposal.
       `preferredUseEfi` during upgrade (added in v1.X+1, PR #NNNNN)
 - [x] Migration shipped in: v1.X+1
 - [x] Minimum one release gap: v1.X+2 >= v1.X+1 + 1 ✓
+- [x] Admission warning added in v1.X for use of `preferredUseEfi` (PR #MMMMM)
+- [x] Tombstone comment left in Go struct reserving JSON name `preferredUseEfi`
+- [x] `// Deprecated:` comment present since v1.X with removal target v1.X+2
+- [x] Release notes updated
 - Note: consumers upgrading from v1.X or earlier directly to v1.X+2
   will skip the migration. Sequential upgrade through v1.X+1 is required.
 ```
@@ -411,6 +601,8 @@ across KubeVirt SIGs.
 - [ ] Policy documented and agreed upon by all SIGs
 - [ ] Review checklist added to PR template for API changes
 - [ ] Existing at-risk field transitions identified and tracked
+- [ ] Admission warnings implemented for all currently-deprecated CRD fields
+      that have structured replacements
 
 ### Beta
 
