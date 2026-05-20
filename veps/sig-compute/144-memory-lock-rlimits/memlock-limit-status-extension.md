@@ -2,7 +2,7 @@
 
 *Draft for discussion -- extends the existing VEP #144 (Memory Lock RLimit configuration)*
 
-> **Note:** This draft assumes [kubevirt/kubevirt#17805](https://github.com/kubevirt/kubevirt/pull/17805) (VFIO memlock scaling in virt-handler) and [kubevirt/kubevirt#17857](https://github.com/kubevirt/kubevirt/pull/17857) (shared `pkg/vfio` package and `<memtune><hard_limit>` in domain XML) have merged. #17805 is under review; #17857 is a draft dependent on it. The assumptions about `pkg/vfio`, `CountDevices()`, `CalculateMemlockLimit()`, and `<memtune><hard_limit>` support in the domain converter all come from these PRs.
+> **Note:** [kubevirt/kubevirt#17805](https://github.com/kubevirt/kubevirt/pull/17805) (VFIO memlock scaling in virt-handler) has merged. This draft also assumes [kubevirt/kubevirt#17857](https://github.com/kubevirt/kubevirt/pull/17857) (shared `pkg/vfio` package and `<memtune><hard_limit>` in domain XML) will merge. #17857 is a draft dependent on #17805. The assumptions about `pkg/vfio`, `CountDevices()`, `CalculateMemlockLimit()`, and `<memtune><hard_limit>` support in the domain converter come from these PRs.
 
 ## Problem
 
@@ -75,15 +75,17 @@ func calculateMemLockLimit(vmi *v1.VirtualMachineInstance) *resource.Quantity {
     // Start with automatic VFIO calculation
     memlockBytes := vfio.CalculateMemlockLimit(vmi)
 
-    // Add user-specified overhead from VEP #144
+    // Add user-specified overhead from VEP #144 when memlock is required
     if vmi.Spec.Domain.Memory != nil &&
-       vmi.Spec.Domain.Memory.ReservedOverhead != nil &&
-       vmi.Spec.Domain.Memory.ReservedOverhead.AddedOverhead != nil {
-        memlockBytes += vmi.Spec.Domain.Memory.ReservedOverhead.AddedOverhead.Value()
+       vmi.Spec.Domain.Memory.ReservedOverhead != nil {
+        if vmi.Spec.Domain.Memory.ReservedOverhead.MemLock == v1.MemLockRequired &&
+           vmi.Spec.Domain.Memory.ReservedOverhead.AddedOverhead != nil {
+            memlockBytes += vmi.Spec.Domain.Memory.ReservedOverhead.AddedOverhead.Value()
+        }
     }
 
     if memlockBytes == 0 {
-        // Check if memLock is explicitly required without devices
+        // Check if memLock is explicitly required without VFIO devices
         if util.RequiresLockingMemory(vmi) {
             // Base memlock: guestMemory + standard overhead
             memlockBytes = vfio.GetVirtualMemoryBytes(vmi) + vfio.MMIOOverheadBytes
@@ -131,6 +133,25 @@ Currently `addedOverhead` flows into `GetMemoryOverhead()` which inflates both t
 - Its contribution to the memlock limit (for VFIO address space ceiling)
 
 This aligns with the VEP's stated goal: "Adjust memory lock limits **without impacting VMI scheduling capacity**."
+
+### Example: 2x GPU passthrough with 8Gi guest memory
+
+Consider a VM with 2 NVIDIA GPUs (each with 64Gi BAR), 8Gi guest memory, and `addedOverhead: 128Gi`:
+
+| Value | Current (unified) | With this extension |
+| :---- | :----------------- | :------------------ |
+| Pod memory request | `GetMemoryOverhead()` + 8Gi + 128Gi ≈ **137Gi** | `GetMemoryOverhead()` + 8Gi ≈ **9Gi** |
+| Memlock rlimit | Same ~137Gi (from `GetMemoryOverhead()`) | `MemLockLimit`: 8Gi guest + 1Gi MMIO + 8Gi scaling + 128Gi added = **145Gi** |
+
+Today the 128Gi `addedOverhead` inflates the pod memory request to ~137Gi, wasting ~128Gi of schedulable memory capacity per VM. The node must have 137Gi free to schedule the pod, even though real memory consumption is ~9Gi. With this extension, the pod requests only what it actually consumes, while the memlock limit is sized independently for the VFIO address space ceiling.
+
+### Safety: memlock vs cgroup limits
+
+The original VEP #144 discussion raised a valid concern: if a process locks more memory than its cgroup allows, the kubelet will OOM-kill the pod. This concern was specific to legacy VFIO type1, where the kernel physically pins all IOVA-mapped pages.
+
+With iommufd replacing type1 for modern deployments, the memlock rlimit becomes an address space ceiling rather than a physical memory commitment. The kernel no longer pins all mapped pages into physical RAM, so the memlock limit can safely exceed the pod's cgroup memory limit without triggering OOM kills.
+
+For legacy type1, multi-device vIOMMU passthrough was already broken before [#17805](https://github.com/kubevirt/kubevirt/pull/17805) due to insufficient rlimits -- the cgroup sizing gap was latent, not newly introduced. This extension makes that gap explicit and fixable: the controller could factor in the IOMMU backend when deciding whether `addedOverhead` should also inflate the pod request.
 
 ## Benefits
 
