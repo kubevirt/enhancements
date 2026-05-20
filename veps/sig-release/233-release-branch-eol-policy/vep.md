@@ -370,6 +370,101 @@ VEP because:
 - An LTS model could be layered on top of this policy in a future VEP if
   demand exists
 
+### Alternative 6: Vendor-maintained public forks for extended maintenance
+
+Rather than maintaining extended-support branches within `kubevirt/kubevirt`
+(Alternative 4), downstream vendors that need longer support windows could
+maintain their own public forks of the repository. When a release branch
+reaches EOL upstream under the 3-release policy, the vendor's fork becomes
+the maintenance target for continued backports.
+
+This pattern is well-established in the Kubernetes ecosystem. For example,
+OpenShift maintains `openshift/kubernetes` as a public fork that carries
+downstream patches and extended branch maintenance independently of the
+upstream `kubernetes/kubernetes` project. The same model could be applied to
+KubeVirt by any vendor that needs to support releases beyond the upstream
+window (e.g., `openshift/kubevirt`, `suse/kubevirt`, etc.).
+
+Under this model:
+
+- The upstream 3-release EOL policy proceeds unchanged. When a release branch
+  reaches EOL in `kubevirt/kubevirt`, it is archived per the standard process.
+- Vendors that need continued support for the EOL'd release maintain the
+  corresponding branch in their own public fork. Backports are submitted as
+  PRs against the vendor's fork rather than the upstream repository.
+- Each vendor's fork keeps its `main` branch in sync with `kubevirt/kubevirt`
+  via periodic rebase. Release branches within upstream's support window are
+  synced from upstream — no independent maintenance occurs on those branches.
+- CI configuration can be adapted from `kubevirt/project-infra` to the
+  vendor's fork, providing equivalent test coverage for extended-maintenance
+  branches. Since the forks live on GitHub, existing Prow-based CI
+  infrastructure can be reused with minimal adaptation.
+- Vendors may continue to maintain separate private forks for embargoed CVE
+  work, keeping the public fork focused on routine maintenance.
+- Backports to extended-maintenance branches still follow upstream sequential
+  ordering and the project's standard backporting policies — the vendor forks
+  are not a venue for downstream-only patches that diverge from the upstream
+  codebase.
+
+Multiple vendors can independently maintain forks for different (or
+overlapping) sets of releases, each driven by their own product lifecycle.
+This avoids the need for a single upstream policy that attempts to satisfy
+every vendor's support window. Vendors with overlapping needs could also
+collaborate on a shared fork.
+
+This differs from Alternative 4 (vendor-driven two-tier) in several key ways:
+
+| Aspect | Alternative 4 (Two-Tier) | Alternative 6 (Vendor Forks) |
+|--------|-------------------------|------------------------------|
+| Extended branches live in | `kubevirt/kubevirt` | Vendor's own fork |
+| Upstream branch count | 3 Tier 1 + 2-3 Tier 2 = 5-6 | 3 (unchanged) |
+| Review responsibility | Ambiguous (upstream or vendor?) | Clear (vendor owns their fork) |
+| CI funding | Vendor-sponsored lanes in upstream infra | Vendor manages CI in their own org |
+| Community buy-in required | Yes (Tier 2 branches are upstream) | Minimal (upstream policy unchanged) |
+| Multi-vendor support | Single set of Tier 2 branches shared | Each vendor maintains what they need |
+
+Advantages of this approach:
+
+- The upstream `kubevirt/kubevirt` branch count stays bounded to 3, with no
+  Tier 2 branches adding complexity to the upstream project
+- Proven pattern: the Kubernetes ecosystem has operated public vendor forks
+  (e.g., `openshift/kubernetes`) for years, demonstrating the model works at
+  scale
+- Public forks enable transparency, community review, and contributions from
+  any interested party — unlike private downstream forks
+- Clear ownership: each vendor owns their fork and its CI, removing ambiguity
+  about review responsibilities
+- Does not require upstream community buy-in beyond the base 3-release EOL
+  policy — vendor forks are a downstream implementation detail
+- Scales naturally with the number of vendors: each maintains only the
+  branches they need, without imposing on the upstream project or other
+  vendors
+
+This alternative was not adopted as the primary proposal because:
+
+- It introduces new repositories and requires organizational coordination
+  to establish and maintain (GitHub org permissions, CI setup, sync
+  automation)
+- Developers unfamiliar with the vendor fork workflow face a learning curve,
+  particularly those accustomed to working exclusively in `kubevirt/kubevirt`
+- Some duplication of CI infrastructure configuration between upstream and
+  vendor forks is unavoidable, even if the test suites themselves are
+  identical
+- The vendor fork pattern has not been used for KubeVirt before — while
+  well-established for other Kubernetes ecosystem projects, it is new
+  territory for this project and its contributor community
+- Backports must still follow upstream sequential ordering through the fork's
+  branches, so the process overhead of cherry-picking is not eliminated, only
+  relocated
+- If multiple vendors independently maintain forks, bug fixes and CVE patches
+  may be duplicated across forks rather than shared — though vendors could
+  mitigate this by collaborating on a shared fork or cross-referencing PRs
+
+This alternative is complementary to the primary 3-release EOL proposal. If
+downstream vendors determine that extended branch maintenance is necessary,
+public vendor forks provide a transparent, CI-backed path forward without
+increasing the upstream project's maintenance burden.
+
 ## Scalability
 
 This VEP improves scalability by bounding the number of active release
