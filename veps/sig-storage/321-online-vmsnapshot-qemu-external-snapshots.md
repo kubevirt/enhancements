@@ -99,6 +99,9 @@ needs to be established.
   manage their own CSI snapshots currently use freeze/unfreeze hooks. Exposing
   the libvirt-level snapshot to these vendors via a dedicated CRD
   (e.g. `VirtualMachineSnapshotRequest`) could be addressed in a follow-up VEP
+- Memory state capture. QEMU external snapshots can also save the full VM
+  state (memory, CPU, devices) alongside disk snapshots, enabling exact
+  restore to the running state. This could also be addressed in a follow-up VEP
 
 
 ## Definition of Users
@@ -144,6 +147,9 @@ disruption
 
 ### New flow
 
+The new flow is enabled by setting `spec.externalSnapshot: true` on the
+VMSnapshot. If not set, the current flow is used.
+
 ```
 Phase 0: Create scratch PVC, hotplug as UtilityVolume
 Phase 1: Freeze -> QEMU transaction (all disks, atomic, ~20ms) -> Unfreeze
@@ -158,17 +164,18 @@ Freeze duration is sub-second regardless of disk count.
 
 Before taking the snapshot, the snapshot controller:
 
-1. Creates a PVC (`snap-scratch-{uid}`) sized to hold qcow2 overlay files
+1. Sets the `OverlaySnapshotActive` condition on the VMI.
+2. Creates a PVC (`snap-scratch-{uid}`) sized to hold qcow2 overlay files
    for all disks during the overlay window. The size can be set explicitly
    via `spec.overlayScratchSize` on the VMSnapshot. If not configured, a
    default size is used
    (see [Scalability](#scalability) for details).
-2. Hotplugs the PVC as a UtilityVolume to the VMI via JSON patch on
+3. Hotplugs the PVC as a UtilityVolume to the VMI via JSON patch on
    `spec.utilityVolumes` (same mechanism as [VEP #90 Utility Volumes](https://github.com/kubevirt/enhancements/blob/main/veps/sig-storage/utility-volumes.md),
    same pattern as the incremental backup push-target PVC in [VEP #25](https://github.com/kubevirt/enhancements/blob/main/veps/sig-storage/incremental-backup.md)).
-3. Adds a Kubernetes finalizer `snapshot.kubevirt.io/overlay-protection`
+4. Adds a Kubernetes finalizer `snapshot.kubevirt.io/overlay-protection`
    on the scratch PVC to prevent its deletion while overlays are active.
-4. Waits for the volume to reach `VolumeReady` or `HotplugVolumeMounted` status.
+5. Waits for the volume to reach `VolumeReady` or `HotplugVolumeMounted` status.
 
 ### Phase 1: QEMU atomic snapshot (overlay creation)
 
@@ -255,7 +262,7 @@ requeues for retry.
 ### Phase 4: Cleanup
 
 Once all disks are back on their base images:
-- Clear the `snapshot.kubevirt.io/overlay-active` annotation on the VMI
+- Remove the `OverlaySnapshotActive` condition from the VMI
 - Detach the utility volume via JSON patch
 - Remove the finalizer from the scratch PVC
 - Delete the scratch PVC
@@ -274,6 +281,7 @@ sequenceDiagram
     User->>SC: Create VMSnapshot
 
     Note over SC,VL: Phase 0: Scratch Volume Setup
+    SC->>SC: Set OverlaySnapshotActive condition on VMI
     SC->>SC: Create scratch PVC + finalizer
     SC->>VH: Hotplug as UtilityVolume
     VH->>VL: Mount scratch volume
@@ -315,7 +323,7 @@ sequenceDiagram
     VL-->>SC: All disks back on base images
 
     Note over SC,VH: Phase 4: Cleanup
-    SC->>SC: Clear overlay-active annotation
+    SC->>SC: Remove OverlaySnapshotActive condition
     SC->>VH: Detach UtilityVolume
     SC->>SC: Remove finalizer, delete scratch PVC
 
@@ -325,31 +333,26 @@ sequenceDiagram
 
 ### Overlay state tracking
 
-An annotation `snapshot.kubevirt.io/overlay-active` is set on the VMI when
-overlays are active (after Phase 1) and cleared after successful commit
-(after Phase 3). This annotation is checked by:
+A VMI condition `OverlaySnapshotActive` is set at the start of Phase 0 and
+removed after successful commit (Phase 3). This condition is checked by:
 
-- **Migration**: blocks `startMigration()` - migration with overlays would
-  break the backing chain on the target node
-- **Backup**: blocks `BackupVirtualMachine()` - backup checkpoints on an
-  overlay become invalid after commit
+- **Migration**: blocks `startMigration()` - the overlay references the
+  base image on the source node which would not exist on the target
+- **Backup**: blocks `BackupVirtualMachine()` - concurrent backup and
+  snapshot overlay operations would conflict
 - **Volume unplug**: blocks `removeVolumeRequestHandler()` - unplugging a
   disk with an active overlay would orphan the overlay
 - **Disk resize**: skips resize in `syncDisks()` - resizing during overlay
   could cause size mismatch between overlay and base
 - **VM destroy**: `KillVMI()` aborts active block jobs before
   `DestroyFlags()` - prevents orphaned block jobs
-- **VM crash / pod eviction**: the overlay + base together remain consistent
-  (no data loss). Once the VM comes back up, the pending commit resumes and
-  completes the cleanup. The scratch PVC finalizer ensures it survives across
-  restarts.
-
-### Fallback
-
-If `ExternalSnapshot` fails for any reason (no guest agent, libvirt error,
-unsupported configuration), the controller falls back to the current
-sequential CSI path automatically, as the new flow is regarded as an
-optimization, not a requirement.
+- **VM crash / pod eviction**: the scratch PVC finalizer ensures it
+  survives across restarts. On startup, virt-launcher inspects the actual
+  disk state (checks for overlay files on the scratch PVC). If overlays
+  are found, the VM starts in paused mode with the overlay still active
+  and a live block-commit is performed before unpausing. If the scratch PVC is lost (despite the finalizer), the
+  base images are consistent (application-consistent at the snapshot
+  point) but missing writes from the overlay window.
 
 ### Restore (unchanged)
 
@@ -360,7 +363,7 @@ VolumeSnapshots the same way it does today. No changes to the restore path.
 
 ## API Examples
 
-### VMSnapshot with overlay scratch size override
+### VMSnapshot with external snapshot enabled
 
 ```yaml
 apiVersion: snapshot.kubevirt.io/v1beta1
@@ -372,18 +375,24 @@ spec:
     apiGroup: kubevirt.io
     kind: VirtualMachine
     name: my-windows-vm
-  overlayScratchSize: "8Gi"  # optional, overrides default calculation
+  externalSnapshot: true          # optional, defaults to false (current flow)
+  overlayScratchSize: "8Gi"       # optional, overrides default scratch size
 ```
 
-### Overlay-active annotation on VMI during snapshot
+### VMI condition during overlay snapshot
 
 ```yaml
 apiVersion: kubevirt.io/v1
 kind: VirtualMachineInstance
 metadata:
   name: my-windows-vm
-  annotations:
-    snapshot.kubevirt.io/overlay-active: "my-snapshot"
+status:
+  conditions:
+  - type: OverlaySnapshotActive
+    status: "True"
+    reason: SnapshotInProgress
+    message: "Snapshot my-snapshot has active overlays"
+    lastTransitionTime: "2026-05-28T12:00:00Z"
 ```
 
 ### Scratch PVC with finalizer
@@ -435,6 +444,8 @@ blocks that changed since the last snapshot.
   2x permanent storage (a full-size target PVC per disk for the lifetime of
   the VM)
 - Additional PVC management complexity (sizing, lifecycle, storage class)
+- Uses the backup API (`virDomainBackupBegin`) for snapshot purposes,
+  conflating two APIs that are intentionally kept separate in libvirt/QEMU
 
 ### Tuning external-snapshotter parameters
 
