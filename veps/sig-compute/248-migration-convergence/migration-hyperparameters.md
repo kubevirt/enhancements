@@ -1,23 +1,26 @@
 # Migration stall detection: hyper-parameters and defaults
 
-This document argues for **reasonable starting defaults** for the knobs used by [VEP 248: Live Migration Stability & Convergence](./migration-convergence.md) (iteration-aligned stall detection, local-minimum switch-over, and related behavior). Values here are intended for the **alpha** phase; beta should revisit tuning using cluster telemetry as described in the VEP.
+This document argues for **reasonable starting defaults** for the knobs used by [VEP 248: Live Migration Stability & Convergence](./migration-convergence.md) (iteration-aligned stall detection, local-minimum switch-over, and related behavior). Values here are intended for the **alpha** phase; beta should revisit tuning using data from experimental clusters as described in the VEP.
+
+**API promotion:** **`maxDowntimeMs`** is a permanent top-level `migrationConfiguration` / `MigrationPolicy` field (shipping in alpha). **`stallProgressTimeout`** is intended to become permanent at GA by repurposing `progressTimeout` (stall detection uses `experimental.stallDetector.stallProgressTimeout` during alpha/beta — see parent VEP). Other knobs may be promoted based on operational experience; today only **`switchoverTimeout`** is worth considering besides those two. The rest stay under `spec.experimental` until removed at GA.
 
 ---
 
 ## Quick reference
 
-| Knob | Existing | Where configured | Proposed default | Role (short) |
-|------|----------|------------------|------------------|--------------|
-| `progressTimeout` | Yes | `migrationConfiguration` | **60s** | Wall-clock window for “progress” and stall; bounds patience for relaxation |
-| `completionTimeoutPerGiB` | Yes | `migrationConfiguration` | **150 s/GiB** (unchanged) | Hard migration budget; stall detection usually ends jobs earlier |
-| `maxDowntimeMs` | No | `migrationConfiguration` | **900 ms** | After stall, max acceptable final pause for pre-copy-only paths without post-copy / workload disruption |
-| `stallMargin` | No | `experimental.stallDetection` | **0.04** (4%) | Relative band around best remaining bytes for stall and switch-over |
-| `ewmaAlpha` | No | `experimental.stallDetection` | **0.4** | EWMA weight on each bandwidth sample vs history |
-| `precopyPossibleFactor` | No | `experimental.stallDetection` | **1.5** | Pre-copy-only: abort if implied downtime ≥ `maxDowntimeMs ×` this factor |
-| `patienceWindowDecayFactor` | No | `experimental.stallDetection` | **0.5** | Multiplier for relaxation patience after each missed window |
-| `searchLocalMinima` | No | `experimental.stallDetection` | **true** | If **false**, switch-over as soon as stall is detected (no local-minimum wait) |
-| `observeOnly` | No | `experimental.stallDetection` | **false** | Run stall detector in "shadow mode" where decisions are logged but not acted on |
-| `elevatedLogging` | No | `experimental.stallDetection` | **true** | Leave an enhanced "trail" in both pod logs and Prometheus |
+| Knob | Existing | Where configured                                                                      | Proposed default | Role (short) |
+|------|----------|---------------------------------------------------------------------------------------|------------------|--------------|
+| `progressTimeout` | Yes | `migrationConfiguration` (GA: exposed in `MigrationPolicy` as well)                   | **150s** | Legacy path: abort when remaining bytes did not decrease; at GA repurposed as `stallProgressTimeout` (**custom values overridden**) |
+| `stallProgressTimeout` | No | `MigrationPolicy.spec.experimental.stallDetector` (GA: repurposed `progressTimeout`)  | **40s** | Sliding window for stall detection; initial relaxation patience |
+| `switchoverTimeout` | No | `MigrationPolicy.spec.experimental.stallDetector` (GA: promotion under consideration) | **60s** | Budget after switchover is triggered |
+| `completionTimeoutPerGiB` | Yes | `migrationConfiguration` / `MigrationPolicy`                                          | **150 s/GiB** (unchanged) | Hard migration budget; stall detection usually ends jobs earlier |
+| `maxDowntimeMs` | No (added by this VEP) | `migrationConfiguration` / `MigrationPolicy` (permanent)                              | **900 ms** | After stall, max acceptable final pause for pre-copy-only paths without post-copy / workload disruption |
+| `stallMargin` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **4** (integer %; applied as `/100`) | Relative band around best remaining bytes for stall and switch-over |
+| `ewmaAlpha` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **0.4** | EWMA weight on each bandwidth sample vs history |
+| `precopyPossibleFactor` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **1.5** | Pre-copy-only: abort if implied downtime ≥ `maxDowntimeMs ×` this factor |
+| `patienceWindowDecayFactor` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **0.5** | Multiplier for relaxation patience after each missed window (no minimum floor) |
+| `searchLocalMinima` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **true** | If **false**, switch-over as soon as stall is detected (no local-minimum wait) |
+| `completionTimeoutFactor` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **2.0** | Scales completion-deadline budget checks |
 
 ---
 
@@ -29,18 +32,29 @@ Empirically, the default value of `completionTimeoutPerGiB` (150s) is often seen
 
 See https://docs.google.com/spreadsheets/d/1V-FcX6gO4mNx5fBTgnBq-UnkXAn2y4pTjuYtgDZ1cCc/edit?gid=0#gid=0 (Migration Time Calculator) to see how various parameters impact migration time. Controlling precise dirty rates and bandwidth experimentally is difficult, so this analysis and evaluation of a "good" value of max completion time is based on analytical reasoning and a mathematical model of pre-copy as a geometric series.
 
-### `progressTimeout`
+### `stallProgressTimeout`
 
-The `progressTimeout` window also manages a trade-off between optimizing for a better downtime and total migration time. Large `progressTimeout` windows increase the chances of finding a better downtime at the cost of increasing the total migration time.
+The `stallProgressTimeout` window manages a trade-off between optimizing for a better downtime and total migration time. Large windows increase the chances of finding a better downtime at the cost of increasing the total migration time.
 
 A sane default for this value has the following requirements:
 (1) large enough that a temporary increase in remaining bytes (caused by bandwidth fluctuations or program workload phase change) does not **false-trigger** stall; (2) short enough not to stall migration unnecessarily; (3) grounded in typical operator tolerance.
 
-We suggest a default value of **60s** for **`progressTimeout`**. This value is large enough that dips in "remaining bytes" caused by short, temporary fluctuations in bandwidth and dirty rate are ignored, avoiding false triggers of the stall detector.
+We suggest a default value of **40s** for **`stallProgressTimeout`**. This value is large enough that dips in "remaining bytes" caused by short, temporary fluctuations in bandwidth and dirty rate are ignored, avoiding false triggers of the stall detector.
 
 UX research often cites **~10s** before users treat a UI as hung; Kubernetes’ default probe period is **10s**; many app timeouts cluster near **30s** (SSH, browsers); Windows gives up a TCP handshake after **~21s** without reply (Linux is more lenient). We infer operators care most about keeping **final** downtime **well under ~15s**; beyond that, marginal gains from finer tuning usually do not justify much longer stall-detection delay.
-At **60s** we still expect $\geq 4$ sample iterations. Assuming each sample iteration draws remaining bytes from a stationary(ish) distribution, $P(\text{at least one} \leq \text{median in 4 tries})$ = $1 − 0.5^4 = 0.9375$, which provides acceptable odds of acting near a favorable remaining-byte level.
+At **40s** we still expect several sample iterations. Assuming each sample iteration draws remaining bytes from a stationary(ish) distribution, the odds of acting near a favorable remaining-byte level remain acceptable.
 
+At **GA**, the top-level `progressTimeout` field is repurposed to carry this semantics and **pre-existing custom values are overridden** (see parent VEP).
+
+### `progressTimeout` (legacy)
+
+The existing **`progressTimeout`** field (default **150s**) lives on the KubeVirt CR `migrationConfiguration` today. It retains its legacy meaning during alpha: abort when remaining bytes do not decrease for that many seconds. Stall detection does **not** read this field; it uses `experimental.stallDetector.stallProgressTimeout` instead. It is **not** on `MigrationPolicy` in alpha; it is expected to be added when fields are merged/repurposed toward GA (see parent VEP).
+
+### `switchoverTimeout`
+
+After triggering soft or hard stop-and-copy, the migration must finish within `switchoverTimeout` seconds or abort. This is separate from `stallProgressTimeout` — the old approach of reusing `elapsedTime + progressTimeout` for switchover was problematic because `progressTimeout` serves a different role (legacy progress / stall window).
+
+**60s** is a reasonable default: long enough for QEMU to complete stop-and-copy at an elevated target downtime, short enough not to burn the full completion budget if switchover stalls.
 
 ### `maxDowntimeMs`
 
@@ -52,7 +66,7 @@ QEMU’s **target downtime** and the **downtime implied** from `remainingBytes` 
 
 ### `stallMargin`
 
-The value of the stall margin percentage balances a trade-off between migration time and downtime. A small margin is stricter about finding a near-optimal switch-over point resulting in slightly better downtimes at the cost of total migration time. We propose to use a "Stall Margin" of **4%** as we believe this value is a good balance of trade-offs.
+The value of the stall margin percentage balances a trade-off between migration time and downtime. A small margin is stricter about finding a near-optimal switch-over point resulting in slightly better downtimes at the cost of total migration time. The API stores an **integer percentage** (default **4**, meaning 4%), applied as `stallMargin/100`. We propose **4** as a good balance of trade-offs.
 
 For reference, the tables below show how a different margin percentage translates to remaining bytes and downtime thresholds. We used a 500Mbps network as the reference network because we assume most end users will have at least 1Gbps. Then, since by default, we allow two concurrent migrations, choosing 500Mbps as the reference for available bandwidth is reasonable.
 
@@ -192,11 +206,11 @@ There is **no strong empirical argument** for a particular value here yet—**1.
 
 ### `patienceWindowDecayFactor`
 
-After stall, if remaining bytes never re-enters the band around `bestRemainingBytes`, the design **relaxes** the switch-over target to the **next larger** distinct remaining-byte level in history (see the parent VEP), but only after a **patience** window. Each time that window expires without convergence, patience is multiplied by **`patienceWindowDecayFactor`** before the next relaxation step.
+After stall, if remaining bytes never re-enters the band around `bestRemainingBytes`, the design **relaxes** the switch-over target by promoting `bestRemainingBytes` to the **lowest post-stall level still recorded in history** (see the parent VEP), but only after a **patience** window. Each time that window expires without convergence, patience is multiplied by **`patienceWindowDecayFactor`** before the next relaxation step.
 
 This is again a **downtime vs total migration time** trade-off: a **larger** factor (slower decay) waits longer on each relaxation target, which may yield a slightly better switch-over but extends wall-clock time; a **smaller** factor steps through relaxed targets **faster**, shortening the migration at the cost of possibly switching on a less favorable local minimum.
 
-**0.5** (halve the patience each round) felt **reasonable**: patience for successive relaxation targets decays **fast enough** that the job does not sit too long on a `bestRemainingBytes` level that the workload or network may never hit again, while still giving each level a meaningful window anchored initially to `progressTimeout`.
+**0.5** (halve the patience each round) felt **reasonable**: patience for successive relaxation targets decays **fast enough** that the job does not sit too long on a `bestRemainingBytes` level that the workload or network may never hit again, while still giving each level a meaningful window anchored initially to `stallProgressTimeout`. There is **no minimum floor** on patience (an earlier design capped decay at 1s); patience may continue to shrink below one second.
 
 ### `searchLocalMinima`
 
@@ -204,14 +218,10 @@ The `searchLocalMinima` flag controls whether the stall detector waits for a loc
 
 A default of **true** is chosen because waiting for a local minimum generally results in a smaller final downtime. While an immediate switch-over might reduce the total migration time, the secondary goal of the stall detector is to optimize the switch-over point to minimize workload disruption.
 
-### `observeOnly`
+### `completionTimeoutFactor`
 
-The `observeOnly` flag allows the stall detector to run in a "shadow mode" where it evaluates the migration and logs its decisions (e.g., when it would have aborted or switched over) without actually interfering with the migration process. 
+Before stall-triggered switch-over, projected pause must fit the remaining migration budget:
 
-A default of **false** is chosen because the primary goal of this feature is to actively improve migration convergence and stability by acting on stalls. The "shadow mode" is primarily intended for debugging, telemetry gathering, and safe experimentation by cluster administrators who want to observe the stall detector's behavior on their workloads before fully committing to its actions.
+`impliedDowntime <= (maxCompletionTime × completionTimeoutFactor) - elapsedTime`
 
-### `elevatedLogging`
-
-The `elevatedLogging` flag controls the verbosity of the stall detector's output, leaving an enhanced "trail" in both pod logs and Prometheus metrics when enabled.
-
-A default of **true** is chosen for the alpha phase. Given the complexity of migration dynamics and the introduction of several new heuristics, having rich telemetry is crucial for evaluating the real-world performance of the stall detector. This data will be invaluable for refining the default hyper-parameters and understanding edge cases before the feature graduates to beta. Once the feature matures, high-frequency telemetry to Prometheus will be reduced or removed.
+KubeVirt today already uses a two-phase completion model that hard-aborts around 2× `maxCompletionTime`. **`completionTimeoutFactor`** (default **2**) generalizes that multiplier so the stall detector can refuse a switch-over that would exceed the scaled deadline — especially important for post-copy. Treat **2.0** as matching current abort semantics.
