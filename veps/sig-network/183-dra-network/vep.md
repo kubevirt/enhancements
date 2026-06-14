@@ -49,7 +49,6 @@ Key advantages for users/admins:
   - Permanently unsupported when using `resourceClaim`-backed claims direct, because a direct ResourceClaim is bound to a node after allocation, while migration requires a separate allocation on the destination node
 - In-tree `kubevirtci` provider support for DRA network device e2e in Alpha1 (targeted for Alpha follow-up)
 - In-tree CI e2e gating in Alpha1 (targeted for Alpha follow-up)
-- Standardizing a cross-driver MAC address configuration contract for DRA network devices
 - VM network interface hot-plug / hot-plug add for DRA network devices
 
 ## Definition of Users
@@ -131,6 +130,31 @@ When a network interface has a compatible device binding and references a networ
 4. Virt-launcher resolves the claim/request to device attributes from that metadata and generates the appropriate libvirt hostdev XML
 
 This approach keeps a clean separation: DRA handles provisioning and allocation metadata publication, while KubeVirt networks API handles VM network configuration.
+
+### MAC Propagation Design
+
+**Design rationale:** `spec.domain.devices.interfaces[].macAddress` remains the single source of truth.
+Annotation-based propagation was selected because MAC is VM-specific, while `ResourceClaimTemplate` can be shared across VMs.
+In addition, `ResourceClaim`/`ResourceClaimTemplate` objects may be created and managed by another namespace entity (for example, an admin), so KubeVirt should not depend on mutating or lifecycle-managing those objects for per-VM MAC updates.
+This keeps MAC VM-scoped while preserving claim/request identity from VM network wiring to driver consumption.
+
+The intended design direction is:
+- Use `spec.domain.devices.interfaces[].macAddress` as the source of requested MAC values.
+- Propagate requested MAC values through a standardized `k8s.v1.cni.cncf.io/dra-networks` payload keyed by `claimName` / `requestName`.
+- Keep the existing Multus-style annotation JSON shape (list of objects) for compatibility and easier cross-component adoption.
+- Keep the propagation contract generic for DRA-backed network devices.
+- Represent `macs` as a list of strings in all cases (single or multiple values) to keep a single parsing mode and support generic `count > 1` allocations; KubeVirt does not support this case yet, but the format is defined for generic consumers.
+
+Examples:
+
+Single tuple with one MAC:
+`k8s.v1.cni.cncf.io/dra-networks: '[{"claimName":"net-claim","requestName":"net-device","macs":["de:ad:00:00:be:ef"]}]'`
+
+Single tuple with multiple MACs (`count > 1`):
+`k8s.v1.cni.cncf.io/dra-networks: '[{"claimName":"net-claim","requestName":"net-device","macs":["de:ad:00:00:be:ef","de:ad:00:00:be:f0"]}]'`
+
+Two tuples (two claim/request mappings):
+`k8s.v1.cni.cncf.io/dra-networks: '[{"claimName":"net-claim-a","requestName":"net-device-a","macs":["de:ad:00:00:be:ef"]},{"claimName":"net-claim-b","requestName":"net-device-b","macs":["de:ad:00:00:be:f0"]}]'`
 
 ### Validation
 
@@ -278,6 +302,7 @@ spec:
       interfaces:
       - name: sriov-net
         sriov: {}
+        macAddress: "de:ad:00:00:be:ef"
   networks:
   - name: sriov-net
     resourceClaim:
@@ -322,28 +347,19 @@ status:
 
 ## Open Issues
 
-1. **MAC assignment for DRA-backed network interfaces (post-Alpha1):**
-   - Keep MAC support as follow-up scope rather than Alpha1 core.
-   - Define the final propagation mechanism from `spec.domain.devices.interfaces[].macAddress`.
-   - Define ownership of MAC propagation metadata generation (for example, whether Virt-Controller writes it, or an alternative component/path does).
-   - If using annotation-based propagation, standardize the `kubevirt.io/dra-networks` payload shape with `claimName` / `requestName` / `mac`. (prefix subject to change, so it will be generic and not kubevirt specific)
-     example:
-     `kubevirt.io/dra-networks: '[{"claimName":"sriov-network-claim","requestName":"vf","mac":"de:ad:00:00:be:ef"}]'`
-   - Define driver-side behavior for consuming MAC requests and applying them to the target network device.
-   - Define the minimum MAC support needed to unblock non-migration, MAC based, DRA e2e tests.
-2. **Multiple network devices mapped to the same `ResourceClaim` / `ResourceClaimTemplate`:**
+1. **Multiple network devices mapped to the same `ResourceClaim` / `ResourceClaimTemplate`:**
    - Current scope focuses on one DRA network device per VM when devices map to the same RC/RCT.
    - After [kubevirt/kubevirt#16769](https://github.com/kubevirt/kubevirt/issues/16769) is merged, support can be extended to multiple devices that reference the same RC/RCT with different `requestName` values.
-3. **`infoSource: multus` is not supported for DRA-backed interfaces:**
+2. **`infoSource: multus` is not supported for DRA-backed interfaces:**
    - For DRA-backed interfaces, `vmi.status.interfaces[].infoSource` does not report `multus-status`.
    - User impact: consumers that may rely on `infoSource` containing `multus` to identify interface origin will not get that signal for DRA-backed interfaces.
    - Add support for the reciprocal alternative (for example, DRA-tap based flow) according to user and product needs.
-4. **`ResourceClaimTemplate` requests with `count > 1` are not supported:**
+3. **`ResourceClaimTemplate` requests with `count > 1` are not supported:**
    - Current scope supports one allocated device per request for DRA-backed network interfaces.
-5. **Multiple matched devices are not supported:**
+4. **Multiple matched devices are not supported:**
    - When multiple devices match for the same request, KubeVirt fails with an error.
    - Reference: [kubevirt/kubevirt#17028 (diff)](https://github.com/kubevirt/kubevirt/pull/17028/files#diff-0027cc61eb4150ec3e72d9bb6038bc08f5448b06d0211010de6995883126ca1aR128)
-6. **Mixed device types in the same `ResourceClaimTemplate` are not yet validated:**
+5. **Mixed device types in the same `ResourceClaimTemplate` are not yet validated:**
    - A `ResourceClaimTemplate` that includes mixed device types (for example, GPU and SR-IOV), with a VM that requests both, is expected to be supported.
    - This scenario was not validated in the current scope and must be validated in follow-up work.
    - This follow-up is important because mixed-type claims are a key DRA capability.
