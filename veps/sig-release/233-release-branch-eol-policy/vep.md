@@ -370,6 +370,47 @@ VEP because:
 - An LTS model could be layered on top of this policy in a future VEP if
   demand exists
 
+### Alternative 6: Open-ended best-effort branches
+
+Under this model, the 3 most recent releases would still receive full upstream
+support (CVE backports, bug fixes, full CI) as in the primary proposal. Older
+release branches, however, would not be archived or locked at EOL. Instead,
+they would remain open for merges on a **best-effort, no-obligation basis**.
+Anyone willing to do the work — downstream vendors, individual contributors,
+or other interested parties — could propose cherry-picks to these branches.
+There would be no upstream commitment to initiate, review, or merge backports,
+and no requirement for CI to be maintained.
+
+This differs from the status quo (Alternative 3) in that the upstream
+community's obligation is explicitly bounded to 3 releases. The distinction
+is that branches beyond the support window are not closed — they are simply
+deprioritized, with no expectation of upstream attention.
+
+This alternative was not adopted because:
+
+- It is functionally close to the current situation. Without CI, review
+  obligations, or any structured process, "open for merges" provides little
+  practical value over maintaining a private fork — cherry-picks to branches
+  with no CI cannot be validated, and merges without review risk introducing
+  regressions
+- It creates a false sense of support. Users and downstream consumers may see
+  open branches as maintained when they are not, undermining the goal of clear
+  communication about which releases receive security and bug fixes
+- Without CI, backports to old branches cannot be verified against
+  infrastructure drift, dependency changes, or API incompatibilities that
+  accumulate over time. Merging unvalidated cherry-picks risks shipping
+  broken patches
+- The unbounded number of open branches remains — the branch count never
+  decreases, preserving the same organizational and infrastructure sprawl
+  this VEP aims to address
+- Review responsibility is ambiguous. If no upstream maintainer is obligated
+  to review, cherry-picks may sit indefinitely or be merged without adequate
+  scrutiny, depending on who has merge permissions
+- Alternative 4 (two-tier support) addresses the same underlying need —
+  giving downstream parties a place to land backports upstream — but with
+  structured governance, CI requirements, and a bounded Tier 2 window that
+  avoids these pitfalls
+
 ## Scalability
 
 This VEP improves scalability by bounding the number of active release
