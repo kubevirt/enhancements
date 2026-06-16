@@ -32,9 +32,17 @@ to a situation where CVE fixes, dependency updates, and other backports must be
 applied to an ever-growing number of branches, consuming significant
 contributor time and CI resources.
 
-This VEP proposes adopting a hard EOL policy modeled on the
-[Kubernetes patch release support period](https://kubernetes.io/releases/patch-releases/#support-period),
-limiting active maintenance to the **3 most recent minor releases**.
+This VEP proposes adopting a two-tier EOL policy that combines the
+[Kubernetes patch release support period](https://kubernetes.io/releases/patch-releases/#support-period)
+with structured downstream-aligned extended maintenance:
+
+- **Tier 1 — Full support**: The **3 most recent minor releases** receive
+  active upstream maintenance including CVE fixes, bug fixes, and dependency
+  updates with full CI. This matches the Kubernetes model.
+- **Tier 2 — Extended maintenance**: The **next 2 older releases** remain open
+  for merges but do not receive proactive upstream backports. Downstream
+  vendors or other interested parties may propose cherry-picks and are
+  responsible for funding CI on these branches.
 
 ## Motivation
 
@@ -61,9 +69,10 @@ and `release-1.2`
 [#10675](https://github.com/kubevirt/kubevirt/pull/10675),
 [#10674](https://github.com/kubevirt/kubevirt/pull/10674),
 [#10673](https://github.com/kubevirt/kubevirt/pull/10673)).
-Under a 3-release policy, only 3 branches (1.0, 1.1, 1.2) would have been
-in scope. Notably, `release-0.49` targeted Kubernetes 1.24, which had already
-been EOL for months when the fix landed.
+Under the proposed two-tier policy, 5 branches (0.58, 0.59, 1.0, 1.1, 1.2)
+would have been in scope (3 Tier 1 + 2 Tier 2), with `release-0.49` and
+`release-0.53` at full EOL. Notably, `release-0.49` targeted Kubernetes 1.24,
+which had already been EOL for months when the fix landed.
 
 ### CVE-2024-21626 — runc Container Escape (Jan 2024, Critical)
 
@@ -94,12 +103,19 @@ A denial-of-service vulnerability in Go's crypto library was backported to
 
 ### CVE Backport Scope Comparison
 
-| CVE | Date | Severity | Branches Backported | Under 3-Release Policy |
-|-----|------|----------|--------------------:|---------------------:|
-| CVE-2023-39325 | Oct 2023 | High | 7 | 3 |
-| CVE-2024-21626 | Jan 2024 | Critical | 4 | 3 |
-| CVE-2025-22869 | 2025 | High | 2 | 2 |
-| CVE-2025-47913 | 2025 | High | 2 | 2 |
+| CVE | Date | Severity | Branches Backported | Under 3-Release-Only | Under Two-Tier (T1 + T2) |
+|-----|------|----------|--------------------:|---------------------:|-------------------------:|
+| CVE-2023-39325 | Oct 2023 | High | 7 | 3 | 5 (3 + 2) |
+| CVE-2024-21626 | Jan 2024 | Critical | 4 | 3 | 4 (3 + 1) |
+| CVE-2025-22869 | 2025 | High | 2 | 2 | 2 (0 + 2) |
+| CVE-2025-47913 | 2025 | High | 2 | 2 | 2 (1 + 1) |
+
+Under a 3-release-only policy, branches beyond the most recent 3 are closed
+and downstream vendors must carry backports in private forks. The two-tier
+model keeps the upstream community obligation bounded to 3 releases (Tier 1)
+while providing open Tier 2 branches where vendors can land backports
+upstream. Note that Tier 2 backports are at the vendor's discretion — the
+upstream community is not obligated to initiate or review them.
 
 The pattern is clear: without an enforced EOL, each CVE response requires
 work across an unpredictable and growing set of branches. This creates
@@ -165,6 +181,10 @@ several compounding problems:
   releases.
 - As a **downstream distributor**, I want a predictable upstream EOL schedule
   so that I can plan my own support lifecycle accordingly.
+- As a **downstream distributor**, I want a structured upstream path to land
+  backports for releases beyond the upstream full-support window so that I do
+  not have to maintain private forks during my product's extended support
+  period.
 - As an **end user**, I want to know exactly which KubeVirt versions are
   supported so that I can plan upgrades within the support window.
 
@@ -181,64 +201,136 @@ several compounding problems:
 
 ### Support Window
 
-KubeVirt will support the **3 most recent minor releases**. With 3 minor
-releases per year (~every 15 weeks), this provides a support window of
-approximately **12-15 months** per release — closely matching the Kubernetes
-support period of ~14 months.
+KubeVirt will adopt a **two-tier support model**:
+
+- **Tier 1 — Full support (3 most recent releases)**: The upstream community
+  actively backports CVEs, bug fixes, and dependency updates. Full CI is
+  maintained by the upstream project. This matches the
+  [Kubernetes patch release support period](https://kubernetes.io/releases/patch-releases/#support-period)
+  and provides approximately **12-15 months** of full support per release.
+- **Tier 2 — Extended maintenance (next 2 older releases)**: The branch
+  remains open for merges but does not receive proactive upstream backports.
+  Downstream vendors or other interested parties may propose cherry-picks. CI
+  for Tier 2 branches is maintained by the parties who need them (e.g., via
+  sponsored CI lanes in `kubevirt/project-infra`). The upstream community is
+  not obligated to initiate or review backports for Tier 2 branches.
+
+With 3 minor releases per year (~every 15 weeks), Tier 1 provides ~12-15
+months of full upstream support. Tier 2 extends the window by an additional
+~8-10 months, giving downstream distributors a structured upstream target for
+backports during their extended support windows.
+
+This two-tier model is motivated by the structural gap between upstream
+release cadence and downstream product support windows. Downstream products
+built on KubeVirt typically maintain support windows of 18-24 months (or
+longer for EUS releases), exceeding the ~12-15 month Tier 1 window by 9-15
+months depending on the release type. Without Tier 2, downstream teams must
+independently carry backports in private forks during this gap period.
 
 | Aspect | Current Policy | Proposed Policy |
 |--------|---------------|-----------------|
-| Supported releases | Unbounded ("not enforced") | 3 most recent minor releases |
-| Max active branches | 8-13+ for CVEs | 3 (plus main) |
-| EOL enforcement | Soft/optional | Hard cutoff |
-| CVE backport scope | All "willing" branches | 3 releases |
-| Support window | Indefinite | ~12-15 months |
+| Supported releases | Unbounded ("not enforced") | 3 Tier 1 + 2 Tier 2 |
+| Max active branches | 8-13+ for CVEs | 5-6 (3 T1 + 2-3 T2, plus main) |
+| EOL enforcement | Soft/optional | Hard cutoff after Tier 2 |
+| Upstream CVE backport scope | All "willing" branches | 3 releases (Tier 1) |
+| Tier 2 CVE backports | N/A | At vendor discretion |
+| Full support window | Indefinite | ~12-15 months (Tier 1) |
+| Extended maintenance window | N/A | ~20-25 months total (Tier 1 + Tier 2) |
 
-### EOL Trigger
+### Tier Lifecycle
 
-A release reaches EOL when the **third subsequent minor release reaches GA**.
-For example:
+A release progresses through the following states:
 
-| Event | Supported Releases |
-|-------|-------------------|
-| v1.7 GA | v1.7, v1.6, v1.5 |
-| v1.8 GA | v1.8, v1.7, v1.6 — **v1.5 reaches EOL** |
-| v1.9 GA | v1.9, v1.8, v1.7 — **v1.6 reaches EOL** |
+1. **Tier 1 (Full support)**: From GA until the 3rd subsequent minor release
+   reaches GA.
+2. **Tier 2 (Extended maintenance)**: From Tier 1 EOL until either:
+   - No downstream vendor declares an active support window for the release, or
+   - The 5th subsequent minor release reaches GA (maximum Tier 2 duration of
+     2 additional release cycles)
+3. **Full EOL**: The branch is archived and no further changes are accepted.
 
-### EOL Actions
+| Event | Tier 1 | Tier 2 |
+|-------|--------|--------|
+| v1.7 GA | v1.7, v1.6, v1.5 | v1.4, v1.3 |
+| v1.8 GA | v1.8, v1.7, v1.6 | v1.5, v1.4 — **v1.3 reaches full EOL** |
+| v1.9 GA | v1.9, v1.8, v1.7 | v1.6, v1.5 — **v1.4 reaches full EOL** |
 
-When a release reaches EOL, the following actions are taken:
+### Tier 1 to Tier 2 Transition Actions
+
+When a release moves from Tier 1 to Tier 2:
+
+1. **Support matrix update**: The release is marked as Tier 2 in the
+   [sig-release support matrix](https://github.com/kubevirt/sig-release/blob/main/releases/k8s-support-matrix.md).
+2. **CI transition**: Upstream-funded Prow jobs are removed. Downstream
+   vendors that need CI for the branch are responsible for configuring and
+   funding their own lanes in `kubevirt/project-infra`.
+3. **Announcement**: The Tier 2 transition is announced on the `kubevirt-dev`
+   mailing list as part of the new release announcement.
+4. **Backport policy change**: The branch remains open for merges, but
+   cherry-pick PRs are no longer initiated by the upstream community.
+   Downstream vendors may propose cherry-picks following the standard
+   backporting process.
+
+### Full EOL Actions
+
+When a release reaches full EOL (exits Tier 2):
 
 1. **Branch protection**: The release branch is marked read-only. No further
    PRs will be merged.
-2. **CI removal**: All Prow presubmit and periodic jobs for the release branch
-   are removed from `kubevirt/project-infra`.
-3. **Support matrix update**: The release is marked as EOL in the
-   [sig-release support matrix](https://github.com/kubevirt/sig-release/blob/main/releases/k8s-support-matrix.md).
+2. **CI removal**: All remaining Prow jobs (including vendor-sponsored lanes)
+   for the release branch are removed from `kubevirt/project-infra`.
+3. **Support matrix update**: The release is marked as EOL in the sig-release
+   support matrix.
 4. **Backport rejection**: Cherry-pick PRs targeting EOL branches are
    auto-closed by a bot with a standard message directing users to upgrade.
-5. **Announcement**: EOL is announced on the `kubevirt-dev` mailing list as
-   part of the new release announcement.
+5. **Announcement**: Full EOL is announced on the `kubevirt-dev` mailing list.
 
-### CVE Handling for EOL Releases
+### CVE Handling
 
-CVE reports against EOL releases will be handled as follows:
+CVE responses differ by tier:
 
-- If the CVE affects a supported release, it will be fixed in supported
-  releases only.
-- The CVE advisory will note which releases contain the fix and recommend
-  upgrading from EOL releases.
-- No backports to EOL branches will be made, regardless of severity.
+- **Tier 1 branches**: The upstream community actively backports CVE fixes as
+  part of the standard release process.
+- **Tier 2 branches**: Downstream vendors or interested parties may propose
+  CVE backports as cherry-picks. The upstream community is not obligated to
+  initiate these backports, but may review and merge them following the
+  standard process. CVE advisories will note that Tier 2 branches may receive
+  fixes depending on vendor activity.
+- **Full EOL branches**: No backports will be made, regardless of severity.
+  CVE advisories will recommend upgrading from EOL releases.
 
-This is consistent with how Kubernetes and most major open-source projects
-handle CVEs in EOL releases.
+### Tier 2 Branch Governance
+
+Tier 2 branches have the following governance rules:
+
+- **Cherry-pick proposals**: Any interested party may propose cherry-picks to
+  Tier 2 branches following the standard backporting process documented in
+  [docs/release-branch-backporting.md](https://github.com/kubevirt/kubevirt/blob/main/docs/release-branch-backporting.md).
+- **Review responsibility**: The proposing party is responsible for finding
+  reviewers. Upstream maintainers may review Tier 2 cherry-picks but are not
+  obligated to do so. Downstream organizations are encouraged to designate
+  reviewers from their own contributors.
+- **CI requirements**: At least one CI lane must be active and passing for a
+  Tier 2 branch to accept merges. The CI lane must be funded and maintained by
+  the parties that need the branch. Vendor-sponsored CI lanes can be
+  configured in `kubevirt/project-infra` following the existing sponsored lane
+  process.
+- **Branch closure**: A Tier 2 branch is closed (moved to full EOL) when
+  either no downstream vendor declares an active support window or the maximum
+  Tier 2 duration is reached. Vendors should declare their support windows by
+  updating the sig-release support matrix or notifying SIG Release.
 
 ### Downstream Extended Support
 
-Downstream distributors who need longer support windows are free to maintain
-their own forks and backport patches independently. The upstream project's EOL
-does not prevent downstream organizations from continuing to ship patches for
-older releases in their own products.
+Tier 2 provides a structured upstream path for downstream vendors to land
+backports without maintaining private forks. This eliminates the gap between
+upstream EOL and downstream end-of-maintenance that would exist under a
+3-release-only policy.
+
+Downstream distributors that need support beyond the Tier 2 window are free
+to maintain their own forks and backport patches independently. The upstream
+project's full EOL does not prevent downstream organizations from continuing
+to ship patches for older releases in their own products.
 
 ### Transition Plan
 
@@ -249,9 +341,11 @@ To avoid disruption, the following transition plan is proposed:
    this VEP is accepted.
 2. **Grace period**: Provide one full release cycle of notice. For example, if
    announced with v1.9 GA, the policy takes effect at v1.10 GA.
-3. **Initial EOL batch**: At the policy effective date, all releases older than
-   N-2 (where N is the current release) are marked EOL simultaneously. As of
-   v1.10 GA, this would mean v1.7 and earlier are EOL.
+3. **Initial tier assignment**: At the policy effective date, all releases
+   older than N-4 (where N is the current release) are marked full EOL.
+   Releases N-3 and N-4 enter Tier 2. As of v1.10 GA, this would mean v1.10,
+   v1.9, v1.8 are Tier 1; v1.7, v1.6 are Tier 2; and v1.5 and earlier are
+   full EOL.
 4. **Archive old branches**: For branches that have been de facto dead for
    years (release-0.4 through release-0.57), immediately:
    - Remove any remaining CI configuration
@@ -266,9 +360,11 @@ The following documentation changes are required:
   defined in this VEP. Remove the sentence *"The EOL of a KubeVirt release is
   currently not enforced."*
 - **`docs/release-branch-backporting.md`**: Add a section clarifying that
-  backports are only accepted for releases within the support window.
-- **sig-release support matrix**: Ensure EOL releases are clearly marked and
-  the support window policy is documented.
+  backports are only accepted for releases within the Tier 1 or Tier 2
+  support window, and document the Tier 2 cherry-pick process.
+- **sig-release support matrix**: Ensure releases are clearly marked with
+  their current tier (Tier 1, Tier 2, or EOL) and the support window policy
+  is documented.
 
 ## API Examples
 
@@ -314,48 +410,36 @@ because:
   tooling can prevent
 - The fundamental problem is policy, not tooling
 
-### Alternative 4: Two-tier support with downstream-aligned extended maintenance
+### Alternative 4: 3-release-only with no extended maintenance
 
-Downstream products built on KubeVirt may have maintenance support windows
-(~18 months or more) that exceed the proposed 3-release upstream window (~12-15
-months). The gap between upstream EOL and downstream end-of-maintenance is
-typically 3-6 months, during which the downstream team must independently carry
-CVE fixes and backports without an upstream branch to target.
+Under this simpler model, only the **3 most recent minor releases** receive
+any upstream support. When a release reaches EOL (the 3rd subsequent release
+reaches GA), the branch is immediately archived — marked read-only, CI
+removed, cherry-picks auto-closed. Downstream distributors that need longer
+support windows must maintain their own forks and backport patches
+independently.
 
-A two-tier model could address this:
+This was the original primary proposal for this VEP. It was not adopted
+because:
 
-- **Tier 1 — Full support (3 most recent releases)**: The upstream community
-  actively backports CVEs, bug fixes, and dependency updates. Full CI is
-  maintained. This is the upstream community commitment and matches the
-  Kubernetes model.
-- **Tier 2 — Extended maintenance (next 2 releases)**: The branch remains open
-  for merges but does not receive proactive upstream backports. Downstream
-  teams or other interested parties may propose cherry-picks, and CI for these
-  branches is maintained by the parties who need them (e.g., via sponsored CI
-  lanes in `kubevirt/project-infra`). The upstream community is not obligated
-  to initiate or review backports for Tier 2 branches.
+- The gap between upstream EOL and downstream end-of-maintenance is
+  structural, not incidental. With downstream support windows of 18-24 months
+  (or longer for EUS releases) and an upstream Tier 1 window of ~12-15
+  months, downstream teams face a **9-15 month gap** where they must
+  independently carry backports in private forks with no upstream branch to
+  target
+- This gap repeats for every release going forward and is a direct
+  consequence of the mismatch between upstream release cadence and downstream
+  product lifecycle
+- Forcing all downstream maintenance into private forks reduces transparency
+  and prevents the broader community from benefiting from vendor-contributed
+  backports
+- The two-tier model addresses these concerns while keeping the upstream
+  community's obligation bounded to the same 3 releases
 
-This gives downstream distributors a place to land backports upstream rather
-than carrying them in a private fork, while keeping the upstream community's
-commitment bounded to 3 releases.
-
-This alternative was not adopted as the primary proposal because:
-
-- It increases the maximum number of active branches from 3 to 5, adding
-  complexity even if the obligation for the extra branches is shifted
-  downstream
-- It introduces ambiguity about review responsibilities — who approves
-  cherry-picks to Tier 2 branches if the upstream community is not obligated?
-- CI cost for Tier 2 branches must be explicitly funded and maintained by
-  downstream consumers, which requires coordination outside the upstream
-  project
-- The 3-release model is simpler to adopt as a first step; a Tier 2 extension
-  could be added later if downstream demand justifies it
-
-However, if the community determines that the downstream maintenance gap is
-too large, this two-tier model is the recommended compromise over simply
-extending full support to 5 releases, as it preserves the bounded upstream
-commitment while providing a structured path for downstream needs.
+The 3-release-only model remains viable if the community determines that the
+complexity of Tier 2 branch governance outweighs the benefits of structured
+extended maintenance.
 
 ### Alternative 5: LTS releases
 
@@ -374,8 +458,11 @@ VEP because:
 
 This VEP improves scalability by bounding the number of active release
 branches. The maintenance and CI cost of release branches scales linearly with
-the number of branches, so reducing from 8-13+ active branches to 3 represents
-a proportional reduction in resource consumption.
+the number of branches, so reducing from 8-13+ active branches to 5-6 (3
+Tier 1 + 2-3 Tier 2) represents a proportional reduction in resource
+consumption. The upstream community's active maintenance obligation is further
+bounded to 3 Tier 1 branches, with Tier 2 CI costs shifted to the downstream
+vendors that need them.
 
 ## Update/Rollback Compatibility
 
@@ -391,12 +478,18 @@ and is documented in [docs/updates.md](https://github.com/kubevirt/kubevirt/blob
 No functional testing changes are required for the policy itself. The
 enforcement mechanisms should be validated as follows:
 
-- **Branch protection**: Verify that PRs to EOL branches cannot be merged
-- **CI removal**: Verify that no Prow jobs are configured for EOL branches
-- **Bot behavior**: Verify that cherry-pick PRs to EOL branches receive the
-  standard auto-close message
+- **Tier 2 transition**: Verify that upstream CI lanes are removed and
+  vendor-sponsored lanes can be configured for Tier 2 branches
+- **Tier 2 merges**: Verify that cherry-pick PRs can be merged to Tier 2
+  branches when vendor-sponsored CI is passing
+- **Branch protection**: Verify that PRs to full-EOL branches cannot be
+  merged
+- **CI removal**: Verify that no Prow jobs are configured for full-EOL
+  branches
+- **Bot behavior**: Verify that cherry-pick PRs to full-EOL branches receive
+  the standard auto-close message
 - **Support matrix**: Verify that the sig-release matrix accurately reflects
-  EOL status after each new GA release
+  Tier 1, Tier 2, and EOL status after each new GA release
 
 ## Implementation History
 
@@ -419,13 +512,19 @@ graduation model. Instead, the following milestones apply:
 
 ### Phase 2: Enforcement
 
-- [ ] Branch protection applied to all pre-existing EOL branches
-- [ ] CI lanes removed for EOL branches in `kubevirt/project-infra`
-- [ ] Auto-close bot configured for cherry-pick PRs targeting EOL branches
-- [ ] sig-release support matrix updated
+- [ ] Branch protection applied to all pre-existing full-EOL branches
+- [ ] CI lanes removed for full-EOL branches in `kubevirt/project-infra`
+- [ ] Auto-close bot configured for cherry-pick PRs targeting full-EOL
+      branches
+- [ ] sig-release support matrix updated with Tier 1, Tier 2, and EOL status
+- [ ] Vendor-sponsored CI lane process documented for Tier 2 branches
 
 ### Phase 3: Steady State
 
-- [ ] EOL enforcement automated as part of the release procedure
-- [ ] Each new GA release automatically triggers EOL actions for the N-3
-      release
+- [ ] Tier lifecycle automated as part of the release procedure
+- [ ] Each new GA release automatically triggers Tier 1 → Tier 2 transition
+      for the N-3 release
+- [ ] Each new GA release evaluates full EOL for Tier 2 branches with no
+      active vendor support window
+- [ ] Tier 2 branch governance documented in release procedure
+- [ ] Vendor CI sponsorship process documented and operational
