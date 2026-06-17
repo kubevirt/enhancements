@@ -1,6 +1,6 @@
 # Migration stall detection: hyper-parameters and defaults
 
-This document argues for **reasonable starting defaults** for the knobs used by [VEP 248: Live Migration Stability & Convergence](./migration-convergence.md) (iteration-aligned stall detection, local-minimum switch-over, and related behavior). Values here are intended for the **alpha** phase; beta should revisit tuning using cluster telemetry as described in the VEP.
+This document argues for **reasonable starting defaults** for the knobs used by [VEP 248: Live Migration Stability & Convergence](./vep.md) (iteration-aligned stall detection, local-minimum switch-over, and related behavior). Values here are intended for the **alpha** phase; beta should revisit tuning using cluster telemetry as described in the VEP.
 
 ---
 
