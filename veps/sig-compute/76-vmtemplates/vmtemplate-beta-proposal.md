@@ -20,7 +20,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-Following [the initial proposal](./vmtemplate-proposal.md), this document
+Following [the initial proposal](./vep.md), this document
 describes the graduation of the `template.kubevirt.io` API from Alpha to Beta.
 
 The `VirtualMachineTemplate` and `VirtualMachineTemplateRequest` CRDs are
