@@ -1,0 +1,25 @@
+name: Check VEP Naming Convention
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-naming:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate VEP naming convention
+        env:
+          VEP_DIRS: veps/meta-VEPs veps/sig-compute veps/sig-network veps/sig-observability veps/sig-release veps/sig-storage
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 .github/scripts/check-vep-naming.py
