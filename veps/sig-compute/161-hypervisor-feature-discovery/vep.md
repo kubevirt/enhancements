@@ -1,4 +1,4 @@
-# VEP #97.1: Capability Registry for KubeVirt Feature Discovery across Hypervisors and Architectures
+# VEP #161: Capability Registry for KubeVirt Feature Discovery across Hypervisors and Architectures
 
 ## VEP Status Metadata
 
