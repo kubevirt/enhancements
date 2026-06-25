@@ -52,8 +52,8 @@ volume lets it live-migrate on the storage the cluster already runs, with no NFS
 
 - Allow the persistent vm-state backend volume to be created in `Block` mode.
 - Store EFI NVRAM directly on the raw block device (no filesystem) and keep it live-migratable.
-- Store vTPM state on the same kind of block device via swtpm's single-file backend, keeping it
-  live-migratable.
+- Store vTPM state on a separate raw block device (one device per blob) via swtpm's single-file
+  backend, keeping it live-migratable.
 - Keep `Filesystem` the default; no behavior change for existing users; guard the new behavior behind
   a feature gate during alpha.
 
@@ -100,18 +100,28 @@ libvirt does not auto-populate a *raw* block nvram from the firmware template (o
 10.8), so virt-launcher seeds the blank device from the OVMF VARS template once before libvirt opens
 it. The VARS travel in QEMU's normal pflash migration stream.
 
-**vTPM (version-gated, same model).** swtpm's single-file backend targets a block device directly
-(`--tpmstate backend-uri=file://<dev>`); libvirt exposes it via the TPM emulator
-`<source type='file'>` element. swtpm/libvirt transfer the TPM state through the migration stream
-(`CMD_SET_STATEBLOB`) and `swtpm --migration release-lock-outgoing` hands the lock from source to
-target; shared storage is not required for the transfer itself.
+**vTPM (same model, libvirt-version-gated).** swtpm's single-file backend targets a block device
+directly (`--tpmstate backend-uri=file://<dev>`); libvirt exposes it via the TPM emulator
+`<source type='file'>` element (libvirt >= 10.9). swtpm/libvirt transfer the TPM state through the
+migration stream (`CMD_SET_STATEBLOB`) and `swtpm --migration release-lock-outgoing` hands the lock
+from source to target; shared storage is not required for the transfer itself.
+
+**One raw device per blob.** Each raw block device backs exactly one state blob, so EFI NVRAM and
+vTPM state cannot share a device: a VM with both persistent EFI and persistent TPM gets two backend
+PVCs -- `/dev/vm-state` for the NVRAM pflash and a second `/dev/vm-state-tpm` for the swtpm state.
+
+**Device sizing.** A Block device is consumed directly (the NVRAM device *is* the OVMF varstore
+pflash), so it is sized to the firmware/state blob rather than the larger Filesystem default: the
+q35 firmware-flash window caps the combined OVMF code + varstore pflash at 8 MiB, so a too-large
+varstore device makes QEMU refuse to start. This requires a storage class whose minimum volume size
+is small enough (a few MiB).
 
 **Single-writer safety.** Neither the raw pflash nvram nor the swtpm `file://` backend takes a
 filesystem-level lock (the swtpm *dir* backend does; the *file* backend does not). On a dual-primary
 RWX-Block volume, single-writer is guaranteed by the migration protocol: QEMU pauses and flushes the
 source before the target resumes (pflash), and swtpm's `--migration` release/acquire hands off the
-TPM lock. The implementation rejects `Block` mode for VMs that also require persistent TPM (until the
-TPM phase) or CBT, so an unsupported combination cannot be silently misconfigured.
+TPM lock. The implementation rejects `Block` mode only for VMs that also enable changed-block-tracking
+(CBT), whose multi-blob bitmaps need a filesystem; that combination cannot be silently misconfigured.
 
 ## API Examples
 
@@ -135,12 +145,12 @@ Resulting libvirt domain (EFI):
 </os>
 ```
 
-Resulting libvirt domain (vTPM, phase 2):
+Resulting libvirt domain (vTPM, on its own second device):
 
 ```xml
 <tpm model='tpm-crb'>
   <backend type='emulator' version='2.0' persistent_state='yes'>
-    <source type='file' path='/dev/vm-state'/>
+    <source type='file' path='/dev/vm-state-tpm'/>
   </backend>
 </tpm>
 ```
@@ -172,28 +182,28 @@ VMs off Block before downgrade (documented).
 ## Functional Testing Approach
 
 - Unit: access-mode/volume-mode negotiation; `<nvram type='block'>` and TPM `<source type='file'>`
-  XML emission; rejection of Block when persistent TPM (pre-phase-2) or CBT is requested.
+  XML emission; two-PVC creation for persistent EFI + TPM; rejection of Block when CBT is requested.
 - e2e (requires a real RWX-Block backend, e.g. DRBD/LINSTOR or Ceph RBD): persistent-EFI VM
-  create → reboot survives → live-migrate → state intact on target; same for vTPM in phase 2.
+  create → reboot survives → live-migrate → state intact on target; same for vTPM.
 - Negative: an aborted migration must not corrupt the blob (single-writer invariant).
 
 ## Implementation History
 
-- EFI-on-Block initial implementation: kubevirt/kubevirt#18215.
+- EFI NVRAM and vTPM on Block: kubevirt/kubevirt#18215 (two commits; validated end-to-end on a
+  DRBD/LINSTOR RWX-Block backend).
 
 ## Graduation Requirements
 
 ### Alpha
 
 - [ ] Feature gate guards the Block path
-- [ ] EFI NVRAM on Block implemented; Block rejected for persistent-TPM/CBT VMs
+- [ ] EFI NVRAM and vTPM on Block implemented (one raw device per blob); Block rejected for CBT VMs
 - [ ] Unit tests; e2e on at least one RWX-Block backend
 
 ### Beta
 
-- [ ] vTPM on Block via swtpm `file://` backend (once libvirt TPM file/block source is available in
-      the shipped libvirt)
 - [ ] e2e covering EFI and vTPM live-migration on a block-replicated backend
+- [ ] vTPM on Block exercised on a libvirt build with the TPM `<source type='file'>` element
 - [ ] Documented single-writer/abort-migration behavior
 
 ### GA
