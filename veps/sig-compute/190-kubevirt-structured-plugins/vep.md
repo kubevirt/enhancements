@@ -303,10 +303,12 @@ but also set the ground for providing an upgrade path, versioning, multi-plugin 
 See [possible plans for the future](#possible-future-enhancements) below.
 
 These are the basic fields every plugin would need to populate:
-- name:  a unique identifier for the plugin.
-- Version: Specifies the plugin’s version.
-- failureStrategy: Defines the behavior when a plugin fails. `Fail` (default) blocks the operation, `Ignore` logs the error and continues.
-- timeout: The maximum duration to wait for a plugin response before considering it failed (e.g. `30s`, `2m`). Defaults to `30s`.
+- failureStrategy: Defines the default behavior when a hook fails. `Fail` (default) blocks the operation, `Ignore` logs the error and continues. Individual hooks can override this.
+- condition: A CEL expression that filters which VMIs the plugin applies to. Individual hooks can further narrow with their own condition.
+- timeout: Per-hook field. The maximum duration to wait for a hook response before considering it failed (e.g. `30s`, `2m`).
+
+The plugin’s name comes from the Kubernetes object metadata (`metadata.name`).
+Versioning and upgrade path are deferred to [future enhancements](#possible-future-enhancements).
 
 ## API Examples (full version)
 
