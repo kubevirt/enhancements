@@ -98,7 +98,7 @@ The high level goal is to allow complex features to be implemented out-of-tree w
 
 For example, this includes:
 - Support a structured way of modifying the `DomainSpec` via plugins connected at well-defined hook points.
-- Support two plugin modes: simple JSON/CEL-based and advanced sidecar-based.
+- Support two plugin modes: simple CEL-based and advanced sidecar-based.
 - Support modifying Kubernetes objects (e.g. VM, VMI, virt-launcher pod, other pods, etc) via admission policies or webhooks.
   this can be helpful to modify properties like resources, conditions (e.g. migratability), etc.
 - Track and depend on Kubernetes Admission Policies and Webhooks as part of a plugin,
@@ -158,7 +158,7 @@ it will be replaced it with the complete, fully-expanded libvirt DomainSpec stru
 
 The domain hook would support two types of hooks:
 
-**Simple hooks**: These are JSON or CEL based hooks.
+**Simple hooks**: These are CEL-based hooks.
 These hooks are valuable for simple XML changes that do not require complex logic.
 These hooks are easily deployable, eliminating the need to write code, provide a container image,
 running another sidecar container, etc.
@@ -176,40 +176,18 @@ Moving forward we can support more hook points if needed.
 
 <ins>Simple Hooks</ins>:
 
-JsonPatch based simple hook:
 ```yaml
 domainHooks:
-  - type: JsonPatch
-    operations:
-      - op: add
-        path: /spec/devices/disks
-        value:
-          name: monitoring-disk
-          disk:
-            bus: virtio
-```
-
-CEL based simple hook:
-```yaml
-domainHooks:
-  - type: ApplyConfiguration
-    expression: |
-      object.spec.devices.disks + [
-        {
-          "name": "monitoring-disk",
-          "disk": {
-            "bus": "virtio"
-          }
-        }
-      ]
+  - cel:
+      expression: 'Domain{CPU: DomainCPU{Mode: "host-passthrough"}}'
 ```
 
 <ins>Advanced Hooks</ins>:
 
 ```yaml
 domainHooks:
-  - type: Plugin
-    socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/my-plugin-socket.sock"
+  - sidecar:
+      socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/my-plugin-socket.sock"
 ```
 
 Note: The socket would need to reside under `/var/run/kubevirt-plugin/<my-plugin-name>`,
