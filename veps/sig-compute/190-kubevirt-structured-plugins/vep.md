@@ -318,36 +318,15 @@ kind: Plugin
 metadata:
   name: monitoring-hook
 spec:
-  PluginMetadata:
-    name: "best-plugin-ever"
-    version: "0.0.1"
-    failureStrategy: Fail
-    timeout: 30s
+  failureStrategy: Fail
 
   domainHooks:
-  # Simple hook: JsonPatch
-  - type: JsonPatch
-    operations:
-      - op: add
-        path: /spec/devices/disks
-        value:
-          name: monitoring-disk
-          disk:
-            bus: virtio
-  # Simple hook: CEL-based ApplyConfiguration
-  - type: ApplyConfiguration
-    expression: |
-      object.spec.devices.disks + [
-        {
-          "name": "extra-disk",
-          "disk": {
-            "bus": "virtio"
-          }
-        }
-      ]
-  # Advanced hook: Plugin sidecar
-  - type: Plugin
-    socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/my-plugin-socket.sock"
+  # Simple hook: CEL-based
+  - cel:
+      expression: 'Domain{CPU: DomainCPU{Mode: "host-passthrough"}}'
+  # Advanced hook: Sidecar
+  - sidecar:
+      socketPath: "/var/run/kubevirt-plugin/monitoring-hook/hook.sock"
 
   mutatingAdmissionPolicies:
     - name: "my-mutating-policy-1"
@@ -361,24 +340,11 @@ spec:
     - name: "my-validating-webhook-1"
 
   nodeHooks:
-    - mode: Plugin
-      socket: /var/run/my-node-socket.sock
+    - socket: /var/run/my-node-socket.sock
       permittedHooks:
       - PreVMStart
-      - OnVMStop
+      - PreVMStop
       - PostVMStop
-
-  selector:
-    matchLabels:
-      use-plugin: my-plugin
-    matchFields:
-      - key: metadata.name
-        operator: Prefix
-        value: vm-
-    conditions: # CEL-based
-      - "vmi.status.phase == 'Running'"
-      - "vmi.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
-      - "vmi.status.conditions.exists(c, c.type == 'LiveMigratable' && c.status == 'True')"
 ```
 
 ## Alternatives
