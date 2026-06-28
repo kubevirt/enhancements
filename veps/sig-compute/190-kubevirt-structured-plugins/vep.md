@@ -197,7 +197,7 @@ The plugin's container will have visibility only to its plugin folder in an isol
 ### The Node Hook
 
 To support node-level customizations, hooks can also define operations triggered by the virt-handler pod.
-These are invoked via gRPC (or ttRPC, as used by NRI) calls from virt-handler to a plugin server
+These are invoked via gRPC calls from virt-handler to a plugin server
 (a DaemonSet running on each node).
 The communication is via a socket (its path is defined by the `Plugin` CR).
 The existence of a socket marks the readiness of the plugin - similarly to NRI plugins.
@@ -219,12 +219,11 @@ It provides a `NodeHookContext` struct to provide context to the plugin's Daemon
 
 - **PreVMStart**: Before VM launch (e.g., setup node devices/network; aligns with vmUpdateHelperDefault).
 - **PostVMStart**: After VM is running (e.g., verify node resources).
+- **PreVMStop**: Before VM stops (e.g., cleanup node resources; aligns with processVmUpdate on shutdown).
+- **PostVMStop**: After VM has stopped (e.g., final cleanup).
 - **PreMigrationSource**: Before migration from source node (e.g., prepare sockets; aligns with migrateVMI in migration-source.go).
-- **PostMigrationSource**: After migration completes on source (e.g., cleanup; aligns with handleSourceMigrationProxy).
 - **PreMigrationTarget**: Before migration to target node (e.g., setup target sockets; aligns with prepareMigrationTarget in migration-target.go).
 - **PostMigrationTarget**: After migration completes on target (e.g., repair/verify; aligns with finalizeMigration).
-- **OnVMStop**: When VM stops (e.g., cleanup node resources; aligns with processVmUpdate on shutdown).
-- **PostVMStop**: Called periodically.
 
 The plugin would have to explicitly mention which hook points it wishes to register for.
 
@@ -232,22 +231,11 @@ The plugin would have to explicitly mention which hook points it wishes to regis
 
 ```yaml
 nodeHooks:
-  - mode: Plugin
-    socket: /var/run/my-node-socket.sock
+  - socket: /var/run/my-node-socket.sock
     permittedHooks:
     - PreVMStart
-    - PostMigrationSource
-selector:
-  matchLabels:
-    use-plugin: my-plugin
-  matchFields:
-    - key: metadata.name
-      operator: Prefix
-      value: vm-
-  conditions: # CEL-based
-    - "vmi.status.phase == 'Running'"
-    - "vmi.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
-    - "vmi.status.conditions.exists(c, c.type == 'LiveMigratable' && c.status == 'True')"
+    - PostVMStop
+    condition: "vmi.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
 ```
 
 ### Admission Policies and Webhooks
