@@ -537,11 +537,11 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 Alpha
 
-- [ ] Feature gate (`StructuredPlugins`) guards all code changes.
+- [ ] Feature gate (`Plugins`) guards all code changes.
 - [ ] Plugin CRD is defined and registered.
-- [ ] Simple domain hooks (JsonPatch) are functional.
+- [ ] Simple domain hooks (CEL) are functional.
 - [ ] Advanced domain hooks (plugin sidecar via socket) are functional for a single hook point.
-- [ ] Node hooks are functional for at least PreVMStart and OnVMStop hook points.
+- [ ] Node hooks are functional for at least PreVMStart and PreVMStop hook points.
 - [ ] failureStrategy (Fail/Ignore) and timeout are respected.
 - [ ] Basic functional tests covering domain hooks and node hooks.
 
