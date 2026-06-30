@@ -18,35 +18,38 @@
 ## Overview
 
 KubeVirt persists VM firmware state — EFI NVRAM (Secure Boot variables) and vTPM state — in a
-"backend-storage" PVC. To live-migrate a VM that has persistent state, that PVC must be
-ReadWriteMany (RWX): the source and target `virt-launcher` pods run concurrently during migration
-and both attach the backend volume. Today the backend PVC is always created with
-`VolumeMode: Filesystem`, so live-migrating a persistent-EFI/TPM VM requires an **RWX-Filesystem**
-storage class.
+"backend-storage" PVC, today always created with `VolumeMode: Filesystem`. Persistent-state VMs are
+already live-migratable on ordinary RWO (or RWX) filesystem storage: on migration KubeVirt creates a
+fresh backend PVC on the target and copies the small state blob across (kubevirt/kubevirt#12629).
 
 This VEP adds an optional `Block` volume mode for the backend volume, so persistent VM state can live
-on **block-replicated** storage that offers RWX natively only at the block level. The EFI NVRAM is
-stored as a raw pflash blob on the block device; vTPM state is stored via swtpm's single-file backend
-on the block device. Single-writer safety during migration is provided by the existing QEMU/swtpm
-migration handoff, not by a shared filesystem.
+**natively on block storage** (DRBD/LINSTOR, Ceph RBD) — on the same kind of raw volume the VM's disks
+already use, with no filesystem layer for the tens-of-MiB state blob. The EFI NVRAM is stored as a raw
+pflash blob on the block device; vTPM state via swtpm's single-file backend. On RWX-Block storage the
+backend volume can additionally be shared by the source and target during migration, so no
+per-migration target PVC or state copy is needed; single-writer safety is then provided by the
+existing QEMU/swtpm migration handoff, not by a shared filesystem.
 
 ## Motivation
 
-Live-migration of any VM with persistent backend state requires the backend PVC on both nodes during
-the migration window → **RWX is structurally required** (RWO would pin the VM). The real comparison
-is therefore *RWX-Block vs RWX-Filesystem*, not *Block vs RWO-Filesystem*.
+RWO-Filesystem backend storage already migrates (kubevirt/kubevirt#12629 creates a fresh target PVC
+and copies the small state blob during the migration window), so Block mode is **not** required for
+migratability. It is offered as an additive, opt-in option for operators whose storage is natively
+block:
 
-For an important, widely deployed class of storage, **RWX is only available in Block mode**:
+- **Block-native, no filesystem layer.** On DRBD/LINSTOR and Ceph RBD the VM's disks already live on
+  raw block volumes. A Block-mode backend lets the small VM-state volume use that same storage
+  directly, instead of requiring a Filesystem PVC — and avoids a per-volume NFS-Ganesha / CephFS
+  layer for operators who specifically want *shared* (RWX) state on those backends, where RWX is
+  native only at the Block level.
+- **RWX-Block can skip the per-migration copy.** Where the block class offers RWX (DRBD dual-primary,
+  Ceph `rbd`), the backend volume is shared by source and target during migration, so no target PVC
+  is created and no state copy happens. The copy is cheap for a tens-of-MiB blob, so this is an
+  optimization, not a correctness requirement.
+- **Consistency.** Persistent VM state lives on the same storage system, in the same volume mode, as
+  the VM's disks.
 
-- **DRBD / LINSTOR**: RWX is native via DRBD dual-primary at the **Block** level. Its RWX-*Filesystem*
-  path exists only by layering a per-volume **NFS-Ganesha** export on each volume — heavy, plus an
-  extra HA component per volume.
-- **Ceph**: `rbd` provides RWX-**Block**; RWX-Filesystem is a *separate* system (CephFS, a different
-  provisioner), not an attribute of the same RBD volume.
-
-On these backends a persistent-EFI/TPM VM cannot live-migrate today unless the operator stands up a
-separate NFS/CephFS layer purely for the small (tens-of-MiB) vm-state volume. A Block-mode backend
-volume lets it live-migrate on the storage the cluster already runs, with no NFS/extra filesystem.
+`Filesystem` remains the default and the existing RWO-FS + copy-on-migrate path is unchanged.
 
 ## Goals
 
@@ -66,16 +69,18 @@ volume lets it live-migrate on the storage the cluster already runs, with no NFS
 
 ## Definition of Users
 
-Cluster operators and platform builders running KubeVirt on block-replicated storage (DRBD/LINSTOR,
-Ceph RBD) who need persistent-EFI and/or persistent-vTPM VMs to live-migrate and survive node drains.
+Cluster operators and platform builders running KubeVirt on block storage (DRBD/LINSTOR, Ceph RBD)
+who want persistent-EFI and/or persistent-vTPM VM state to live on the same block storage as their VM
+disks — without a separate filesystem, and (on RWX-Block) without a per-migration state copy.
 
 ## User Stories
 
 - As an operator on DRBD/LINSTOR or Ceph RBD, I want persistent-EFI Windows VMs (e.g. to enroll an
-  updated Microsoft UEFI CA / Secure Boot keys) to live-migrate and survive drains, without deploying
-  NFS/CephFS just for the vm-state volume.
-- As an operator, I want persistent-vTPM VMs (BitLocker, measured boot) to live-migrate on the same
-  block-replicated storage.
+  updated Microsoft UEFI CA / Secure Boot keys) to keep their NVRAM on the same block storage as their
+  disks, without a Filesystem PVC — and, on RWX-Block, without KubeVirt creating and copying a target
+  state PVC on every migration.
+- As an operator, I want persistent-vTPM VMs (BitLocker, measured boot) to store TPM state on that
+  same block storage.
 
 ## Repos
 
@@ -157,9 +162,15 @@ Resulting libvirt domain (vTPM, on its own second device):
 
 ## Alternatives
 
-- **RWX-Filesystem via NFS/CephFS (status quo):** point `vmStateStorageClass` at a class that serves
-  RWX-FS (LINSTOR NFS-Ganesha export, or CephFS). Works, but spins up a per-volume NFS export (or
-  requires a separate filesystem system) for a tiny vm-state volume.
+- **RWO-Filesystem + copy-on-migrate (the default / status quo):** the backend PVC is a plain RWO
+  filesystem volume; on migration KubeVirt provisions a fresh target PVC and copies the small state
+  blob (kubevirt/kubevirt#12629). Works on essentially any storage class, needs no block support, and
+  is the path most deployments use. The only cost is creating + copying a tens-of-MiB PVC per
+  migration. Block mode is the alternative for operators who prefer block-native state and/or want to
+  avoid that per-migration copy.
+- **RWX-Filesystem via NFS/CephFS:** point `vmStateStorageClass` at a class that serves RWX-FS
+  (LINSTOR NFS-Ganesha export, or CephFS) for a shared filesystem backend. Works, but spins up a
+  per-volume NFS export (or requires a separate filesystem system) for a tiny vm-state volume.
 - **FS-on-block (swtpm `dir://` with locking) for TPM:** format a small filesystem on the block
   device and use swtpm's locking dir backend. Gains swtpm-level locking but needs mkfs/mount
   (privilege) and a strict unmount/mount handoff during migration (no concurrent RW mount of a
