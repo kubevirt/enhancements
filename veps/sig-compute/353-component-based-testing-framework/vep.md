@@ -1,4 +1,4 @@
-# VEP #NNNN: Component-Based Testing Framework
+# VEP 353: Component-Based Testing Framework
 
 ## VEP Status Metadata
 
