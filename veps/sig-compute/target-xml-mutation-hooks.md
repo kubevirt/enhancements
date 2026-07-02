@@ -6,14 +6,14 @@
 
 - This VEP targets alpha for version: v1.8
 - This VEP targets beta for version: v1.9
-- This VEP targets GA for version:
+- This VEP targets GA for version: v1.10
 
 ### Release Signoff Checklist
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
 - [x] (R) Beta target version is explicitly mentioned and approved
-- [ ] (R) GA target version is explicitly mentioned and approved
+- [x] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
@@ -111,7 +111,7 @@ Fields that become unnecessary:
 - `vmi.Status.MigrationState.TargetCPUSet`
 - `vmi.Status.MigrationState.TargetNodeTopology`
 
-Plan:
+Plan (post-GA):
 1. Stop using these fields when modifying the xml and mark them as deprecated.
 2. Continue populating for one release for compatibility with older launcher images.
 3. Remove completely in the following release.
@@ -166,8 +166,10 @@ It should be a scalable and extendable hook system that allows adding new hooks.
 - Migrate all target-based modifications from source to target-side hooks (dedicated CPU pinning, disk source path for cross-namespace or cross-cluster live migration).
 
 ### GA
+- Feature has been stable for at least a single version.
+- At least one GA consumer uses the hook system.
+- The qemu hook shell script has been removed and only the Go binary is used as the libvirt hook client.
 
 ### Post-GA
-- Remove the qemu hook shell script and place the libvirt hook client binary directly in the launcher container image.
 - Remove all source-side XML modification code in virt-launcher, but continue supporting old virt-launchers in virt-handler.
 - Deprecate vmi.status fields that are no longer needed because data can now be fetched directly from the target.
