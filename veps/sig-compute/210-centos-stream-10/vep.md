@@ -4,9 +4,9 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.9
-- This VEP targets beta for version: v1.10
-- This VEP targets GA for version: v1.11
+- This VEP targets alpha for version: v1.10
+- This VEP targets beta for version:
+- This VEP targets GA for version:
 
 ### Release Signoff Checklist
 
@@ -24,7 +24,7 @@ This VEP proposes transitioning KubeVirt from CentOS Stream 9 to CentOS Stream 1
 1. **Userspace**: The container images (virt-handler, virt-launcher, virt-operator, virt-controller, virt-api, etc.) and the builder image used to compile KubeVirt binaries.
 2. **Host OS**: The kubevirtci cluster providers used for development and CI testing.
 
-Rather than a big-bang switchover, the transition follows a per-lane model: from v1.9, new Kubernetes version lanes are introduced on CentOS Stream 10 for both userspace and host OS, while existing older lanes remain on CentOS Stream 9 until those Kubernetes versions naturally reach end of life and are dropped from CI. CentOS Stream 9 is supported during v1.8, v1.9, and v1.10, with support removed in v1.11 once all remaining CS9 lanes have aged out. This avoids doubling CI capacity and provides a gradual, low-risk migration path.
+Rather than a big-bang switchover, the transition follows a per-lane model: from v1.10, new Kubernetes version lanes are introduced on CentOS Stream 10 for both userspace and host OS, while existing older lanes remain on CentOS Stream 9 until those Kubernetes versions naturally reach end of life and are dropped from CI. CentOS Stream 9 is supported during v1.8, v1.9, v1.10, and v1.11, with support removed in v1.12 once all remaining CS9 lanes have aged out. This avoids doubling CI capacity and provides a gradual, low-risk migration path.
 
 CentOS Stream 9 reaches end of life on 2027-05-31, requiring a planned migration well before that date.
 
@@ -112,19 +112,21 @@ Dedicated periodic jobs bump RPM dependencies for CentOS Stream 10 (`bump-kubevi
 
 ### kubevirtci Providers
 
-New kubevirtci providers based on CentOS Stream 10 will be introduced starting in v1.9. The k8s-1.36 provider introduced in v1.9 will be the first CS10-based provider. Older Kubernetes version lanes (k8s-1.34, k8s-1.35) continue to use CS9 providers until those Kubernetes versions are dropped from CI. Each new Kubernetes version lane introduced from v1.9 onwards will use a CS10 provider from the start. CentOS Stream 9 providers will be fully retired once no remaining CI lanes reference them.
+New kubevirtci providers based on CentOS Stream 10 will be introduced starting in v1.10. The k8s-1.37 provider introduced in v1.10 will be the first CS10-based provider. Older Kubernetes version lanes (k8s-1.35, k8s-1.36) continue to use CS9 providers until those Kubernetes versions are dropped from CI. Each new Kubernetes version lane introduced from v1.10 onwards will use a CS10 provider from the start. CentOS Stream 9 providers will be fully retired once no remaining CI lanes reference them.
 
 ### CI Strategy
 
 The CI strategy follows a per-lane transition model where new Kubernetes version lanes are introduced on CentOS Stream 10, and older lanes remain on CentOS Stream 9 until they naturally age out:
 
-1. **v1.9 (Alpha)**: The new k8s-1.36 provider lane is introduced on CentOS Stream 10 with CentOS Stream 10 userspace. This becomes the latest `always_run` lane. Older lanes (k8s-1.34, k8s-1.35) remain on CentOS Stream 9. CentOS Stream 9 userspace is formally deprecated.
+1. **v1.10 (Alpha)**: The new k8s-1.37 provider lane is introduced on CentOS Stream 10 with CentOS Stream 10 userspace. This becomes the latest `always_run` lane. Older lanes (k8s-1.35, k8s-1.36) remain on CentOS Stream 9. CentOS Stream 9 userspace is formally deprecated.
 
-2. **v1.10 (Beta)**: The new k8s-1.37 lane is introduced on CentOS Stream 10. k8s-1.36 (CS10) and k8s-1.35 (CS9) remain as `run_before_merge` lanes. k8s-1.34 (CS9) is dropped. The majority of `always_run` lanes now run on CentOS Stream 10.
+2. **v1.11 (Beta)**: The new k8s-1.38 lane is introduced on CentOS Stream 10. k8s-1.37 (CS10) and k8s-1.36 (CS9) remain as `run_before_merge` lanes. k8s-1.35 (CS9) is dropped. The majority of `always_run` lanes now run on CentOS Stream 10.
 
-3. **v1.11 (GA)**: The new k8s-1.38 lane is introduced on CentOS Stream 10. k8s-1.35 (the last CS9 lane) is dropped. All remaining lanes run on CentOS Stream 10. CentOS Stream 9 build support is removed. `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed.
+3. **v1.12 (GA)**: The new k8s-1.39 lane is introduced on CentOS Stream 10. k8s-1.36 (the last CS9 lane) is dropped. All remaining lanes run on CentOS Stream 10. CentOS Stream 9 build support is removed. `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed.
 
 This per-lane approach avoids doubling CI capacity: rather than running parallel CS9 and CS10 jobs for the same Kubernetes version, each lane runs on exactly one base OS. The transition happens naturally as older Kubernetes versions are dropped and new versions are added on CentOS Stream 10.
+
+Note that the k8s-1.36 (CS9) lane will remain active until v1.12 (~2027-07-15), which extends approximately six weeks past the CentOS Stream 9 end-of-life date (2027-05-31). This is a narrow window during which the lane is being phased out, and CentOS Stream 9 packages will remain functional despite no longer receiving updates.
 
 ```mermaid
 gantt
@@ -138,6 +140,7 @@ gantt
     v1.9            :milestone, m2, 2026-07-15, 0d
     v1.10           :milestone, m3, 2026-11-15, 0d
     v1.11           :milestone, m4, 2027-03-15, 0d
+    v1.12           :milestone, m5, 2027-07-15, 0d
 
     section k8s-1.33 (CS9)
     active          :done, 2026-03-18, 2026-07-15
@@ -148,39 +151,42 @@ gantt
     section k8s-1.35 (CS9)
     active          :done, 2026-03-18, 2027-03-15
 
-    section k8s-1.36 (CS10)
-    active          :crit, 2026-07-15, 2027-07-15
+    section k8s-1.36 (CS9)
+    active          :done, 2026-07-15, 2027-07-15
 
     section k8s-1.37 (CS10)
-    active          :crit, 2026-11-15, 2027-07-15
+    active          :crit, 2026-11-15, 2027-11-15
 
     section k8s-1.38 (CS10)
-    active          :crit, 2027-03-15, 2027-07-15
+    active          :crit, 2027-03-15, 2027-11-15
+
+    section k8s-1.39 (CS10)
+    active          :crit, 2027-07-15, 2027-11-15
 ```
 
 ### Migration Phases
 
-#### Phase 1: First CS10 Lane (v1.9)
+#### Phase 1: First CS10 Lane (v1.10)
 
 - CentOS Stream 10 builder image (`kubevirt-builder-cs10`)
 - CentOS Stream 10 RPM dependency sync and verification jobs
 - RPM mirror uploader support for CentOS Stream 10 dependencies
-- k8s-1.36 kubevirtci provider introduced on CentOS Stream 10
-- k8s-1.36 `always_run` lanes use CentOS Stream 10 userspace
-- Older lanes (k8s-1.34, k8s-1.35) remain on CentOS Stream 9
+- k8s-1.37 kubevirtci provider introduced on CentOS Stream 10
+- k8s-1.37 `always_run` lanes use CentOS Stream 10 userspace
+- Older lanes (k8s-1.35, k8s-1.36) remain on CentOS Stream 9
 - CentOS Stream 9 userspace formally deprecated in release notes
 
-#### Phase 2: CS10 Lanes Expand (v1.10)
-
-- k8s-1.37 lane introduced on CentOS Stream 10
-- k8s-1.36 (CS10) becomes a `run_before_merge` lane
-- k8s-1.35 (CS9) remains as a `run_before_merge` lane
-- k8s-1.34 (CS9) dropped from CI
-
-#### Phase 3: Full Switchover (v1.11)
+#### Phase 2: CS10 Lanes Expand (v1.11)
 
 - k8s-1.38 lane introduced on CentOS Stream 10
-- k8s-1.35 (last CS9 lane) dropped from CI
+- k8s-1.37 (CS10) becomes a `run_before_merge` lane
+- k8s-1.36 (CS9) remains as a `run_before_merge` lane
+- k8s-1.35 (CS9) dropped from CI
+
+#### Phase 3: Full Switchover (v1.12)
+
+- k8s-1.39 lane introduced on CentOS Stream 10
+- k8s-1.36 (last CS9 lane) dropped from CI
 - All remaining lanes run on CentOS Stream 10
 - CentOS Stream 9 build support removed
 - `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed
@@ -198,7 +204,7 @@ The per-lane transition model avoids the capacity problem entirely. Rather than 
 
 Hardware-specific lanes (vgpu, sriov, sev) use KinD (Kubernetes-in-Docker) clusters on bare-metal hosts and are therefore tied to the host kernel rather than the kubevirtci-provided guest kernel used by the core SIG lanes. The windows lane is an exception, using kubevirtci providers with nested VMs. The transition of these lanes to CentOS Stream 10 depends on the host OS of the bare-metal nodes being updated, which is managed independently of this VEP. The exact timing for each specialized lane can be adjusted based on readiness.
 
-Other specialized lanes (ipv6, arm64, migrations) that currently run on the latest Kubernetes version will switch to CentOS Stream 10 in Phase 1 alongside the k8s-1.36 core SIG lanes.
+Other specialized lanes (ipv6, arm64, migrations) that currently run on the latest Kubernetes version will switch to CentOS Stream 10 in Phase 1 alongside the k8s-1.37 core SIG lanes.
 
 The **vgpu lane** has an additional constraint and will remain on CentOS Stream 9 until the mdev compatibility issue described below is resolved.
 
@@ -237,11 +243,11 @@ Run both CentOS Stream 9 and CentOS Stream 10 CI jobs for every Kubernetes versi
 
 ### Phased transition with optional jobs first
 
-Introduce CentOS Stream 10 as optional CI jobs in v1.9, promote them to required on the latest lanes in v1.10 (switching existing CS9 lanes to CS10), and complete the switchover in v1.11. This was considered but rejected in favour of the per-lane approach because:
+Introduce CentOS Stream 10 as optional CI jobs in v1.10, promote them to required on the latest lanes in v1.11 (switching existing CS9 lanes to CS10), and complete the switchover in v1.12. This was considered but rejected in favour of the per-lane approach because:
 
 - It delays real CS10 CI signal to optional jobs that may not receive sufficient attention
 - Switching existing lanes from CS9 to CS10 mid-lifecycle is more disruptive than introducing new lanes on CS10 from the start
-- The per-lane approach provides required CS10 signal one release earlier (v1.9 vs v1.10)
+- The per-lane approach provides required CS10 signal one release earlier (v1.10 vs v1.11)
 
 ### Fedora as base OS
 
@@ -270,7 +276,7 @@ Cluster administrators should verify that any security scanning or compliance to
 - All existing KubeVirt e2e tests will run against CentOS Stream 10 userspace builds as lanes are switched over
 - CentOS Stream 10 lanes run on CentOS Stream 10 kubevirtci hosts, while CentOS Stream 9 lanes continue to run on CentOS Stream 9 kubevirtci hosts
 - No new test cases are required specifically for the base OS change; the existing test suite validates functionality regardless of the underlying OS
-- The k8s-1.36 CS10 lane introduced in Phase 1 provides immediate signal; any test failures unique to CentOS Stream 10 will be triaged and resolved promptly
+- The k8s-1.37 CS10 lane introduced in Phase 1 provides immediate signal; any test failures unique to CentOS Stream 10 will be triaged and resolved promptly
 
 ## Implementation History
 
@@ -282,23 +288,23 @@ Cluster administrators should verify that any security scanning or compliance to
 
 ## Graduation Requirements
 
-### Alpha (v1.9)
+### Alpha (v1.10)
 
 - [ ] CentOS Stream 10 builder image available
 - [ ] CentOS Stream 10 RPM dependency sync and verification jobs
 - [ ] RPM mirror uploader caches CentOS Stream 10 dependencies
-- [ ] k8s-1.36 kubevirtci provider on CentOS Stream 10
-- [ ] k8s-1.36 `always_run` lanes using CentOS Stream 10 userspace
-- [ ] No CentOS Stream 10 specific test failures on k8s-1.36 lanes
+- [ ] k8s-1.37 kubevirtci provider on CentOS Stream 10
+- [ ] k8s-1.37 `always_run` lanes using CentOS Stream 10 userspace
+- [ ] No CentOS Stream 10 specific test failures on k8s-1.37 lanes
 - [ ] CentOS Stream 9 userspace deprecated in release notes
 
-### Beta (v1.10)
+### Beta (v1.11)
 
-- [ ] k8s-1.37 lane introduced on CentOS Stream 10
+- [ ] k8s-1.38 lane introduced on CentOS Stream 10
 - [ ] Majority of `always_run` lanes running on CentOS Stream 10
 - [ ] No CentOS Stream 10 specific test failures
 
-### GA (v1.11)
+### GA (v1.12)
 
 - [ ] All remaining CS9 lanes dropped
 - [ ] All lanes running on CentOS Stream 10
