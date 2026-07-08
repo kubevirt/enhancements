@@ -345,7 +345,7 @@ While the feature gate is still in place for protection, the binding will be mig
 > Despite this proposal's focus on seamless migration, passt will be quite useful as a core binding even for clusters that do not support sticky IP addresses and seamless migration, 
 > as passt still has many other benefits.
 
-See [passt beta proposal](passt-network-binding.md), which extends this proposal to the Beta phase.
+See [passt network binding proposal](passt-network-binding.md), which extends this proposal.
 
 ### GA
 
