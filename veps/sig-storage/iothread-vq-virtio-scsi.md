@@ -165,6 +165,26 @@ scsi-disk: [1, 2]
 
 Note: this is an example of the VMI having more auto threads (3) than virtqueues (2), so the SCSI controller here will only be allocated 2 total threads.
 
+### Hotplug Considerations
+
+Since the SCSI Controller is initialized at VMI startup, the amount of threads we allocate to the controller has to be known at start time since there is currently no libvirt API to modify the thread pool of a running controller. This poses a certain limitation in hotplug scenarios when using the `auto` policy.
+
+By default KubeVirt will always create a SCSI controller to support hotplugging virtio-scsi disks into a running VM as long as the `disableHotplug` flag is not present in the spec. To enable the multi iothread performance gain for hotplug disks, we need to ensure the controller gets allocated a thread pool, even when no virtio-scsi disks exist at initial domain creation (assuming `IOThreadsPolicy` is set).
+
+However, when using the `auto` policy, the number of threads that get allocated at startup is derived from the initial number of disks in the VM. So if a large amount of scsi disks are hotplugged to a VM, the SCSI Controller could take a performance hit due to not being initialized with a large enough thread pool. This is especially relevant in a nested cluster configuration using kubevirt-csi.
+
+For VMs using the `auto` policy we could consider two approaches:
+
+1) always allocate the maximum thread count to the SCSI controller (# of vCPUs)
+ - Pros: controller will still see performance gain if a large amount of disks are hotplugged
+ - Cons: creates a lot of potentially wasted threads that could stay idle for the entire VMI lifecycle
+
+2) recommend using `supplementalPool` policy for heavy-hotplug scenarios
+  - Pros: user-declared and stable, leads to less wasted threads compared to option 1
+  - Cons: could be seen as restrictive
+
+For these reasons, option 2 should be adopted to reduce the number of idle iothreads while also allowing users to explicitly set the total amount of threads for a given workload.
+
 ## Alternatives
 
 <!--
