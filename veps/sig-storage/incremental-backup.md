@@ -382,20 +382,12 @@ GET | /exports/{disk}/data | Streams raw disk data. Supports `offset` and `lengt
 ```mermaid
 sequenceDiagram
     participant User
-    participant Server as virt-exportserver (Shim)
-    participant Tunnel as TLS Tunnel
-    participant Launcher as virt-launcher
+    participant Server as virt-exportserver
 
     Note over User, Server: HTTP/1.1 HTTPS
     User->>Server: GET /exports/datavolumedisk1/data?offset=0&length=65536
     
-    Note over Server, Launcher: gRPC over TLS
-    Server->>Tunnel: { "op": "read", "offset": 0, "len": 65536 }
-    Tunnel->>Launcher: Forward Command
-    
-    Launcher->>Launcher: nbdClient Read
-    Launcher-->>Tunnel: Binary Payload
-    Tunnel-->>Server: [Payload]
+    Server->>Server: libnbd Pread (bind-mounted NBD socket)
     
     Server-->>User: 206 Partial Content (Stream)
  ```
@@ -406,32 +398,19 @@ GET | /exports/{disk}/map | Returns JSON of extents (clean or dirty). Params: `o
 ```mermaid
 sequenceDiagram
     participant User
-    participant Server as virt-exportserver (Shim)
-    participant Tunnel as TLS Tunnel
-    participant Launcher as virt-launcher
+    participant Server as virt-exportserver
 
     Note over User, Server: HTTP/1.1 HTTPS (Page 1)
     User->>Server: GET /exports/datavolumedisk1/map?offset=0&length=1073741824&page_size=1
     
-    Note over Server, Launcher: gRPC over TLS tunnel
-    Server->>Tunnel: { "op": "map", "offset": 0, "length": 1073741824}
-    Tunnel->>Launcher: Forward Command
-    
-    Launcher->>Launcher: nbdClient Map
-    Launcher-->>Tunnel: JSON Payload (Chunk 1)
-    Tunnel-->>Server: [Payload]
+    Server->>Server: libnbd BlockStatus (bind-mounted NBD socket)
     
     Server-->>User: {"extents": [...], "next_offset": 1073741824}
 
     Note over User, Server: HTTP/1.1 HTTPS (Page 2 - Follow Pointer)
     User->>Server: GET /exports/datavolumedisk1/map?offset=1073741824&length=1073741824&page_size=1
     
-    Server->>Tunnel: { "op": "map", "offset": 1073741824, "length": 1073741824 }
-    Tunnel->>Launcher: Forward Command
-    
-    Launcher->>Launcher: nbdClient Map
-    Launcher-->>Tunnel: JSON Payload (Chunk 2 / EOF)
-    Tunnel-->>Server: [Payload]
+    Server->>Server: libnbd BlockStatus (bind-mounted NBD socket)
     
     Server-->>User: { "extents": [...], "next_offset": null }
  ```
@@ -496,21 +475,22 @@ The flow is as follows:
 3. Once the backup job is progressing, the backup controller automatically creates an owned `VirtualMachineExport` CR, setting its source to the `VirtualMachineBackup`.
 4. The export-controller reconciles the new `VirtualMachineExport`. It identifies the source type and launches the virt-exportserver pod.
   - Configuration: The controller injects the included volume list (from the `VirtualMachineBackupStatus`) into the pod's environment variables.
-5. Once the export service is ready, the backup controller retrieves the service's name and the internal CA certificate. It then issues yet another `Backup` RPC, this time with the `Export` cmd to the virt-launcher.
-6. The virt-launcher acts as the TLS client. It establishes a persistent, self-healing TLS tunnel to the virt-exportserver via HTTP CONNECT. This reverse-tunnel architecture ensures no network changes are required for either pod.
+5. Once the export service is ready, the backup controller instructs virt-handler to bind-mount the virt-launcher's NBD Unix socket into the virt-exportserver pod's filesystem. This mechanism is analogous to the existing volume hotplug flow (see [Pull Mode Data Path](#pull-mode-data-path) for design rationale).
+6. The virt-exportserver connects to the bind-mounted NBD Unix socket via libnbd. Since the socket is local to the pod's filesystem, no network communication between the pods is required for data transfer.
 7. Data Serving:
   - The virt-exportserver registers dynamic HTTP handlers for every volume included in the backup under the new `Backups` status field.
   - The backup controller recognizes that the `VirtualMachineExport` is serving and updates the `ExportReady` condition of the `VirtualMachineBackupStatus` to true.
   - The `VirtualMachineBackupStatus` includes the created URLs for every volume in its `includedVolumes`'s list by populating the `mapEndpoint` and `dataEndpoint` fields respectively.
-  - When a client requests a specific endpoint, it invokes the relevant RPC over the tunnel. 
-  - The virt-launcher receives the command and uses an NBD client to query the local Unix socket, it then either:
-    1. Streams the raw binary data back in the case of a `ReadRequest` or;
-    2. Streams back the bitmap in JSON format.
+  - When a client requests a specific endpoint, the virt-exportserver uses libnbd to read directly from the bind-mounted NBD socket and either:
+    1. Streams the raw binary data back in the case of a data request or;
+    2. Returns the bitmap extents in JSON format.
 
 This architecture was chosen because:
 - It preserves pull mode semantics as the data flow remains consumer-driven.
-- The virt-launcher initiates the connection outbound to the export server; no new inbound ports are opened on the VM pod, maintaining the existing security posture.
-- Leverages the existing export controller for lifecycle management of the export pod, while the backup controller manages the data connection.
+- The data path is direct (QEMU, NBD Unix socket, libnbd, HTTP response) with no network I/O between the pods (see [Pull Mode Data Path](#pull-mode-data-path) for benchmarks).
+- No new inbound ports are opened on the VM pod, maintaining the existing security posture.
+- Leverages the existing export controller for lifecycle management of the export pod.
+- The bind-mount mechanism is analogous to existing volume hotplug logic via virt-handler.
 - Provisions only a percentage of the total virtual disk size, rather than the full amount, because it relies on scratch space and transfers the backup data over the network.
 
 In contrast:
@@ -528,6 +508,7 @@ sequenceDiagram
     end
 
     box "Data Plane (Pods)"
+        participant VH as Virt-Handler
         participant Launcher as Virt-Launcher
         participant ES as Virt-Exportserver
     end
@@ -538,38 +519,32 @@ sequenceDiagram
     BC->>Launcher: RPC StartBackup()
     Launcher->>Launcher: Start NBD Server (Unix Socket)
     
-    BC->>API: Generate token for tunnel and create a secret containing it
     BC->>API: Create VMExport (Source: VMBackup)
     EC->>API: Watch VMExport
     EC->>ES: Create Pod & Service (ClusterIP)
-    ES->>ES: Listen :9090 (Internal TLS)<br/>Listen :8443 (External HTTPS)
+    ES->>ES: Listen :8443 (External HTTPS)
 
-    %% Phase 2: The Handshake
-    Note over BC, ES: Phase 2: Tunnel Establishment
-    BC->>API: Get Export Service IP & CA Cert
-    BC->>Launcher: RPC BackupConnect(IP, CA, Token)
-    
-    Launcher->>ES: TLS Dial (Port 9090)
-    activate ES
-    ES-->>Launcher: Handshake OK
-    Note right of Launcher: Persistent Bidirectional Tunnel Established
+    %% Phase 2: Socket Bind-Mount
+    Note over BC, ES: Phase 2: NBD Socket Bind-Mount
+    BC->>VH: Bind-mount NBD socket into exportserver pod
+    VH->>VH: Mount /run/kubevirt/sockets/backup-nbd.sock<br/>into virt-exportserver filesystem
+    ES->>ES: Connect to bind-mounted NBD socket via libnbd
 
     %% Phase 3: The Data Pull
-    Note over User, Launcher: Phase 3: Data Streaming
-    User->>ES: HTTP GET /exports/disk1/map
+    Note over User, ES: Phase 3: Data Streaming
+    User->>ES: HTTP GET /exports/disk1/data
+    activate ES
     
-    ES->>Launcher: Tunnel JSON {op: "map"...}
-    Launcher->>Launcher: NBD Client Map (Unix Socket)
-    Launcher-->>ES: Tunnel JSON response
+    ES->>ES: libnbd Pread (bind-mounted NBD socket)
     
-    ES-->>User: HTTP 200
+    ES-->>User: HTTP 206 Partial Content (Stream)
     deactivate ES
 ```
 
 **Security considerations and approaches**
 - Both internal traffic and external traffic are secured using the existing export certificate API.
 - Authorization for external traffic is done via a user-provided token.
-- Authentication for the tunnel is established using mTLS.
+- The bind-mounted NBD socket relies on filesystem-level isolation and the pod security context for access control. No network traffic flows between the virt-launcher and virt-exportserver pods for data transfer.
 
 **Q&A**
 
@@ -633,14 +608,14 @@ func (s *exportServer) getBackupHandlerMap(bi export.BackupInfo) map[string]http
 	}
 ```
 
-Q: How does the virt-launcher interact with the exposed NBD socket?
+Q: How does the virt-exportserver interact with the NBD socket?
 
-A: For both `Map` and `Read` requests, the virt-launcher leverages an internal nbd client implementation that relies on libnbd.
+A: The virt-exportserver connects to the bind-mounted NBD Unix socket via libnbd. For `Read` requests it issues `libnbd.Pread` calls and streams the binary data directly into the HTTP response. For `Map` requests it uses `libnbd.BlockStatus` to query the dirty bitmap extents and returns them as JSON.
 
 Q: How are failures handled?
 
 A:
-- virt-exportserver failure: If the virt-exportserver pod is terminated, the export controller detects the state change and recreates the pod. Since the virt-launcher connects via a k8s service (which maintains a stable ClusterIP), the launcher's connection manager simply detects the TCP connection drop and enters a retry loop. Once the new server pod is ready and the endpoints update, the tunnel is re-established automatically without interrupting the backup job logic.
+- virt-exportserver failure: If the virt-exportserver pod is terminated, the export controller detects the state change and recreates the pod. The backup controller then instructs virt-handler to re-establish the bind-mount of the NBD socket into the new pod. Once the new server pod is ready and the socket is mounted, data serving resumes without interrupting the backup job logic.
 - virt-launcher failure: If the virt-launcher terminates, the backup is immediately marked as `Failed`. This is because the NBD server providing the data resides within the launcher process. Additionally, an abrupt termination may leave the QEMU dirty bitmaps in an inconsistent or "corrupted" state since they may not have been flushed to the qcow2 metadata header, necessitating a full backup run next time.
 
 Q: How are node evictions handled?
@@ -648,6 +623,58 @@ Q: How are node evictions handled?
 A:
 - virt-exportserver eviction: If the virt-exportserver pod is evicted the same flow as abrupt termination takes place.
 - virt-launcher eviction: While a backup is active, the VM is considered non-migratable. Consequently, standard node drain or eviction requests will be blocked until the backup operation completes or is canceled.
+
+### Pull Mode Data Path
+
+The data path from the QEMU NBD server to the HTTP response has significant impact on pull mode backup throughput. This section describes the chosen approach for the read data path and the alternatives that were evaluated.
+
+#### Chosen: NBD Socket Bind-Mount
+
+Rather than tunneling backup data through an intermediary protocol, virt-handler bind-mounts the virt-launcher's NBD Unix socket directly into the virt-exportserver pod's filesystem. The virt-exportserver then connects to the QEMU NBD server via libnbd locally, resulting in a minimal data path:
+
+```
+QEMU | NBD Unix socket | libnbd Pread | HTTP response writer
+```
+
+This eliminates the need for protobuf serialization, gRPC buffer pool management, double HTTP/2 framing, and inter-pod mTLS encryption that would be required by a gRPC-based tunnel.
+
+**Implementation details:**
+- The virt-exportserver pod is scheduled on the same node as the VMI, enabling the bind-mount.
+- The export pod declares an emptyDir volume at `/var/run/kubevirt/nbd` with `MountPropagationHostToContainer`, allowing the bind-mount performed by virt-handler on the host to propagate into the container.
+- The virt-exportserver watches for the socket file to appear and connects to it via `libnbd.ConnectUnix`. Reads are performed using `Pread` in 1 MiB chunks and streamed directly into the HTTP response.
+- Cleanup of the bind-mount occurs when the `VirtualMachineBackup` resource is deleted.
+
+**Throughput benchmarks** (full 20 GiB disk pull, external network storage):
+
+| Approach | Throughput | vs. Baseline |
+|---|---|---|
+| gRPC tunnel, sync Pread, 256 KiB chunks (baseline) | 89.4 MB/s | - |
+| gRPC tunnel, libnbd AIO (16 in-flight), 256 KiB chunks | 103 MB/s | +15% |
+| gRPC tunnel, libnbd AIO (16 in-flight), 1 MiB chunks | 117 MB/s | +31% |
+| **NBD socket bind-mount, sync Pread, 1 MiB chunks** | **132 MB/s** | **+48%** |
+
+> [!NOTE]
+> The bind-mount mechanism relies on virt-handler, analogous to the existing volume hotplug logic. This introduces a dependency on virt-handler for establishing and re-establishing the socket mount, which follows the same delegation pattern used by disk hotplug.
+> Additionally, the virt-exportserver pod must be scheduled on the same node as the virt-launcher. This constraint is consistent with the hotplug model and benefits data locality, but it does restrict pod placement.
+
+#### Alternative: gRPC Tunnel
+
+In this alternative, the virt-launcher establishes a gRPC-over-HTTP/2-CONNECT tunnel to the virt-exportserver. Each read request traverses the following path:
+```
+QEMU | NBD Unix socket | libnbd | protobuf marshal | gRPC HTTP/2 frames
+| HTTP/2 CONNECT tunnel (mTLS) | virt-exportserver | HTTP response
+```
+
+Every gRPC message is serialized to protobuf, framed as HTTP/2 data by gRPC's transport, written into the tunnel's pipe, framed again as HTTP/2 data, encrypted with AES-GCM, and written to the TCP socket. CPU profiling shows `Syscall6` at ~28-30% and TLS encryption at ~6%, overhead inherent to the transport that cannot be eliminated without replacing it.
+
+In Go,  gRPC operates with a tiered buffer pool (sizedBufferPool) and clear()s the full tier capacity on every buffer reuse. For example, a 256KiB protobuf message would be promoted to the 1MiB tier, causing a 4x zeroing amplification. With 1MiB chunks, the marshaled message overflows all tiers and falls through to `simpleBufferPool`, which allocates a buffer matching the actual size. This reduces `memclr` by ~3GB per GB transferred and drops CPU utilization from ~68% to around ~48% in benchmarks.
+
+#### Additional Optimizations
+
+Switching from synchronous libnbd `Pread` to libnbd AIO (`AioPread` + `Poll`) pipelines up to N concurrent NBD reads so that disk I/O overlaps with downstream writes instead of blocking sequentially. The implementation that was examined uses a circular FIFO queue of pre-allocated C buffers (`libnbd.MakeAioBuffer`) with zero-copy slice access, eliminating per-chunk `make([]byte)` allocations and their associated `memclrNoHeapPointers` zeroing cost. This optimization operates at the NBD read layer and is applicable to both the bind-mount and gRPC tunnel approaches. Over the gRPC tunnel it yielded 103 MB/s at 256 KiB chunks (+15%) and 117 MB/s at 1 MiB chunks (+31%).
+
+> [!NOTE]
+> This optimization is applicable to both approaches.
 
 ### Alternatives
 
