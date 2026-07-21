@@ -98,7 +98,7 @@ The high level goal is to allow complex features to be implemented out-of-tree w
 
 For example, this includes:
 - Support a structured way of modifying the `DomainSpec` via plugins connected at well-defined hook points.
-- Support two plugin modes: simple JSON/CEL-based and advanced sidecar-based.
+- Support two plugin modes: simple CEL-based and advanced sidecar-based.
 - Support modifying Kubernetes objects (e.g. VM, VMI, virt-launcher pod, other pods, etc) via admission policies or webhooks.
   this can be helpful to modify properties like resources, conditions (e.g. migratability), etc.
 - Track and depend on Kubernetes Admission Policies and Webhooks as part of a plugin,
@@ -158,7 +158,7 @@ it will be replaced it with the complete, fully-expanded libvirt DomainSpec stru
 
 The domain hook would support two types of hooks:
 
-**Simple hooks**: These are JSON or CEL based hooks.
+**Simple hooks**: These are CEL-based hooks.
 These hooks are valuable for simple XML changes that do not require complex logic.
 These hooks are easily deployable, eliminating the need to write code, provide a container image,
 running another sidecar container, etc.
@@ -176,40 +176,18 @@ Moving forward we can support more hook points if needed.
 
 <ins>Simple Hooks</ins>:
 
-JsonPatch based simple hook:
 ```yaml
 domainHooks:
-  - type: JsonPatch
-    operations:
-      - op: add
-        path: /spec/devices/disks
-        value:
-          name: monitoring-disk
-          disk:
-            bus: virtio
-```
-
-CEL based simple hook:
-```yaml
-domainHooks:
-  - type: ApplyConfiguration
-    expression: |
-      object.spec.devices.disks + [
-        {
-          "name": "monitoring-disk",
-          "disk": {
-            "bus": "virtio"
-          }
-        }
-      ]
+  - cel:
+      expression: 'Domain{CPU: DomainCPU{Mode: "host-passthrough"}}'
 ```
 
 <ins>Advanced Hooks</ins>:
 
 ```yaml
 domainHooks:
-  - type: Plugin
-    socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/my-plugin-socket.sock"
+  - sidecar:
+      socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/my-plugin-socket.sock"
 ```
 
 Note: The socket would need to reside under `/var/run/kubevirt-plugin/<my-plugin-name>`,
@@ -219,7 +197,7 @@ The plugin's container will have visibility only to its plugin folder in an isol
 ### The Node Hook
 
 To support node-level customizations, hooks can also define operations triggered by the virt-handler pod.
-These are invoked via gRPC (or ttRPC, as used by NRI) calls from virt-handler to a plugin server
+These are invoked via gRPC calls from virt-handler to a plugin server
 (a DaemonSet running on each node).
 The communication is via a socket (its path is defined by the `Plugin` CR).
 The existence of a socket marks the readiness of the plugin - similarly to NRI plugins.
@@ -241,12 +219,11 @@ It provides a `NodeHookContext` struct to provide context to the plugin's Daemon
 
 - **PreVMStart**: Before VM launch (e.g., setup node devices/network; aligns with vmUpdateHelperDefault).
 - **PostVMStart**: After VM is running (e.g., verify node resources).
+- **PreVMStop**: Before VM stops (e.g., cleanup node resources; aligns with processVmUpdate on shutdown).
+- **PostVMStop**: After VM has stopped (e.g., final cleanup).
 - **PreMigrationSource**: Before migration from source node (e.g., prepare sockets; aligns with migrateVMI in migration-source.go).
-- **PostMigrationSource**: After migration completes on source (e.g., cleanup; aligns with handleSourceMigrationProxy).
 - **PreMigrationTarget**: Before migration to target node (e.g., setup target sockets; aligns with prepareMigrationTarget in migration-target.go).
 - **PostMigrationTarget**: After migration completes on target (e.g., repair/verify; aligns with finalizeMigration).
-- **OnVMStop**: When VM stops (e.g., cleanup node resources; aligns with processVmUpdate on shutdown).
-- **PostVMStop**: Called periodically.
 
 The plugin would have to explicitly mention which hook points it wishes to register for.
 
@@ -254,22 +231,11 @@ The plugin would have to explicitly mention which hook points it wishes to regis
 
 ```yaml
 nodeHooks:
-  - mode: Plugin
-    socket: /var/run/my-node-socket.sock
+  - socket: /var/run/my-node-socket.sock
     permittedHooks:
     - PreVMStart
-    - PostMigrationSource
-selector:
-  matchLabels:
-    use-plugin: my-plugin
-  matchFields:
-    - key: metadata.name
-      operator: Prefix
-      value: vm-
-  conditions: # CEL-based
-    - "vmi.status.phase == 'Running'"
-    - "vmi.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
-    - "vmi.status.conditions.exists(c, c.type == 'LiveMigratable' && c.status == 'True')"
+    - PostVMStop
+    condition: "vmi.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
 ```
 
 ### Admission Policies and Webhooks
@@ -337,10 +303,12 @@ but also set the ground for providing an upgrade path, versioning, multi-plugin 
 See [possible plans for the future](#possible-future-enhancements) below.
 
 These are the basic fields every plugin would need to populate:
-- name:  a unique identifier for the plugin.
-- Version: Specifies the plugin’s version.
-- failureStrategy: Defines the behavior when a plugin fails. `Fail` (default) blocks the operation, `Ignore` logs the error and continues.
-- timeout: The maximum duration to wait for a plugin response before considering it failed (e.g. `30s`, `2m`). Defaults to `30s`.
+- failureStrategy: Defines the default behavior when a hook fails. `Fail` (default) blocks the operation, `Ignore` logs the error and continues. Individual hooks can override this.
+- condition: A CEL expression that filters which VMIs the plugin applies to. Individual hooks can further narrow with their own condition.
+- timeout: Per-hook field. The maximum duration to wait for a hook response before considering it failed (e.g. `30s`, `2m`).
+
+The plugin’s name comes from the Kubernetes object metadata (`metadata.name`).
+Versioning and upgrade path are deferred to [future enhancements](#possible-future-enhancements).
 
 ## API Examples (full version)
 
@@ -350,36 +318,15 @@ kind: Plugin
 metadata:
   name: monitoring-hook
 spec:
-  PluginMetadata:
-    name: "best-plugin-ever"
-    version: "0.0.1"
-    failureStrategy: Fail
-    timeout: 30s
+  failureStrategy: Fail
 
   domainHooks:
-  # Simple hook: JsonPatch
-  - type: JsonPatch
-    operations:
-      - op: add
-        path: /spec/devices/disks
-        value:
-          name: monitoring-disk
-          disk:
-            bus: virtio
-  # Simple hook: CEL-based ApplyConfiguration
-  - type: ApplyConfiguration
-    expression: |
-      object.spec.devices.disks + [
-        {
-          "name": "extra-disk",
-          "disk": {
-            "bus": "virtio"
-          }
-        }
-      ]
-  # Advanced hook: Plugin sidecar
-  - type: Plugin
-    socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/my-plugin-socket.sock"
+  # Simple hook: CEL-based
+  - cel:
+      expression: 'Domain{CPU: DomainCPU{Mode: "host-passthrough"}}'
+  # Advanced hook: Sidecar
+  - sidecar:
+      socketPath: "/var/run/kubevirt-plugin/monitoring-hook/hook.sock"
 
   mutatingAdmissionPolicies:
     - name: "my-mutating-policy-1"
@@ -393,24 +340,11 @@ spec:
     - name: "my-validating-webhook-1"
 
   nodeHooks:
-    - mode: Plugin
-      socket: /var/run/my-node-socket.sock
+    - socket: /var/run/my-node-socket.sock
       permittedHooks:
       - PreVMStart
-      - OnVMStop
+      - PreVMStop
       - PostVMStop
-
-  selector:
-    matchLabels:
-      use-plugin: my-plugin
-    matchFields:
-      - key: metadata.name
-        operator: Prefix
-        value: vm-
-    conditions: # CEL-based
-      - "vmi.status.phase == 'Running'"
-      - "vmi.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
-      - "vmi.status.conditions.exists(c, c.type == 'LiveMigratable' && c.status == 'True')"
 ```
 
 ## Alternatives
@@ -537,11 +471,11 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 Alpha
 
-- [ ] Feature gate (`StructuredPlugins`) guards all code changes.
+- [ ] Feature gate (`Plugins`) guards all code changes.
 - [ ] Plugin CRD is defined and registered.
-- [ ] Simple domain hooks (JsonPatch) are functional.
+- [ ] Simple domain hooks (CEL) are functional.
 - [ ] Advanced domain hooks (plugin sidecar via socket) are functional for a single hook point.
-- [ ] Node hooks are functional for at least PreVMStart and OnVMStop hook points.
+- [ ] Node hooks are functional for at least PreVMStart and PreVMStop hook points.
 - [ ] failureStrategy (Fail/Ignore) and timeout are respected.
 - [ ] Basic functional tests covering domain hooks and node hooks.
 
