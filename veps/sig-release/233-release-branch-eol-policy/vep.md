@@ -253,7 +253,8 @@ To avoid disruption, the following transition plan is proposed:
    N-2 (where N is the current release) are marked EOL simultaneously. As of
    v1.10 GA, this would mean v1.7 and earlier are EOL.
 4. **Archive old branches**: For branches that have been de facto dead for
-   years (release-0.4 through release-0.57), immediately:
+   years (release-0.4 through release-0.57), archive by v1.9.0-beta.0
+   to allow downstream users and vendors a grace period to react:
    - Remove any remaining CI configuration
    - Apply branch protection rules to prevent merges
    - No need to delete branches; they serve as historical record
