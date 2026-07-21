@@ -157,7 +157,8 @@ The VM controller manages ResourceClaims following the same pattern as
 
 1. **Claim creation** (`handleResourceClaims`): Called during `startVMI()`,
    before the VMI is created. For each entry in `resourceClaimTemplates`:
-   - Derives the claim name as `<vm-name>-<entry-name>`
+   - Derives the claim name as `<vm-name>-<entry-name>` (validated at admission
+     time to not exceed 63 characters — the Kubernetes name length limit)
    - Checks if the ResourceClaim already exists in the informer cache
    - If not, looks up the ResourceClaimTemplate, creates the ResourceClaim with
      the VM as owner (via `OwnerReference`), and records controller expectations
@@ -191,17 +192,23 @@ VM deleted              → claims garbage-collected via owner ref
 
 The validating webhook (`validateResourceClaimTemplates`) enforces:
 
-- `GPUsWithDRA` or `HostDevicesWithDRA` feature gate must be enabled
+- `PersistentDRAClaims` feature gate must be enabled
 - No duplicate `name` entries
 - Both `name` and `resourceClaimTemplateName` are required
 - Each entry must have a matching `spec.template.spec.resourceClaims[]` entry
   by name
+- The derived claim name (`<vm-name>-<entry-name>`) must not exceed 63
+  characters (the Kubernetes object name length limit)
 
 ### RBAC
 
 The virt-controller service account requires:
-- `resourceclaims`: get, list, watch, create, update, delete, patch
+- `resourceclaims`: get, list, watch, create
 - `resourceclaimtemplates`: get, list, watch
+
+No `update`, `patch`, or `delete` verbs are needed on resourceclaims — owner
+references are set at creation time and Kubernetes garbage collection handles
+deletion when the VM is deleted.
 
 ## API Examples
 
@@ -332,9 +339,9 @@ simpler and follows the established `dataVolumeTemplates` pattern.
 - On rollback, orphaned ResourceClaims (created by the new controller) will
   remain until manually deleted or until the VM is deleted (owner reference GC
   still works regardless of the controller version).
-- The feature is gated behind the existing `GPUsWithDRA` / `HostDevicesWithDRA`
-  feature gates. No new feature gate is introduced since this is an extension
-  of existing DRA functionality.
+- The feature is gated behind a dedicated `PersistentDRAClaims` feature gate
+  (alpha, disabled by default). The webhook rejects `resourceClaimTemplates`
+  when the gate is off.
 
 ## Functional Testing Approach
 
@@ -380,7 +387,7 @@ simpler and follows the established `dataVolumeTemplates` pattern.
 
 ### Alpha
 
-- [x] Feature gated behind `GPUsWithDRA` / `HostDevicesWithDRA`
+- [x] Feature gated behind dedicated `PersistentDRAClaims` feature gate
 - [x] `ResourceClaimTemplateEntry` API type and `VirtualMachineSpec.ResourceClaimTemplates` field
 - [x] VM controller creates and manages ResourceClaims from templates
 - [x] `SetupVMIFromVM` rewrites template references to direct name references
