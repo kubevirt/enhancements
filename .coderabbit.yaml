@@ -1,0 +1,19 @@
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  auto_review:
+    enabled: false
+  tools:
+    trufflehog:
+      enabled: true
+
+knowledge_base:
+  opt_out: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - README.md
+      - veps/NNNN-vep-template/vep.md
+      - docs/feature-lifecycle.md
