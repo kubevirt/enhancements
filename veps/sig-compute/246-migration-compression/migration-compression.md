@@ -47,8 +47,7 @@ bottleneck but not universally beneficial, hence explicit opt-in.
 
 - Expose compression in `MigrationPolicy` under `spec.experimental.compression`
 - Keep the default disabled
-- Gated behind the experimental migration options feature gate defined by
-  [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
+- Exposed via `MigrationPolicy.spec.experimental` (not the KubeVirt CR); enabled per policy by setting `compression: zstd`
 - Path toward automatic enablement in future versions
 
 ## Non Goals
@@ -79,14 +78,9 @@ bottleneck but not universally beneficial, hence explicit opt-in.
 
 ## Design
 
-### API and feature gate
+### API
 
-Compression is exposed as a field under `spec.experimental` in the
-`MigrationPolicy` CRD. This experimental section,
-its feature gate, and the propagation mechanics are defined by
-[VEP 293: Experimental Migration Options](https://github.com/kubevirt/enhancements/pull/295).
-This VEP only specifies the compression-specific field and its mapping to
-the hypervisor.
+Compression is exposed under `MigrationPolicy.spec.experimental`, a temporary section available only on `MigrationPolicy` (not the KubeVirt CR). Resolved options are merged into per-VMIM configuration. This VEP only specifies the compression-specific field and its mapping to the hypervisor.
 
 The compression field is a string enum: `"none"` (disabled) or `"zstd"`.
 When omitted (`nil`) or set to `"none"`, compression is disabled.
@@ -156,9 +150,7 @@ The explicit algorithm selection is intended as a transitional API. The
 long-term goal is automatic enablement based on dirty rate, bandwidth, and
 convergence monitoring. If that proves reliable, compression becomes an
 implementation detail and the explicit knob either moves to an
-advanced-only section or is removed. The `spec.experimental` section and
-its lifecycle are defined by
-[VEP 293](https://github.com/kubevirt/enhancements/pull/295).
+advanced-only section or is removed. The `spec.experimental` section is removed before GA.
 
 ### Consideration for future improvements
 
@@ -197,7 +189,7 @@ overhead is modest at zstd level 1 and bounded by migration bandwidth.
    params include `Compression: "zstd"` when enabled.
 2. **E2E**: Migration succeeds with compression; verify non-zero compression
    bytes in job stats.
-3. **Negative**: `spec.experimental` ignored when gate is disabled.
+3. **Negative**: `compression: none` or omitted leaves compression disabled.
 
 ## Implementation History
 
@@ -207,11 +199,9 @@ overhead is modest at zstd level 1 and bounded by migration bandwidth.
 
 ### Alpha
 
-- [ ] Experimental migration options framework from
-      [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
-      (feature gate, `spec.experimental` section, propagation path)
+- [ ] `MigrationPolicy.spec.experimental` propagation path
 - [ ] `MigrationCompression` enum and `spec.experimental.compression` field
-      added to `ExperimentalMigrationConfiguration`
+      added to `ExperimentalMigrationOptions`
 - [ ] `virt-launcher` maps API enum to libvirt compression method and
       sets hypervisor flags
 - [ ] E2E test
