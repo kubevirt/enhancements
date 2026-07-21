@@ -4,34 +4,41 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.8
-- This VEP targets beta for version: v1.9
-- This VEP targets GA for version:
+- This VEP targets alpha for version:
+- This VEP targets beta for version:
+- This VEP targets GA for version: v1.10
 
 ### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [x] (R) Alpha target version is explicitly mentioned and approved
-- [x] (R) Beta target version is explicitly mentioned and approved
-- [ ] (R) GA target version is explicitly mentioned and approved
+- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
-This enhancement introduces a new field to the `VirtualMachine` spec to
-specify memory lock RLimit configuration requirements. The new field
-will be placed into `spec.domain.memory.reservedOverhead`. It will
-contain a structure holding an enum and a kubernetes
-`resource.Quantity`. The enum will indicate if the memory lock RLimit
-needs to be updated, and the `Quantity` will indicate if there's some
-extra memory apart from the VM's that could be locked.
+This enhancement proposes setting an unlimited memlock limit to the
+virtqemud process, by default, without any condition having to be met,
+or any toggle or API field set, for all running KubeVirt virtual
+machines. This allows running any type of workload that might require
+non-default memory lock limits, without requiring a new API field or
+maintaining a list of conditions under which the limit should be
+modified, no matter the logic supporting a device or workload lives
+inside the core KubeVirt source or it is provided via a plugin.
 
-Those values can be updated by other external mechanisms, such as
-mutating admission webhooks, based on other VMI spec configurations.
-Those values will be considered by the `virt-handler` to appropriately
-configure the memlock RLimits of the `virt-launcher` pod and qemu
-process.
+Although this might bring security risks with it, those are mitigated by
+virt-launcher's physical memory usage resource limits.  Memory pressure
+attacks that malicious devices or qemu implementations could exploit are
+avoided given the kubelet will enforce a maximum physical memory usage
+limit on the virt-launcher pod, which encapsulates the running
+virtqemud/qemu process. So even if unlimited virtual memory lock
+accounting will be permitted, allowing VMs with theoretically unlimited
+VFIO devices attached to it, physical memory reservation will be still
+limited by virt-launcher's memory resource limits, which are set based
+on the guest's memory size and an overhead that KubeVirt calculates
+through each hypervisor's `GetMemoryOverhead` implementation.
 
 ## Motivation
 
@@ -42,24 +49,28 @@ that a process can lock is limited by the environment's memory lock
 RLimit. Libvirt updates environment memory lock limits if they are below
 expectations (see [source code][libvirt-vdpa-memlock-ratio]). Those
 expectations depend on the guest's memory size, the number of devices
-that require locking memory, and the size of other memory regions that
-could be also locked (such as the IOMMU region).
+that require locking memory, the size of other memory regions that
+could be also locked (such as the IOMMU region) and whether iommufd is
+used or not.
 
 Currently, KubeVirt (`virt-handler`) adjusts the memory lock limits of
 the `virt-launcher` under a specific set of
 [conditions][kubevirt-memlock-limit-conditions]: When SRIOV/VFIO devices
-are attached to, or it is a real time or SEV VM.
+are attached to, or it is a real time or SEV VM. However, these are not
+the only cases in which a virtual machine might need to lock memory.
+Moreover, implementations outside of the core KubeVirt source code, such
+as hook sidecars or network binding plugins, do not have a way to make
+sure VMs won't fail to boot due to memory lock limits not being set
+appropriately.
 
-However, the cases in which the VM might need to lock memory are not
-limited to those listed above. In other words, this mechanism might need
-to be extended in the future. Moreover, it might be that the devices
-requiring to lock VM memory are implemented outside the core kubevirt
-source code, such as network binding plugins.
+A mechanism to allow running virtual machines with non-trivial memory
+lock RLimit requirements was needed.
 
-A more general mechanism that applies memory lock RLimits of the
-`virt-launcher` based on requirements is needed. Letting users and other
-components, such as admission webhooks, to specify those requirements
-will help to make the existing mechanism adapt to other use-cases.
+Initially, the approach consisted of an API field, `ReservedOverhead`,
+that was released under a feature gate in Alpha stage in release v1.8.
+This enhancement tracked the development of such feature. This allowed
+other components, such as admission webhooks, specify those
+requirements without affecting internal KubeVirt source code.
 
 Currently, some existing mechanisms that are related to this enhancement
 exist, but each with their own limitations:
@@ -75,52 +86,68 @@ exist, but each with their own limitations:
    value, meaning that it wouldn't grow based on guest memory size. It
    increases pods' memory overhead, which impacts on schedulable VMIs.
    And finally, it does not trigger memory lock RLimit configuration.
+3. `ReservedOverhead`: From v1.8 on, the VMI spec API would let users
+   define memlock limit requirements under the `ReservedOverheadMemlock`
+   feature gate. This, however, did not decouple the memory lock
+   configuration from pod memory sizing, put the responsibility of
+   computing the limits on the user, who did need to learn about
+   internals, and showed not to be scalable so as to support hotplug
+   operations of different kind. It was finally decided to remove this
+   field from the API in favour of another mechanism.
 
-With the existing approaches, kubevirt lacks a general mechanism for
-other agents to specify their memory lock RLimit requirements. For that
-reason, some network binding plugins (like vDPA) fail to function, or
-require workarounds that do not scale or impact cluster-wide VMI
-scheduling.
+In summary, KubeVirt does not support a mechanism to let users run
+workloads that need locked memory without those...
+- ...being a really specific set of cases (SR-IOV, SEV, RT...).
+- ...being decoupled from pod memory sizing and so VM schedulability.
+- ...involving the user in knowing about libvirt's memory lock limit
+  configuration internals.
 
 [libvirt-vdpa-memlock-ratio]: https://gitlab.com/libvirt/libvirt/-/blob/v11.9.0/src/qemu/qemu_domain.c#L8362-8384
 [kubevirt-memlock-limit-conditions]: https://github.com/kubevirt/kubevirt/blob/v1.7.0/pkg/virt-handler/isolation/detector.go#L95
 
 ## Goals
 
-- Support a mechanism to specify memory lock RLimits.
-- Make this mechanism general to possible use cases that need to specify
-  their memory lock RLimits.
-- Adjust `virt-launcher` pod and qemu process memory lock RLimits based
-  on the requirements specified through that mechanism.
+- Support running any virtual machine with non-trivial memory lock
+  RLimit requirements not under just a specific set of cases.
+- Make this mechanism general to all use cases and avoid a new API
+  field.
 - Adjust memory lock limits without impacting VMI scheduling capacity
   (i.e. increasing pod memory resource limits).
+- Remove the existing `ReservedOverhead` API field, which tried
+  addressing some of the points above in previous releases.
 
 ## Non Goals
 
 - Modifying the overall memory overhead calculation.
-- Changing how memory lock limits are computed for already considered
-  conditions (e.g. SR-IOV).
 - Providing a general mechanism to adjust `virt-launcher` pod memory
   limits.
+- Implementing a KubeVirt-Libvirt memory lock RLimit negotiation
+  mechanism.
 
 ## Definition of Users
 
-- Users of VMs that might require out of the ordinary memory lock RLimit
-  configurations.
-- Kubevirt developers that might need to specify memory lock RLimit
-  requirements for the use-case they are working on.
-- Network binding plugin developers.
+- Users of any VM that might require locking guest memory.
+- Kubevirt developers that work on a KubeVirt feature that may require
+  the VM or any of its devices to lock guest memory.
+- Network binding plugin, hook-sidecar or other type of KubeVirt addon
+  developers.
 
 ## User Stories
 
-- As a user, I want to adjust memory lock RLimits of `virt-launcher`
-  pods and qemu processes to allow the usage of virtualization
-  technologies that need it.
-- As a user, I want the memory lock RLimits mechanism to be adjustable
-  automatically by other components such as admission webhooks.
+- As a user, I want to run VMs that need to lock guest memory, requiring
+  out of the ordinary memory lock RLimits on `virt-launcher` pods and
+  qemu processes, no matter if support for those is explicitly
+  implemented in the core KubeVirt source code or not.
+- As a user, I want to run any workload without requiring in-depth
+  knowledge of if they might require locking guest's memory and how to
+  compute the memory lock limits by myself.
+- As a user, I want to run any workload that might require locking
+  guests's memory without implying any security implications related to
+  possible memory pressure attacks exploited by malicious device or
+  hypervisor implementations, or guests.
 - As a KubeVirt developer, I want a general mechanism that allows
-  specifying memlock RLimits without needing to add use-case specific
-  logic.
+  running any VM that require arbitrary memlock RLimits without needing
+  to add use-case specific logic.
 
 ## Repos
 
@@ -128,66 +155,60 @@ scheduling.
 
 ## Design
 
-This VEP introduces a new optional field to `VirtualMachine` that will
-specify the memlock RLimit needs of a VM.
+This VEP proposes setting the memory lock limit of `virtqemud` and
+`qemu-*` processes running in all `virt-launcher` pods to `'unlimited'`.
+This way:
+- Users do not need to know whether their VM need special memory lock
+  limit requirements or not.
+- A new field is not added to the KubeVirt API.
+- Pod's memory size does not affect memory lock limits and viceversa.
+- It does not require any special handling during VM migration or
+  hotplug operation.
 
-The new field will be `spec.domain.memory.reservedOverhead`. It will
-contain two optional subfields:
-- `memLock` (`string`): An enum indicating whether or not to extend the
-  exiting memory lock RLimits of the `virt-launcher` pod and its qemu
-  process. It supports two values: `Required` and `NotRequired`.
-- `addedOverhead` ([`Quantity`][k8s-resource-quantity]): An optional
-  field to let users specify how much memory could be locked apart from
-  the VM's memory size. Note this could be larger than the guest's
-  maximum memory and even larger than the maximum memory allowed for the
-  `virt-launcher`.
+Although simple, this approach is protected against memory pressure
+attacks exercised by malicious device implementation or guests by the
+launcher pod's memory resource limits. Even if the memory lock limit is
+`'unlimited'`, it accounts virtual memory locked. In case a malicious
+workload tries locking more physical memory than the one expected by
+KubeVirt and set into the launcher's memory resource limits, the kubelet
+would bring it down.
 
-If `memLock: "Required"`, the logic that adjusts `virt-launcher` pod's
-memory lock RLimits will be triggered. By default (when `addedOverhead`
-is empty or zero), the RLimits will be updated to match expected minimum
-value of it. This base will equal the sum of VM's base memory size and
-whatever other needs that KubeVirt might consider internally (see
-[`GetMemoryOverhead`][kbvirt-getMemOverhead] logic).  Whatever value
-that `addedOverhead` has will be added to that base.
+As this VEP proposes an alternative way of dealing with VM memory lock
+limits, it also requires removing the KubeVirt's Alpha VMI field
+`spec.domain.memory.reservedOverhead` added in v1.8 under the
+`ReservedOverheadMemlock` feature gate.
 
-Note that if the expected memory RLimit is $2 * Mem_{VM}$,
-`addedOverhead` only needs to carry $Mem_{VM}$, as the base RLimit will
-already consider the memory size of the VM once.
+This also provides a global way of dealing with devices and VMs that
+need to lock memory, which leads into removing the existing conditions
+only allowing memory lock limit configuration for certain VMs in
+specific hypervisor ([kvm][kvm-adjustresources],
+[mshv][mshv-adjustresources]) `AdjustResources` implementations.
 
-Users could set those fields by themselves. Mutating admission webhooks
-could also watch for creation of VMs and compute memlock RLimit
-requirements based on their own specific needs and conditions. This way,
-RLimit calculation logic and the conditions in which they apply are
-outsourced to admission webhook implementations, each supporting
-different devices/conditions' needs.
-
-As there might be multiple admission webhooks that want to update the
-memlock RLimit, webhook implementations will need to check if the field
-already exists, and if so, add their computed memlock RLimits to the
-previously existing value. As mutating admission webhooks are executed
-sequentially, this does not imply race conditions.
-
-This field will be consumed by the `virt-handler` and will apply the
-requirements onto the `virt-launcher` pod and its qemu process
-accordingly.
-
-There are certain cases in which the `virt-handler` adjusts memlock
-RLimits already. When this new mechanism is introduced, `virt-handler`
-will track the annotation, and if any, it will add it to the result of
-the calculation existing for VFIO, SEV and RT VMs.
-
-[k8s-resource-quantity]: https://github.com/kubernetes/apimachinery/blob/173776a0582da70432e19d16eca025c451600ae8/pkg/api/resource/quantity.go#L102
-[kbvirt-getMemOverhead]: https://github.com/kubevirt/kubevirt/blob/50b9b4d0cf1caaf56147411a1e6765134e0e82b9/pkg/virt-controller/services/renderresources.go#L425
+[kvm-adjustresources]: https://github.com/kubevirt/kubevirt/blob/e93df5812d69db267055f9c67f2b122ee0f5ab4d/pkg/hypervisor/kvm/runtime.go#L57-L105
+[mshv-adjustresources]: https://github.com/kubevirt/kubevirt/blob/e93df5812d69db267055f9c67f2b122ee0f5ab4d/pkg/hypervisor/mshv/runtime.go#L54-L113
 
 ## API Examples
 
-Users can specify that a `VirtualMachine` could require to lock memory
-through `spec.domain.memory.reservedOverhead.memLock`. If any other
-region apart from the VM memory could be locked too, the user can
-specify it by setting
-`spec.domain.memory.reservedOverhead.addedOverhead`.
+This VEP does not introduce a new API field. It rather removes one that
+existed in Alpha stage under the `ReservedOverheadMemlock` feature gate.
 
-An example with both fields set:
+## Alternatives
+
+### ReservedOverherhead API field
+In a previous iteration of this VEP an API field that went for
+`ReservedOverhead` was introduced in v1.8/Alpha under the
+`ReservedOverheadMemlock` feature gate. For VMs it was located under
+`spec.template.domain.memory.reservedOverhead`. It held two subfields:
+`addedOverhead`, controlling the amount of memory to account and
+`memLock`, controlling whether memory needed to be locked or not.
+
+This however brought some drawbacks, such as the user needing to know
+about libvirt's memory lock limit computation internals, it did not
+decouple the pod memory size from the memory lock limits, and it did not
+scale properly in hotplug/VM-update operations, when backed up by
+mutating admission webhooks.
+
+An example of a VM with this field configured:
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -208,10 +229,25 @@ spec:
 With this configuration, the memory RLimits of the `virt-launcher` pod
 and its qemu process would be updated to match the VM memory + `1G`.
 
-Mutating admission webhooks can create or increase that field if some
-conditions (up to each webhook) are met.
+Mutating admission webhooks could create or increase that field if some
+conditions (up to each webhook) were met.
 
-## Alternatives
+### Libvirt exposes memlock Rlimit requirements through API
+Another option would be to outsource memlock limit calculation to
+libvirt. KubeVirt would define the domainXML, request the memory lock
+limit required to start the VM to libvirt, then finally, start the VM.
+
+**Pros**:
+- Does not implement any logic regarding memory lock RLimit calculation
+  in KubeVirt.
+- The approach works no matter the device or VM type.
+- Does not set an unlimited limit, but keeps it right where libvirt
+  expects to be necessary.
+
+**Cons**:
+- Libvirt lacks an API exposing that information.
+- KubeVirt lacks the VM lifecycle stage between domain definition and VM
+  startup, needed to sync this requirement.
 
 ### Network binding plugin specific field for memory lock configuration
 
@@ -280,63 +316,60 @@ the annotation accordingly.
 
 ## Scalability
 
+This approach decouples virt-launcher memory sizing from memlock limits.
+In other words, it stops treating limits on virtual locked memory as
+physical memory limits. This allows running workloads that need to lock
+the VM memory several times (resulting on a high accounted virtual
+locked memory) while keeping restricted physical memory limits on
+virt-launcher pods, which improves VM schedulability on nodes.
+
 There is already some logic that covers SR-IOV, RT, SEV machines' memory
 lock limit requirements. The existing logic is ad-hoc for each use case.
-This implementation accepts that these conditions already live in the
-KubeVirt codebase. Even if it could also cover those use-cases it
-doesn't intend to remove them from the code-base, at least at the
-current stage.
+This implementation removes these conditions in favour of the global
+`'unlimited'` limit.
 
-Apart from that, users could set these fields by themselves, but we
-expect this general mechanism to be consumed mainly by mutating
-admission webhooks not to require the user to run some of the
-mathematical operations needed to come up with proper `addedOverhead`
-values.
-
-Note that mutating admission webhooks do introduce certain latency
-during pod admission. This means that in case the number of devices and
-conditions that require special memlock RLimits is large enough, this
-could introduce a considerable latency to `VirtualMachine` admission.
+This implementation does not need time to compute limits based on
+conditions, number of attached devices, or others. Moreover, it does not
+require logic implemented by plugins relying on the `ReservedOverhead`
+to register a mutating admission webhook to make the process simpler
+from a user perspective, which results in a less bloated kube API.
 
 ## Update/Rollback Compatibility
 
-- It adds a new optional field, meaning it is backwards compatible.
-- On rollback, VMIs with `spec.domain.memory.reservedOverhead` fields
-  will fail to start if they are migrated or the `virt-launcher` is
-  destroyed and created again.
+- SEV and RT VMs or those with with SR-IOV devices, will be migrated
+  into a new virt-launcher, which will have an `'unlimited'` memory lock
+  limits, which will be greater than before. That way, these VMs won't
+  see their workloads affected.
+- It removes a field from VM domain memory specs: `ReservedOverhead`.
+  However, this was under a feature gate and in Alpha stage in v1.8 and
+  v1.9. So it does not affect the stable, or beta KubeVirt API.
+  Moreover, VMs with those fields set can be easily accomodated in new
+  version virt-launcher pods as the limits will be higher.
+- On rollback, VMIs with memory lock requirements that were not
+  supported previously will fail to start. However, SR-IOV, SEV and RT
+  virtual machines won't fail, as they were supported by a different
+  mechanism in former versions.
 
 ## Functional Testing Approach
 
-Unit tests should cover that `virt-handler` specifies the right memory
-lock RLimit value for different `spec.domain.memory.reservedOverhead`
-values:
-- The field does not exist or is empty.
-- It exists with `memLock: "Required"` but an empty `addedOverhead`.
-- It exists with `memLock: "Required"` and a valid `addedOverhead`.
-- It exists with `memLock: "NotRequired"` and a valid `addedOverhead`.
-- Other conditions such as SEV/RT/SR-IOV are met and there are other
-  requirements present in `reservedOverhead`.
+This mechanism is global and same to all VMs. That means that VMs
+relying on higher memory lock limits such as SRIOV, RT and SEV VMs will
+now rely on this mechanism. In other words, end to end or integration
+tests covering those technologies will also make sure that the logic
+works properly for new VMs, migration and device hotplug operations.
 
-The following e2e scenarios should be considered:
-- VM creation: a VM that requires special memlock RLimits can start if
-  the `spec.domain.memory.reservedOverhead` field containing a proper
-  configuration is present.
-- VM migration: Memory lock RLimits are configured properly in the
-  destination `virt-launcher` and qemu process when a VM with a
-  `spec.domain.memory.reservedOverhead` field is migrated thus, it can
-  keep running in the destination.
-- VM memory hotplug: guests with explicit memlock RLimit needs exposed
-  by `spec.domain.memory.reservedOverhead` and expected memory
-  hot-/un-plug operations can start up successfuly and keep running
-  after memory hot-/un-plug.
 
 ## Implementation History
 
-- 2025/04/29: Plans to graduate the feature into beta in v1.9 are
+- 2026/07/02: Alternative approach setting unlimited memory lock limits
+  to all virt-launcher pods is proposed.
+- 2026/06/03: Beta graduation definitely pushed back (see sig/compute
+  meting).
+- 2026/04/29: Plans to graduate the feature into beta in v1.9 are
   accepted.
-- 2025/03/04: Feature lands Alpha stage in v1.8
+- 2026/03/04: Feature lands Alpha stage in v1.8
   https://github.com/kubevirt/kubevirt/pull/16956
-- 2025/02/27: Feature implementation lands the main branch
+- 2026/02/27: Feature implementation lands the main branch
   https://github.com/kubevirt/kubevirt/pull/16384
 - 2025/12/10: Working on the draft implementation for the new design.
 - 2025/11/21: Draft implementation of the first proposed VEP:
@@ -345,18 +378,16 @@ The following e2e scenarios should be considered:
 ## Graduation Requirements
 
 ### Alpha
-- Make `virt-handler` track the value of the new fields in
-  `spec.domain.memory.reservedOverhead` and apply the memory lock limits
-  to `virt-launcher` and QEMU processes accordingly under a feature
-  gate.
-- Add feature gate `ReservedOverheadMemlock`.
+-
 
 ### Beta
-- Implement functional tests.
-- Notify that other memory extension mechanisms will be replaced by this
-  one in the future.
-- Documentation.
+-
 
 ### GA
-- Remove the `ReservedOverheadMemlock` feature gate.
-- Deprecate other memory extension mechanisms.
+- v1.10:
+    * This approach does not include new API fields.
+    * It only affects the KubeVirt API on removing a field that was not
+      graduated from Alpha into Beta, and so it was hidden under a
+      feature gate.
+    * It supports running workloads that relied on a different, existing
+      logic to set higher memory lock limits for certain cases.
