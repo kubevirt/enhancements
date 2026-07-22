@@ -9,6 +9,7 @@ Owners:
 ### Target releases
 
 - This VEP targets alpha for version: v1.9. 
+- This VEP targets alpha 2 for version: v1.10.
 - This VEP targets beta for version:
 - This VEP targets GA for version:
 
@@ -31,9 +32,13 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [User Stories](#user-stories)
 - [Repos](#repos)
 - [Design](#design)
-  - [The Domain Hook](#the-domain-hook)
-    - [Domain Hook modes](#domain-hook-modes)
-    - [Domain Hook API examples](#domain-hook-api-exmaples)
+  - [The Launcher Hook](#the-launcher-hook)
+    - [Launcher hook modes](#launcher-hook-modes)
+    - [Guest Definition Hook](#guest-definition-hook)
+    - [PreBoot Hook](#preboot-hook)
+    - [PreMigrationSource Hook](#premigrationsource-hook)
+    - [Launcher hook points](#launcher-hook-points)
+    - [Launcher hook API examples](#launcher-hook-api-examples)
   - [The Node Hook](#the-node-hook)
     - [Node hook points](#node-hook-points)
     - [Node hook API examples](#node-hook-api-examples)
@@ -46,12 +51,15 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [Possible future enhancements](#possible-future-enhancements)
   - [Versioning and Upgrade Path](#versioning-and-upgrade-path)
   - [multi-plugin support](#multi-plugin-support)
+  - [NodeReconcile Hook](#nodereconcile-hook)
+  - [Split to more parte CRDs](#split-to-more-parte-crds)
 - [Scalability](#scalability)
 - [Update/Rollback Compatibility](#updaterollback-compatibility)
 - [Functional Testing Approach](#functional-testing-approach)
 - [Implementation History](#implementation-history)
 - [Graduation Requirements](#graduation-requirements)
   - [Alpha](#alpha)
+  - [Alpha 2 (v1.10)](#alpha-2-v110)
   - [Beta](#beta)
   - [GA](#ga)
 
@@ -139,55 +147,153 @@ kubevirt/kubevirt
 ## Design
 
 The architecture of the new Plugin mechanism will consist of these different components:
-**domain hook**, **node hook**, **mutating policies** and **plugin metadata**.
+**launcher hook**, **node hook**, **mutating policies** and **plugin metadata**.
 
 Let's describe them one by one,
 then explain the overall CRD structure that centralizes all plugin-related configuration and components.
 
-### The Domain Hook
+### The Launcher Hook
 
-The proposed mechanism focuses on modifying the `DomainSpec`, a Go struct generated from the VirtualMachineInstance
-(VMI) spec, which serves as the internal representation of a VM's desired configuration before conversion to libvirt XML.
+Launcher hooks run inside `virt-launcher` at well-defined hook points in the VM lifecycle. Each entry in
+`launcherHooks` selects a **mode** - `cel` or `sidecar` - and the **hook point(s)** it applies to. A `cel` entry
+targets a single hook point (`hookPoint`) with an inline expression; a `sidecar` entry declares a socket and lists
+the hook points it serves (`permittedHooks`), so one sidecar can handle several hook points. Shared fields
+(`condition`, `failureStrategy`, `timeout`) live at the hook entry level. Hooks are applied in declaration order
+within a plugin, and in alphabetical order by plugin name across plugins.
+
+#### Launcher hook modes
+
+Each launcher hook entry uses one of two modes:
+
+**Simple (`cel`)**: A CEL expression evaluated inline, targeting a single hook point via `hookPoint`.
+These are valuable for changes that do not require complex logic, and are easily deployable - no need to write
+code, build a container image, or run a sidecar. The expression's input/output type is determined by the hook
+point (e.g. the `DomainSpec` for `GuestDefinition`). CEL support is added per hook point as it makes sense; not
+every hook point supports it.
+
+**Advanced (`sidecar`)**: A sidecar container runs inside `virt-launcher`, listening on a defined socket. It is a
+gRPC server exposing one method per hook point, so a single sidecar can serve multiple hook points via
+`permittedHooks`. At each hook point, `virt-launcher` sends a request to the socket with the relevant context
+(e.g. the `DomainSpec` and a `DomainHookContext` for `GuestDefinition`).
+
+#### Guest Definition Hook
+
+`guestDefinition` is the domain-definition mutation hook. It focuses on modifying
+the `DomainSpec`, a Go struct generated from the VirtualMachineInstance (VMI) spec, which serves as the internal
+representation of a VM's desired configuration before conversion to the hypervisor definition format (e.g. libvirt XML).
 Hooks will be executed after the initial `DomainSpec` generation but before the final XML is created.
 
 The current KubeVirt `DomainSpec` struct only includes a subset of the fields available in the full libvirt `DomainSpec`.
 To allow the plugin complete control over the generated XML (similar to the legacy Sidecar Hook),
 it will be replaced it with the complete, fully-expanded libvirt DomainSpec struct.
 
-#### Domain Hook modes
+The guest definition hook fires once, right after the domain XML is generated but before it's handed to libvirt.
+More guest-definition hook points may be added if needed.
 
-The domain hook would support two types of hooks:
+#### PreBoot Hook
 
-**Simple hooks**: These are CEL-based hooks.
-These hooks are valuable for simple XML changes that do not require complex logic.
-These hooks are easily deployable, eliminating the need to write code, provide a container image,
-running another sidecar container, etc.
+Some plugin use cases require modifying guest initialization artifacts that are generated at runtime -
+for example, cloud-init configuration that depends on CNI data (Multus network-status annotations)
+only available after pod creation. The guest definition hook cannot address this because it operates on
+domain XML, not guest initialization media.
 
-**Advanced (plugin-based) hooks**: In this mode, a sidecar container would run inside `virt-launcher`.
-This sidecar container would listen to a defined socket, waiting for requests by virt-launcher.
-In pre-defined hook points (e.g. before the domain XML is applied) virt-launcher would send a request to the socket,
-providing the `DomainSpec` struct generated by virt-launcher alongside a `DomainHookContext` struct that will contain
-extra information.
+The `preBoot` hook fires inside `startDomain()`, after all artifacts (cloud-init ISO, NVRAM, firmware, etc.)
+have been generated but before the VM is started via `CreateWithFlags`. This placement gives the sidecar
+access to the finalized artifacts while still allowing modifications before the guest sees them.
 
-Currently, we think of a single hook point, right after the domain XML is generated but before it's handed to libvirt.
-Moving forward we can support more hook points if needed.
+**Design:**
+- Sidecar-only (not CEL) - these hooks perform filesystem side effects, not structured data transformations.
+- Socket-based signaling: `virt-launcher` calls the sidecar's socket to signal that artifacts are ready.
+  The sidecar performs its modifications and responds when done.
+- Filesystem access via shared volume: the plugin author's Mutating Admission Policy (MAP) sets up an
+  `emptyDir` volume mounted in both the compute container and the sidecar container. The sidecar can
+  read and modify generated artifacts directly on the shared filesystem.
+- KubeVirt does not need artifact-specific code - the sidecar knows which files it needs to modify.
+- The [kubevirt/plugins](https://github.com/kubevirt/plugins) SDK will provide helpers for common operations
+  (e.g., cloud-init ISO extraction, modification, and repacking).
 
-#### Domain Hook API examples
+**Ordering with multiple plugins:** PreBoot hooks fire sequentially in the standard plugin ordering
+(alphabetical by plugin name, declaration order within each plugin). Each plugin's sidecar sees the
+filesystem state left by the previous plugin's sidecar. Plugin authors should be aware of this
+and design their modifications to be composable.
 
-<ins>Simple Hooks</ins>:
+**Note on hook ordering:** Guest definition hooks fire during domain definition (before `startDomain()`).
+PreBoot hooks fire later, during `startDomain()`. A domain mutation hook could add a device that
+affects cloud-init configuration - plugin authors should be aware of this ordering when designing
+plugins that combine both hook types.
+
+**Example use case:**
+A networking plugin that configures guest cloud-init network settings based on runtime CNI data
+(see [VEP 337](https://github.com/kubevirt/enhancements/issues/337)). The plugin's sidecar reads
+Multus network-status annotations via the Downward API, extracts the cloud-init ISO from the shared
+volume, injects the appropriate network configuration, and repacks the ISO.
+
+#### PreMigrationSource Hook
+
+Live migration behavior in KubeVirt is currently controlled entirely by internal logic.
+Plugins that manage specialized hardware, networking, or storage may need to customize migration
+parameters on a per-workload basis - for example, enabling multifd parallel migration and tuning
+thread counts for high-bandwidth workloads, or selecting specific compression methods.
+
+The `preMigrationSource` hook fires in `virt-launcher` on the migration source, just before
+the `MigrateToURI3` libvirt API call. The sidecar receives the generated migration flags
+and parameters, and can modify them before the migration begins.
+
+**Design:**
+- Sidecar-only (not CEL) - migration parameter tuning requires logic that goes beyond simple expressions.
+- The sidecar receives the full set of migration flags (e.g., `VIR_MIGRATE_PARALLEL`,
+  `VIR_MIGRATE_COMPRESSED`) and parameters (e.g., `Bandwidth`, `ParallelConnections`,
+  `Compression` method, `MigrateDisks` list) via a new gRPC message.
+- The sidecar can enable/disable flags and set parameter values, giving full control over
+  migration behavior. This allows plugins to both enable features (e.g., multifd) and
+  configure them (e.g., number of parallel connections).
+- A new protobuf service and message types will be defined for this hook point.
+- The sidecar can also perform other pre-migration preparation (e.g., signaling external systems,
+  preparing source-side resources).
+
+**Naming:** Named `PreMigrationSource` to match the existing node hook convention and to
+leave room for a future `PreMigrationTarget` launcher hook on the destination side. Note this is a distinct hook
+from the existing `PreMigrationSource` **node** hook (`NodeHookPreMigrationSource` in code): the node hook runs in
+virt-handler's plugin DaemonSet before migration starts, while this new **launcher** hook
+runs inside `virt-launcher` itself, immediately before the `MigrateToURI3` libvirt call, and can directly modify
+the migration flags/parameters passed to libvirt.
+
+**Example use case:**
+A storage plugin that enables multifd migration with a tuned thread count for VMs using
+high-throughput network-attached storage, while keeping the default single-stream migration
+for VMs with local disks.
+
+#### Launcher hook points
+
+Launcher hooks are available at the following hook points:
+
+| Hook Point | Purpose | Modes | Input/Output |
+|-----------|---------|-------|--------------|
+| `GuestDefinition` | Guest definition mutation | `cel` or `sidecar` | Domain XML in, mutated domain XML out |
+| `PreBoot` | Modify generated artifacts before VM start | `sidecar` only | Socket signal, filesystem access |
+| `PreMigrationSource` | Customize migration flags and parameters | `sidecar` only | Migration config in, modified config out |
+
+#### Launcher hook API examples
+
+<ins>Simple (CEL)</ins>:
 
 ```yaml
-domainHooks:
+launcherHooks:
   - cel:
+      hookPoint: GuestDefinition
       expression: 'Domain{CPU: DomainCPU{Mode: "host-passthrough"}}'
 ```
 
-<ins>Advanced Hooks</ins>:
+<ins>Advanced (sidecar)</ins>, one sidecar serving multiple hook points:
 
 ```yaml
-domainHooks:
+launcherHooks:
   - sidecar:
-      socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/my-plugin-socket.sock"
+      socketPath: "/var/run/kubevirt-plugin/my-cool-plugin/hook.sock"
+      permittedHooks:
+        - GuestDefinition
+        - PreBoot
+        - PreMigrationSource
 ```
 
 Note: The socket would need to reside under `/var/run/kubevirt-plugin/<my-plugin-name>`,
@@ -210,16 +316,16 @@ It also delegates the responsibility of managing resources to the plugin author.
 
 These hooks are invoked at specific points in virt-handler’s controllers.
 Node hooks cannot modify `DomainSpec` or XML directly but can influence runtime behavior.
-Plugins can implement both domain and node hooks for cohesive functionality.
+Plugins can implement both launcher and node hooks for cohesive functionality.
 
-Similarly to the domain hooks, `virt-handler` communicates with the relevant socket at pre-defined hook points.
+Similarly to the launcher hooks, `virt-handler` communicates with the relevant socket at pre-defined hook points.
 It provides a `NodeHookContext` struct to provide context to the plugin's DaemonSet.
 
 #### Node hook points
 
 - **PreVMStart**: Before VM launch (e.g., setup node devices/network; aligns with vmUpdateHelperDefault).
 - **PostVMStart**: After VM is running (e.g., verify node resources).
-- **PreVMStop**: Before VM stops (e.g., cleanup node resources; aligns with processVmUpdate on shutdown).
+- **OnVMStop**: Before VM stops (e.g., cleanup node resources; aligns with processVmUpdate on shutdown).
 - **PostVMStop**: After VM has stopped (e.g., final cleanup).
 - **PreMigrationSource**: Before migration from source node (e.g., prepare sockets; aligns with migrateVMI in migration-source.go).
 - **PreMigrationTarget**: Before migration to target node (e.g., setup target sockets; aligns with prepareMigrationTarget in migration-target.go).
@@ -318,15 +424,23 @@ kind: Plugin
 metadata:
   name: monitoring-hook
 spec:
+  condition: "vmi.metadata.labels['network-plugin'] == 'custom'"
   failureStrategy: Fail
 
-  domainHooks:
-  # Simple hook: CEL-based
-  - cel:
-      expression: 'Domain{CPU: DomainCPU{Mode: "host-passthrough"}}'
-  # Advanced hook: Sidecar
-  - sidecar:
-      socketPath: "/var/run/kubevirt-plugin/monitoring-hook/hook.sock"
+  launcherHooks:
+    # CEL guest-definition mutation
+    - cel:
+        hookPoint: GuestDefinition
+        expression: 'Domain{CPU: DomainCPU{Mode: "host-passthrough"}}'
+
+    # one sidecar serving multiple hook points
+    - sidecar:
+        socketPath: "/var/run/kubevirt-plugin/monitoring-hook/hook.sock"
+        permittedHooks:
+          - GuestDefinition
+          - PreBoot
+          - PreMigrationSource
+      timeout: 30s
 
   mutatingAdmissionPolicies:
     - name: "my-mutating-policy-1"
@@ -343,7 +457,7 @@ spec:
     - socket: /var/run/my-node-socket.sock
       permittedHooks:
       - PreVMStart
-      - PreVMStop
+      - OnVMStop
       - PostVMStop
 ```
 
@@ -418,6 +532,34 @@ override each other's data.
 Only if a plugin is dependent on another plugin, both can edit the same fields, because now a clear ordering
 is defined between them. This way one plugin can do some work that another plugin would finalize.
 
+### NodeReconcile Hook
+
+Alpha 1's node hooks are lifecycle-event-driven - they fire at specific points in a VM's lifecycle
+(PreVMStart, PostVMStop, migration events, etc.). Some node-level plugin operations might benefit from continuous
+reconciliation rather than reacting to discrete events. For example, managing a node's hugepage pool requires
+knowing the total hugepage demand across all running VMs on a node, not just reacting to individual VM start/stop
+events.
+
+This idea was explored for Alpha 2 as a `NodeReconcile` node hook point that would fire on every `virt-handler`
+reconcile iteration, providing a `NodeContext` (node info, VMIs on the node, and the KubeVirt CR) rather than a
+single VMI. It was ultimately dropped from Alpha 2 scope: unlike every other hook point, `NodeReconcile` does not
+gate a VM lifecycle transition, so `failureStrategy` and `timeout` have no real meaning for it - which suggests
+this is a background state reconciliation problem rather than a lifecycle hook. Such use-cases (e.g. extracting
+KSM management out of core KubeVirt) may be better served by an out-of-tree controller/DaemonSet that plugins can
+rely on, rather than a lifecycle hook point.
+
+If revisited, the design considered:
+- Firing on every `sync()` call in the virt-handler VMI controller (i.e. once per VMI reconcile). Plugin
+  implementations would need to be idempotent and short-circuit when relevant state hasn't changed.
+- A `NodeContext` containing node info (labels, annotations, capacity, allocatable resources), the VMIs currently
+  running on the node, and the KubeVirt CR (feature gates, migration defaults, developer configuration, etc.).
+- CEL conditions evaluating against the same `NodeContext`, using `node`, `vmis`, and `kubevirt` variables, to
+  filter unnecessary calls given the hook's high firing frequency.
+
+**Example use case:** A hugepage pool management plugin that tracks total hugepage demand across all VMs on the
+node and adjusts the node's hugepage allocation accordingly, using a CEL condition to fire only when the node has
+specific labels.
+
 ### Split to more parte CRDs
 
 Create further orthogonality and allow reuse by having a `DomainHook` CR, a `NodeHook` CR and a `Plugin` CR which can
@@ -449,6 +591,8 @@ For example:
 03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
 -->
 
+- v1.9 (Alpha 1): Initial plugin framework - domain hooks, node hooks, admission policies, and plugin metadata. PRs #191, #358.
+
 ## Graduation Requirements
 
 <!--
@@ -471,13 +615,22 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 Alpha
 
-- [ ] Feature gate (`Plugins`) guards all code changes.
-- [ ] Plugin CRD is defined and registered.
-- [ ] Simple domain hooks (CEL) are functional.
-- [ ] Advanced domain hooks (plugin sidecar via socket) are functional for a single hook point.
-- [ ] Node hooks are functional for at least PreVMStart and PreVMStop hook points.
-- [ ] failureStrategy (Fail/Ignore) and timeout are respected.
-- [ ] Basic functional tests covering domain hooks and node hooks.
+- [x] Feature gate (`Plugins`) guards all code changes.
+- [x] Plugin CRD is defined and registered.
+- [x] Simple domain hooks (CEL) are functional.
+- [x] Advanced domain hooks (plugin sidecar via socket) are functional for a single hook point.
+- [x] Node hooks are functional for at least PreVMStart and OnVMStop hook points.
+- [x] failureStrategy (Fail/Ignore) and timeout are respected.
+- [x] Basic functional tests covering domain hooks and node hooks.
+
+### Alpha 2 (v1.10)
+
+- [ ] `domainHooks` renamed to `launcherHooks` with discriminated union structure.
+- [ ] `guestDefinition` launcher hook type supports CEL and sidecar modes (functionally equivalent to Alpha 1 domain hooks).
+- [ ] `preBoot` launcher hook is functional: fires after artifact generation, before VM start, with shared volume support.
+- [ ] `preMigrationSource` launcher hook is functional: sidecar can modify migration flags and parameters.
+- [ ] New gRPC service and protobuf messages for `preBoot` and `preMigrationSource` hooks.
+- [ ] Functional tests covering `preBoot` and `preMigrationSource` hook points.
 
 ### Beta
 
