@@ -47,8 +47,7 @@ bottleneck but not universally beneficial, hence explicit opt-in.
 
 - Expose compression in `MigrationPolicy` under `spec.experimental.compression`
 - Keep the default disabled
-- Gated behind the experimental migration options feature gate defined by
-  [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
+- Gated behind a dedicated `MigrationCompression` Alpha feature gate
 - Path toward automatic enablement in future versions
 
 ## Non Goals
@@ -82,11 +81,12 @@ bottleneck but not universally beneficial, hence explicit opt-in.
 ### API and feature gate
 
 Compression is exposed as a field under `spec.experimental` in the
-`MigrationPolicy` CRD. This experimental section,
-its feature gate, and the propagation mechanics are defined by
+`MigrationPolicy` CRD. The `spec.experimental` section and its
+propagation mechanics are defined by
 [VEP 293: Experimental Migration Options](https://github.com/kubevirt/enhancements/pull/295).
-This VEP only specifies the compression-specific field and its mapping to
-the hypervisor.
+
+Compression is gated behind its own Alpha feature gate,
+`MigrationCompression`.
 
 The compression field is a string enum: `"none"` (disabled) or `"zstd"`.
 When omitted (`nil`) or set to `"none"`, compression is disabled.
@@ -197,7 +197,8 @@ overhead is modest at zstd level 1 and bounded by migration bandwidth.
    params include `Compression: "zstd"` when enabled.
 2. **E2E**: Migration succeeds with compression; verify non-zero compression
    bytes in job stats.
-3. **Negative**: `spec.experimental` ignored when gate is disabled.
+3. **Negative**: `spec.experimental.compression` rejected when
+   `MigrationCompression` gate is disabled.
 
 ## Implementation History
 
@@ -210,8 +211,9 @@ overhead is modest at zstd level 1 and bounded by migration bandwidth.
 - [ ] Experimental migration options framework from
       [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
       (feature gate, `spec.experimental` section, propagation path)
+- [ ] `MigrationCompression` Alpha feature gate
 - [ ] `MigrationCompression` enum and `spec.experimental.compression` field
-      added to `ExperimentalMigrationConfiguration`
+      added to `ExperimentalMigrationOptions`
 - [ ] `virt-launcher` maps API enum to libvirt compression method and
       sets hypervisor flags
 - [ ] E2E test
