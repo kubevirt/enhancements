@@ -9,6 +9,7 @@ Owners:
 ### Target releases
 
 - This VEP targets alpha for version: v1.9. 
+- This VEP targets alpha 2 for version: v1.10.
 - This VEP targets beta for version:
 - This VEP targets GA for version:
 
@@ -41,6 +42,12 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
     - [Admission options](#admission-options)
     - [API example:](#api-example)
   - [Plugin metadata](#plugin-metadata)
+  - [Alpha 2 (v1.10): Launcher Hooks](#alpha-2-v110-launcher-hooks)
+    - [Renaming Domain Hooks to Launcher Hooks](#renaming-domain-hooks-to-launcher-hooks)
+    - [PreBoot Hook](#preboot-hook)
+    - [PreMigrationSource Hook](#premigationsource-hook)
+  - [Alpha 2 (v1.10): NodeReconcile](#alpha-2-v110-nodereconcile)
+  - [Alpha 2 (v1.10): API Examples](#alpha-2-v110-api-examples)
 - [API Examples (full version)](#api-examples-full-version)
 - [Alternatives](#alternatives)
 - [Possible future enhancements](#possible-future-enhancements)
@@ -310,6 +317,210 @@ These are the basic fields every plugin would need to populate:
 The plugin’s name comes from the Kubernetes object metadata (`metadata.name`).
 Versioning and upgrade path are deferred to [future enhancements](#possible-future-enhancements).
 
+### Alpha 2 (v1.10): Launcher Hooks
+
+Alpha 1 introduced **domain hooks** for modifying libvirt domain XML via CEL expressions or sidecar containers.
+In practice, the plugin system needs to support hook points inside `virt-launcher` that go beyond domain XML mutation -
+for example, modifying guest initialization artifacts or tuning live migration parameters.
+
+To reflect this broader scope, Alpha 2 renames `domainHooks` to `launcherHooks` and introduces a discriminated union
+that supports multiple hook types under one array. Each entry in `launcherHooks` is exactly one of:
+- **GuestDefinition**: The existing domain XML hook (CEL or sidecar), renamed for hypervisor-agnostic clarity. Same semantics as Alpha 1.
+- **PreBoot**: A new hook point for modifying generated artifacts before VM start.
+- **PreMigrationSource**: A new hook point for customizing live migration behavior.
+
+Shared fields (`condition`, `failureStrategy`, `timeout`) remain at the hook entry level.
+Hooks are applied in declaration order within each plugin, and in alphabetical order by plugin name across plugins -
+same as Alpha 1.
+
+#### Renaming Domain Hooks to Launcher Hooks
+
+Alpha 1 named these hooks `domainHooks`, but not all launcher-side hooks are related to domain
+mutation. `launcherHooks` better reflects that this category encompasses any hook that runs
+inside the `virt-launcher` pod - whether it modifies the guest definition, touches filesystem
+artifacts, or tunes migration parameters.
+
+Within `launcherHooks`, the existing domain XML hook becomes `guestDefinition` - a
+hypervisor-agnostic name that describes what the hook does (modify the guest's definition)
+without leaking libvirt-specific terminology.
+
+#### PreBoot Hook
+
+Some plugin use cases require modifying guest initialization artifacts that are generated at runtime -
+for example, cloud-init configuration that depends on CNI data (Multus network-status annotations)
+only available after pod creation. The existing domain hook cannot address this because it operates on
+domain XML, not guest initialization media.
+
+The `preBoot` hook fires inside `startDomain()`, after all artifacts (cloud-init ISO, NVRAM, firmware, etc.)
+have been generated but before the VM is started via `CreateWithFlags`. This placement gives the sidecar
+access to the finalized artifacts while still allowing modifications before the guest sees them.
+
+**Design:**
+- Sidecar-only (not CEL) - these hooks perform filesystem side effects, not structured data transformations.
+- Socket-based signaling: `virt-launcher` calls the sidecar's socket to signal that artifacts are ready.
+  The sidecar performs its modifications and responds when done.
+- Filesystem access via shared volume: the plugin author's Mutating Admission Policy (MAP) sets up an
+  `emptyDir` volume mounted in both the compute container and the sidecar container. The sidecar can
+  read and modify generated artifacts directly on the shared filesystem.
+- KubeVirt does not need artifact-specific code - the sidecar knows which files it needs to modify.
+- The [kubevirt/plugins](https://github.com/kubevirt/plugins) SDK will provide helpers for common operations
+  (e.g., cloud-init ISO extraction, modification, and repacking).
+
+**Ordering with multiple plugins:** PreBoot hooks fire sequentially in the standard plugin ordering
+(alphabetical by plugin name, declaration order within each plugin). Each plugin's sidecar sees the
+filesystem state left by the previous plugin's sidecar. Plugin authors should be aware of this
+and design their modifications to be composable.
+
+**Note on hook ordering:** Guest definition hooks fire during domain definition (before `startDomain()`).
+PreBoot hooks fire later, during `startDomain()`. A domain mutation hook could add a device that
+affects cloud-init configuration - plugin authors should be aware of this ordering when designing
+plugins that combine both hook types.
+
+**Example use case:**
+A networking plugin that configures guest cloud-init network settings based on runtime CNI data
+(see [VEP 337](https://github.com/kubevirt/enhancements/issues/337)). The plugin's sidecar reads
+Multus network-status annotations via the Downward API, extracts the cloud-init ISO from the shared
+volume, injects the appropriate network configuration, and repacks the ISO.
+
+#### PreMigrationSource Hook
+
+Live migration behavior in KubeVirt is currently controlled entirely by internal logic.
+Plugins that manage specialized hardware, networking, or storage may need to customize migration
+parameters on a per-workload basis - for example, enabling multifd parallel migration and tuning
+thread counts for high-bandwidth workloads, or selecting specific compression methods.
+
+The `preMigrationSource` hook fires in `virt-launcher` on the migration source, just before
+the `MigrateToURI3` libvirt API call. The sidecar receives the generated migration flags
+and parameters, and can modify them before the migration begins.
+
+**Design:**
+- Sidecar-only (not CEL) - migration parameter tuning requires logic that goes beyond simple expressions.
+- The sidecar receives the full set of migration flags (e.g., `VIR_MIGRATE_PARALLEL`,
+  `VIR_MIGRATE_COMPRESSED`) and parameters (e.g., `Bandwidth`, `ParallelConnections`,
+  `Compression` method, `MigrateDisks` list) via a new gRPC message.
+- The sidecar can enable/disable flags and set parameter values, giving full control over
+  migration behavior. This allows plugins to both enable features (e.g., multifd) and
+  configure them (e.g., number of parallel connections).
+- A new protobuf service and message types will be defined for this hook point.
+- The sidecar can also perform other pre-migration preparation (e.g., signaling external systems,
+  preparing source-side resources).
+
+**Naming:** Named `PreMigrationSource` to match the existing node hook convention and to
+leave room for a future `PreMigrationTarget` launcher hook on the destination side.
+
+**Example use case:**
+A storage plugin that enables multifd migration with a tuned thread count for VMs using
+high-throughput network-attached storage, while keeping the default single-stream migration
+for VMs with local disks.
+
+### Alpha 2 (v1.10): NodeReconcile
+
+Alpha 1's node hooks are lifecycle-event-driven - they fire at specific points in a VM's lifecycle
+(PreVMStart, PostVMStop, migration events, etc.). Some node-level plugin operations need continuous
+reconciliation rather than reacting to discrete events. For example, managing a node's hugepage pool requires knowing the total hugepage demand
+across all running VMs on a node, not just reacting to individual VM start/stop events.
+
+`NodeReconcile` is a new node hook point that fires on every `virt-handler` reconcile iteration.
+Unlike the existing lifecycle hook points which receive a single VMI, `NodeReconcile` provides
+a broader node-scoped context.
+
+**Design:**
+- Fires on every `sync()` call in the virt-handler VMI controller. Since virt-handler reconciles
+  per-VMI, this means `NodeReconcile` fires once per VMI reconcile. Plugin implementations must
+  be idempotent and should short-circuit when the relevant state hasn't changed.
+- The hook receives a `NodeContext` containing:
+  - Node information: labels, annotations, capacity, allocatable resources.
+  - A list of VirtualMachineInstances currently running on the node with key characteristics.
+  - The KubeVirt CR - providing the cluster-wide KubeVirt configuration (feature gates, migration
+    defaults, developer configuration, etc.) to the hook.
+- CEL conditions for `NodeReconcile` hooks evaluate against the same `NodeContext`, using `node`,
+  `vmis`, and `kubevirt` variables. This allows efficient filtering - for example, a plugin can
+  use a CEL condition to only fire when specific node labels are present or when the VMI count
+  changes.
+- The same `NodeContext` data is sent both to the CEL evaluator (for condition filtering) and
+  to the plugin's gRPC socket (for hook execution).
+
+**Performance considerations:** Since this hook fires on every VMI reconcile, plugins should
+use CEL conditions aggressively to filter unnecessary calls. The hook implementation itself
+should be lightweight - check whether relevant state has changed before performing expensive
+operations. The `failureStrategy` and `timeout` fields apply as usual.
+
+**Example use case:**
+A hugepage pool management plugin that tracks total hugepage demand across all VMs on the
+node and adjusts the node's hugepage allocation accordingly. The plugin uses a CEL condition
+to fire only when the node has specific labels, sums the hugepage requests from the VMI list,
+and rebalances the pool when the total demand changes.
+
+### Alpha 2 (v1.10): API Examples
+
+```yaml
+apiVersion: plugin.kubevirt.io/v1alpha1
+kind: Plugin
+metadata:
+  name: network-customizer
+spec:
+  condition: "vmi.metadata.labels['network-plugin'] == 'custom'"
+  failureStrategy: Fail
+
+  launcherHooks:
+    # Guest definition mutation via CEL (same as Alpha 1, under new structure)
+    - guestDefinition:
+        cel:
+          expression: |
+            Domain{CPU: DomainCPU{Mode: "host-passthrough"}}
+
+    # Guest definition mutation via sidecar
+    - guestDefinition:
+        sidecar:
+          socketPath: "/var/run/kubevirt-plugin/network-customizer/domain.sock"
+
+    # PreBoot: modify cloud-init for custom networking
+    - preBoot:
+        socketPath: "/var/run/kubevirt-plugin/network-customizer/preboot.sock"
+      timeout: 30s
+
+    # PreMigrationSource: tune migration for high-bandwidth workloads
+    - preMigrationSource:
+        socketPath: "/var/run/kubevirt-plugin/network-customizer/premigrate.sock"
+      condition: "vmi.metadata.labels['high-bandwidth'] == 'true'"
+      timeout: 60s
+
+  nodeHooks:
+    - socket: /var/run/kubevirt-plugins/network-customizer/node.sock
+      permittedHooks:
+        - PreVMStart
+        - PostVMStop
+        - NodeReconcile
+      condition: "node.metadata.labels['network-plugin-enabled'] == 'true'"
+```
+
+#### Launcher hook type structure
+
+Each entry in `launcherHooks` is a discriminated union - exactly one of the following must be set:
+
+| Hook Type | Purpose | Modes | Input/Output |
+|-----------|---------|-------|--------------|
+| `guestDefinition` | Guest definition mutation | CEL or sidecar | Domain XML in, mutated domain XML out |
+| `preBoot` | Modify generated artifacts before VM start | Sidecar only | Socket signal, filesystem access |
+| `preMigrationSource` | Customize migration flags and parameters | Sidecar only | Migration config in, modified config out |
+
+#### Node hook points (updated)
+
+All hook points from Alpha 1 remain unchanged. Alpha 2 adds `NodeReconcile`:
+
+| Hook Point | Scope | Context | When |
+|-----------|-------|---------|------|
+| PreVMStart | VMI | VMI + node name | Before VM launch |
+| PostVMStart | VMI | VMI + node name | After VM is running |
+| PreVMStop | VMI | VMI + node name | Before VM shutdown |
+| PostVMStop | VMI | VMI + node name | After VM stops |
+| PreMigrationSource | VMI | VMI + node name | Before migration from source |
+| PreMigrationTarget | VMI | VMI + node name | Before migration to target |
+| PostMigrationTarget | VMI | VMI + node name | After migration completes on target |
+| NodeReconcile | Node | NodeContext (node + VMIs + KubeVirt CR) | Every reconcile iteration |
+
+All hook points except `NodeReconcile` were introduced in Alpha 1.
+
 ## API Examples (full version)
 
 ```yaml
@@ -471,13 +682,24 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 Alpha
 
-- [ ] Feature gate (`Plugins`) guards all code changes.
-- [ ] Plugin CRD is defined and registered.
-- [ ] Simple domain hooks (CEL) are functional.
-- [ ] Advanced domain hooks (plugin sidecar via socket) are functional for a single hook point.
-- [ ] Node hooks are functional for at least PreVMStart and PreVMStop hook points.
-- [ ] failureStrategy (Fail/Ignore) and timeout are respected.
-- [ ] Basic functional tests covering domain hooks and node hooks.
+- [x] Feature gate (`StructuredPlugins`) guards all code changes.
+- [x] Plugin CRD is defined and registered.
+- [x] Simple domain hooks (JsonPatch) are functional.
+- [x] Advanced domain hooks (plugin sidecar via socket) are functional for a single hook point.
+- [x] Node hooks are functional for at least PreVMStart and OnVMStop hook points.
+- [x] failureStrategy (Fail/Ignore) and timeout are respected.
+- [x] Basic functional tests covering domain hooks and node hooks.
+
+### Alpha 2 (v1.10)
+
+- [ ] `domainHooks` renamed to `launcherHooks` with discriminated union structure.
+- [ ] `guestDefinition` launcher hook type supports CEL and sidecar modes (functionally equivalent to Alpha 1 domain hooks).
+- [ ] `preBoot` launcher hook is functional: fires after artifact generation, before VM start, with shared volume support.
+- [ ] `preMigrationSource` launcher hook is functional: sidecar can modify migration flags and parameters.
+- [ ] New gRPC service and protobuf messages for `preBoot` and `preMigrationSource` hooks.
+- [ ] `NodeReconcile` node hook point is functional: fires on every reconcile with `NodeContext`.
+- [ ] CEL evaluator supports `node`, `vmis`, and `kubevirt` variables for `NodeReconcile` conditions.
+- [ ] Functional tests covering `preBoot`, `preMigrationSource`, and `NodeReconcile` hook points.
 
 ### Beta
 
