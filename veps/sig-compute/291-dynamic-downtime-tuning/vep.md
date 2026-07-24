@@ -65,9 +65,8 @@ the existing time-based logic still applies.
 ## Goals
 
 - Activate via presence of `spec.experimental.downtimeTuning` in
-  `MigrationPolicy`, gated behind the experimental migration options
-  feature gate defined by
-  [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
+  `MigrationPolicy`, gated behind a dedicated `MigrationDowntimeTuning`
+  Alpha feature gate
 - Use `maxDowntimeMs` (top-level field per
   [VEP 252](https://github.com/kubevirt/enhancements/pull/252)) as the
   ceiling for the ramp
@@ -106,8 +105,9 @@ kubevirt/kubevirt.
 
 Downtime tuning is activated by the presence of
 `spec.experimental.downtimeTuning` in a `MigrationPolicy`, gated
-behind the experimental migration options feature gate
-([VEP 293](https://github.com/kubevirt/enhancements/pull/295)).
+behind its own Alpha feature gate, `MigrationDowntimeTuning`.
+Either `MigrationDowntimeTuning` or `MigrationStallDetection`
+permits setting `maxDowntimeMs`.
 
 The algorithm ramps `max_downtime` up to the `maxDowntimeMs` ceiling —
 a field in `MigrationPolicySpec` / `MigrationConfiguration`.
@@ -295,7 +295,8 @@ per step. No new API resources or watches.
    absent. Ceiling respected.
 2. **E2E**: Migration with tuning enabled + moderately dirty workload.
    Verify successful completion and log lines showing downtime steps. In constrained environment it won't be possible to reliably reach a fixed downtime estimate, excessive non-default values would need to be used.
-3. **Negative**: `spec.experimental` ignored when gate is disabled.
+3. **Negative**: `spec.experimental.downtimeTuning` rejected when
+   `MigrationDowntimeTuning` gate is disabled.
 
 ## Implementation History
 
@@ -311,8 +312,7 @@ For example:
 
 - [ ] `maxDowntimeMs` top-level field available as the ceiling (per
       [VEP 252](https://github.com/kubevirt/enhancements/pull/252))
-- [ ] Experimental options framework from [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
-      gates `spec.experimental`
+- [ ] `MigrationDowntimeTuning` Alpha feature gate
 - [ ] `DowntimeTuningPolicy` struct under `spec.experimental.downtimeTuning`;
       its presence activates the tuning algorithm
 - [ ] `virt-launcher` runs tuning algorithm in monitoring loop
