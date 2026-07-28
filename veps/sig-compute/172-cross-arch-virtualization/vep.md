@@ -27,14 +27,16 @@ auto-detected at runtime:
 1. **Software emulation** via QEMU's TCG (Tiny Code Generator): available on
    any host with the appropriate cross-architecture QEMU system binary
    installed. Suitable for development, testing, and CI/CD workloads (10-100x
-   performance overhead).
+   performance overhead). **Not intended for production use** — software
+   emulation is provided for development and testing scenarios only.
 
 2. **Hardware-accelerated virtualization** via KVM extensions: available when
    the host platform provides hardware support for cross-architecture
    virtualization (e.g., SAE for ARM64 guests on s390x hosts).
    Performance characteristics are not yet known and will be determined
    once the upstream stack stabilizes and hardware is available for
-   benchmarking.
+   benchmarking. **This is the target for production support**, expected at
+   Beta.
 
 The emulation mode is determined automatically based on libvirt capabilities —
 users enable the feature gate and create cross-architecture VMs without needing
@@ -191,18 +193,19 @@ The implementation must therefore:
 #### 1. KVM Domain Configurator Enhancement
 
 The cross-architecture emulation logic is added to `KvmDomainConfigurator`.
-The configurator auto-detects whether hardware acceleration is available via
-libvirt capabilities and prefers it over software emulation.
+At Alpha, only software emulation via TCG is supported. Hardware acceleration
+support (e.g., KVM/SAE) will be added at Beta once the upstream kernel, QEMU,
+and libvirt support stabilizes (see
+[Hardware-Accelerated Virtualization](#hardware-accelerated-virtualization)).
 
 **`pkg/virt-launcher/virtwrap/converter/kvm/configurator.go`**:
 
 ```go
 type KvmDomainConfigurator struct {
-    allowEmulation                 bool
-    kvmAvailable                   bool
-    allowCrossArchEmulation        bool     // feature gate state
-    hostArchitecture               string   // host architecture
-    kvmSupportedGuestArchitectures []string // from libvirt capabilities
+    allowEmulation          bool
+    kvmAvailable            bool
+    allowCrossArchEmulation bool   // feature gate state
+    hostArchitecture        string // host architecture
 }
 
 func (k KvmDomainConfigurator) Configure(vmi *v1.VirtualMachineInstance, domain *api.Domain) error {
@@ -222,15 +225,6 @@ func (k KvmDomainConfigurator) Configure(vmi *v1.VirtualMachineInstance, domain 
         }
         domain.Spec.Devices.Emulator = path
 
-        // Prefer hardware acceleration when available
-        if k.kvmSupportsGuestArch(vmi.Spec.Architecture) {
-            logger.Infof("Cross-architecture hardware-accelerated virtualization: host=%s, guest=%s. Using KVM.",
-                k.hostArchitecture, vmi.Spec.Architecture)
-            // domain.Spec.Type remains "kvm" (default)
-            return nil
-        }
-
-        // Fall back to software emulation
         logger.Infof("Cross-architecture software emulation: host=%s, guest=%s. Using TCG.",
             k.hostArchitecture, vmi.Spec.Architecture)
         domain.Spec.Type = "qemu"
@@ -250,15 +244,6 @@ func (k KvmDomainConfigurator) Configure(vmi *v1.VirtualMachineInstance, domain 
     return nil
 }
 
-func (k KvmDomainConfigurator) kvmSupportsGuestArch(guestArch string) bool {
-    for _, arch := range k.kvmSupportedGuestArchitectures {
-        if arch == guestArch {
-            return true
-        }
-    }
-    return false
-}
-
 func emulatorPath(arch string) string {
     switch arch {
     case "arm64", "aarch64":
@@ -270,6 +255,28 @@ func emulatorPath(arch string) string {
     default:
         return ""
     }
+}
+```
+
+At Beta, the configurator will be extended with hardware acceleration
+support. The struct will gain a `kvmSupportedGuestArchitectures` field
+(populated from libvirt capabilities) and a `kvmSupportsGuestArch()` method
+to prefer KVM over TCG when hardware cross-arch support is available:
+
+```go
+// Beta addition:
+type KvmDomainConfigurator struct {
+    // ... existing fields ...
+    kvmSupportedGuestArchitectures []string // from libvirt capabilities
+}
+
+func (k KvmDomainConfigurator) kvmSupportsGuestArch(guestArch string) bool {
+    for _, arch := range k.kvmSupportedGuestArchitectures {
+        if arch == guestArch {
+            return true
+        }
+    }
+    return false
 }
 ```
 
@@ -316,18 +323,15 @@ implementation.
 
 ##### CPU Model Override
 
-The `CPUDomainConfigurator` receives a `crossArchEmulation` flag and a
-`crossArchHardwareAccelerated` flag. The CPU model handling differs between
-software emulation and hardware-accelerated virtualization:
-
-**Software emulation (TCG)**: `host-passthrough` and `host-model` CPU modes
-are incompatible — the host CPU cannot be passed through to a guest of a
-different architecture. The configurator overrides these modes to use `max`,
-which is QEMU's best-effort CPU model that exposes all features the emulator
-can support:
+The `CPUDomainConfigurator` receives a `crossArchEmulation` flag. At Alpha,
+all cross-architecture emulation uses software emulation (TCG), so
+`host-passthrough` and `host-model` CPU modes are incompatible — the host
+CPU cannot be passed through to a guest of a different architecture. The
+configurator overrides these modes to use `max`, which is QEMU's best-effort
+CPU model that exposes all features the emulator can support:
 
 ```go
-if c.crossArchEmulation && !c.crossArchHardwareAccelerated &&
+if c.crossArchEmulation &&
     (model == v1.CPUModeHostModel || model == v1.CPUModeHostPassthrough) {
     domain.Spec.CPU.Mode = "custom"
     domain.Spec.CPU.Model = "max"
@@ -337,34 +341,35 @@ if c.crossArchEmulation && !c.crossArchHardwareAccelerated &&
 This also applies to the default CPU mode fallback (when no CPU model is
 specified), which normally defaults to `host-model`.
 
-**Hardware-accelerated virtualization (KVM)**: Hardware-accelerated
+**Hardware-accelerated virtualization (Beta)**: At Beta, a
+`crossArchHardwareAccelerated` flag will be added. Hardware-accelerated
 cross-architecture virtualization may support `host-passthrough` or
 `host-model` CPU modes. New s390 instructions are introduced to query
 available arm64 features and populate the arm64 ID register contents. The
-CPU model override is **skipped** when hardware acceleration is active. The
-exact CPU model behavior depends on the hardware platform and will be refined
-as implementations stabilize.
+CPU model override will be **skipped** when hardware acceleration is active.
+The exact CPU model behavior depends on the hardware platform and will be
+refined as implementations stabilize.
 
 ##### Graphics Device
 
-The `GraphicsDomainConfigurator` receives a `crossArchEmulation` flag and a
-`crossArchHardwareAccelerated` flag. The behavior differs by emulation mode:
-
-**Software emulation (TCG)**: Graphics devices are disabled entirely. The
-cross-arch QEMU system binary (e.g., `qemu-system-aarch64-core`) is a minimal
-package that may not include video device modules (e.g., virtio-gpu), causing
-libvirt to reject the domain XML. Serial console remains available for guest
-access.
+The `GraphicsDomainConfigurator` receives a `crossArchEmulation` flag. At
+Alpha, all cross-architecture emulation uses software emulation (TCG), so
+graphics devices are disabled entirely. The cross-arch QEMU system binary
+(e.g., `qemu-system-aarch64-core`) is a minimal package that may not include
+video device modules (e.g., virtio-gpu), causing libvirt to reject the domain
+XML. Serial console remains available for guest access.
 
 ```go
-if g.crossArchEmulation && !g.crossArchHardwareAccelerated {
+if g.crossArchEmulation {
     return nil // Skip video and VNC configuration
 }
 ```
 
-**Hardware-accelerated virtualization (KVM)**: The full QEMU binary may be required (or a
-different set of device modules), so the graphics restriction may not apply.
-This will be validated during implementation of hardware acceleration support.
+**Hardware-accelerated virtualization (Beta)**: At Beta, a
+`crossArchHardwareAccelerated` flag will be added. The full QEMU binary may
+be required (or a different set of device modules), so the graphics
+restriction may not apply. This will be validated during implementation of
+hardware acceleration support.
 
 #### 3. Memory Overhead Calculation
 
@@ -1062,7 +1067,10 @@ status:
 | Real-time systems | No | Maybe (depends on interrupt latency) |
 
 Software emulation is designed for development, testing, and low-throughput
-scenarios. Hardware-accelerated virtualization performance characteristics are TBD.
+scenarios only and is not intended for production use. Production support for
+cross-architecture virtualization is targeted at Beta with hardware-accelerated
+virtualization (e.g., KVM/SAE). Hardware-accelerated virtualization performance
+characteristics are TBD.
 
 ## Update/Rollback Compatibility
 
@@ -1151,8 +1159,8 @@ scenarios. Hardware-accelerated virtualization performance characteristics are T
 
 ### Phase 1: Core Infrastructure (Alpha)
 
-1. Extend `KvmDomainConfigurator` with cross-arch detection, emulator
-   path selection, and hardware acceleration auto-detection
+1. Extend `KvmDomainConfigurator` with cross-arch detection and emulator
+   path selection (software emulation via TCG only)
 2. Update `arch.Converter` instantiation in `manager.go` to use guest
    architecture when cross-arch emulation is active
 3. Fix memory overhead caller in `kvm/runtime.go` to pass guest architecture
@@ -1165,9 +1173,6 @@ scenarios. Hardware-accelerated virtualization performance characteristics are T
    capable nodes while preferring native architecture
 7. Thread `--allow-cross-arch-emulation` flag from virt-controller to
    virt-launcher
-8. Implement libvirt capabilities parsing for cross-arch KVM detection and
-   `kubevirt.io/cross-arch-kvm-<arch>` node labels (effectively a no-op on
-   current hardware, but establishes the detection infrastructure)
 
 ### Phase 2: AMD64 ↔ ARM64 Software Emulation (Alpha)
 
@@ -1181,10 +1186,16 @@ scenarios. Hardware-accelerated virtualization performance characteristics are T
 
 1. Add s390x guest support on AMD64/ARM64 hosts (software emulation)
 2. Add s390x host support for other guest architectures (software emulation)
-3. Validate hardware acceleration path on SAE-capable hardware (if available)
-4. CPU model and device model refinement for hardware acceleration
-5. Performance benchmarking (SAE vs native vs TCG)
-6. Comprehensive test matrix for all combinations
+3. Implement libvirt capabilities parsing for cross-arch KVM detection and
+   `kubevirt.io/cross-arch-kvm-<arch>` node labels
+4. Extend `KvmDomainConfigurator` with `kvmSupportedGuestArchitectures`
+   to prefer hardware acceleration (KVM) over software emulation (TCG)
+5. Add three-tier node scheduling preference (native > hardware cross-arch >
+   software cross-arch)
+6. Validate hardware acceleration path on SAE-capable hardware (if available)
+7. CPU model and device model refinement for hardware acceleration
+8. Performance benchmarking (SAE vs native vs TCG)
+9. Comprehensive test matrix for all combinations
 
 ### Phase 4: Production Readiness (GA)
 
@@ -1233,38 +1244,36 @@ scenarios. Hardware-accelerated virtualization performance characteristics are T
 
 ### Alpha
 
-- [ ] Feature gate `CrossArchitectureVirtualization` guards all code changes
-- [ ] `KvmDomainConfigurator` extended with cross-arch detection, emulator
-      path selection, and hardware acceleration auto-detection
-- [ ] `arch.Converter` instantiated for guest architecture in cross-arch
+- [x] Feature gate `CrossArchitectureVirtualization` guards all code changes
+- [x] `KvmDomainConfigurator` extended with cross-arch detection and emulator
+      path selection (software emulation via TCG only — hardware acceleration
+      support deferred to Beta)
+- [x] `arch.Converter` instantiated for guest architecture in cross-arch
       scenarios
-- [ ] Memory overhead calculations use guest architecture instead of
+- [x] Memory overhead calculations use guest architecture instead of
       `runtime.GOARCH`
-- [ ] `kubernetes.io/arch` hard node selector replaced with
+- [x] `kubernetes.io/arch` hard node selector replaced with
       `kubevirt.io/vm-arch-<arch>` hard node selector and preferred node
       affinities when feature gate is enabled, ensuring VMs only schedule on
       capable nodes while preferring native architecture
-- [ ] `--allow-cross-arch-emulation` flag threaded from virt-controller to
+- [x] `--allow-cross-arch-emulation` flag threaded from virt-controller to
       virt-launcher
-- [ ] EFI firmware path re-detection using guest architecture for cross-arch
+- [x] EFI firmware path re-detection using guest architecture for cross-arch
       scenarios
-- [ ] CPU model override (`host-passthrough`/`host-model` → `max`) for TCG
+- [x] CPU model override (`host-passthrough`/`host-model` → `max`) for TCG
       emulation
-- [ ] Graphics device disabled for cross-arch software emulation (minimal
+- [x] Graphics device disabled for cross-arch software emulation (minimal
       QEMU binary lacks video device support)
-- [ ] `SoftwareEmulation` VMI condition set by virt-handler when cross-arch
+- [x] `SoftwareEmulation` VMI condition set by virt-handler when cross-arch
       software emulation is active
-- [ ] `kubevirt.io/vm-arch-<arch>` node labels set by virt-handler for all
+- [x] `kubevirt.io/vm-arch-<arch>` node labels set by virt-handler for all
       guest architectures a node can run (native + cross-arch)
-- [ ] Libvirt capabilities parsing for cross-arch KVM detection and
-      `kubevirt.io/cross-arch-kvm-<arch>` node labels (infrastructure only —
-      no hardware expected at Alpha)
-- [ ] Support for AMD64 hosts running ARM64 guests (KVM backend)
-- [ ] Support for ARM64 hosts running AMD64 guests (KVM backend)
-- [ ] Basic functional tests (unit + integration + E2E)
+- [x] Support for AMD64 hosts running ARM64 guests (KVM backend)
+- [x] Support for ARM64 hosts running AMD64 guests (KVM backend)
+- [x] Basic functional tests (unit + integration + E2E)
 - [ ] Documentation of performance limitations and use cases
-- [ ] Cross-arch QEMU binaries included in virt-launcher image
-- [ ] Validation that required QEMU binaries exist
+- [x] Cross-arch QEMU binaries included in virt-launcher image
+- [x] Validation that required QEMU binaries exist
 - [ ] User-facing documentation in kubevirt/user-guide covering feature gate
       enablement, supported architecture combinations, QEMU binary
       requirements, performance limitations, and example VMI specs
@@ -1273,6 +1282,10 @@ scenarios. Hardware-accelerated virtualization performance characteristics are T
 
 - [ ] Support for s390x in cross-architecture scenarios (all combinations,
       software emulation)
+- [ ] Libvirt capabilities parsing for cross-arch KVM detection and
+      `kubevirt.io/cross-arch-kvm-<arch>` node labels
+- [ ] `KvmDomainConfigurator` extended with `kvmSupportedGuestArchitectures`
+      to prefer hardware acceleration (KVM) over software emulation (TCG)
 - [ ] Hardware acceleration path validated on SAE-capable hardware (if
       available)
 - [ ] `HardwareEmulation` VMI condition set when hardware cross-arch
@@ -1283,6 +1296,8 @@ scenarios. Hardware-accelerated virtualization performance characteristics are T
       acceleration
 - [ ] Comprehensive test coverage across architecture pairs (E2E tests)
 - [ ] Performance benchmarking and documented performance characteristics
+- [ ] Hardware-accelerated cross-architecture virtualization validated for
+      production use (software emulation remains development/testing only)
 - [ ] At least one release in Alpha with no major issues
 - [ ] User feedback incorporated from Alpha release
 - [ ] Consider automated QEMU binary distribution approach
