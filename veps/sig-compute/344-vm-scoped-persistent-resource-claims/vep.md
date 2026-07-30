@@ -49,10 +49,12 @@ created. This causes several problems:
    provisioned via DRA contain persistent data. Losing the device allocation on
    restart means losing access to that data.
 
-2. **Device instability**: GPU passthrough users may depend on a specific
-   physical device for driver compatibility, licensing, or workload continuity.
-   A different GPU after restart can cause driver failures or license
-   revalidation.
+2. **Device instability across reboots**: GPU passthrough users may depend on a
+   specific physical device for driver compatibility, licensing, or workload
+   continuity. A different GPU after a reboot can cause driver failures or
+   license revalidation. Note: for stop/start cycles, the default behavior
+   releases devices to avoid wasting resources on stopped VMs. Users who need
+   device stability across stop/start can opt in with `persistWhenStopped: true`.
 
 3. **Allocation failures in busy clusters**: In the window between the old
    claim being deleted and the new claim being created, another workload can
@@ -134,6 +136,19 @@ type ResourceClaimTemplateEntry struct {
     // ResourceClaimTemplateName is the name of a ResourceClaimTemplate
     // object in the same namespace to create the ResourceClaim from.
     ResourceClaimTemplateName string `json:"resourceClaimTemplateName"`
+    // PersistWhenStopped controls whether the ResourceClaim is retained
+    // when the VM is explicitly stopped (runStrategy set to Halted or
+    // stop API called). When false (the default), the claim is deleted
+    // on stop and re-created on the next start — freeing the device for
+    // other workloads. When true, the claim persists for the entire VM
+    // lifetime, guaranteeing the same device across stop/start cycles.
+    //
+    // Claims always persist across reboots regardless of this setting,
+    // since the VMI pod is recreated without an intervening stop.
+    //
+    // +optional
+    // +kubebuilder:default=false
+    PersistWhenStopped bool `json:"persistWhenStopped,omitempty"`
 }
 
 type VirtualMachineSpec struct {
@@ -174,19 +189,45 @@ The VM controller manages ResourceClaims following the same pattern as
    re-enqueue it for reconciliation, using the expectations pattern to prevent
    duplicate operations.
 
-4. **Garbage collection**: ResourceClaims have the VM as their controller owner
+4. **Stop-time cleanup**: When a VM is stopped, the controller deletes
+   ResourceClaims for entries where `persistWhenStopped` is false (the
+   default), freeing the devices for other workloads. Claims with
+   `persistWhenStopped: true` are retained. On the next start, missing
+   claims are re-created from their templates.
+
+5. **Garbage collection**: ResourceClaims have the VM as their controller owner
    reference. Kubernetes garbage collection automatically deletes them when the
    VM is deleted.
 
 ### Claim Lifecycle
 
+The default behavior (`persistWhenStopped: false`) releases devices on stop so
+they are available to other workloads:
+
 ```
 VM created (Halted)     → no claims created
 VM started              → claims created, VMI created referencing them
-VM stopped              → VMI deleted, claims persist (owned by VM)
+VM rebooted             → claims persist, VMI recreated reusing them
+VM stopped              → VMI deleted, claims DELETED (devices freed)
+VM restarted            → new claims created (may get different device)
+VM deleted              → any remaining claims garbage-collected via owner ref
+```
+
+With `persistWhenStopped: true`, claims persist for the VM's entire lifetime:
+
+```
+VM created (Halted)     → no claims created
+VM started              → claims created, VMI created referencing them
+VM rebooted             → claims persist, VMI recreated reusing them
+VM stopped              → VMI deleted, claims PERSIST (same device reserved)
 VM restarted            → claims already exist, VMI reuses them
 VM deleted              → claims garbage-collected via owner ref
 ```
+
+Use `persistWhenStopped: true` for devices with persistent state (NVMe),
+identity-bound licensing (GPU tied to PCI address), or network identity
+(NIC with DHCP reservation). Use the default for devices where resource
+efficiency matters more than device stability.
 
 ### Webhook Validation
 
@@ -203,12 +244,12 @@ The validating webhook (`validateResourceClaimTemplates`) enforces:
 ### RBAC
 
 The virt-controller service account requires:
-- `resourceclaims`: get, list, watch, create
+- `resourceclaims`: get, list, watch, create, delete
 - `resourceclaimtemplates`: get, list, watch
 
-No `update`, `patch`, or `delete` verbs are needed on resourceclaims — owner
-references are set at creation time and Kubernetes garbage collection handles
-deletion when the VM is deleted.
+The `delete` verb is needed for stop-time cleanup of claims where
+`persistWhenStopped` is false. No `update` or `patch` verbs are needed —
+owner references are set at creation time.
 
 ## API Examples
 
@@ -253,7 +294,10 @@ VM restart = new claim = potentially different device.
 ResourceClaim is created by VM controller with VM as owner. Persists across
 VMI restarts. VM restart = same claim = same device allocation.
 
-### VM with multiple persistent device claims
+### VM with mixed persistence policies
+
+NVMe persists when stopped (data preservation). GPU is released on stop
+(resource efficiency) and re-allocated on next start.
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -265,8 +309,10 @@ spec:
   resourceClaimTemplates:
   - name: gpu-claim
     resourceClaimTemplateName: gpu-template
+    # default: persistWhenStopped: false — GPU freed on stop
   - name: nvme-claim
     resourceClaimTemplateName: nvme-template
+    persistWhenStopped: true  # NVMe kept across stop/start
   template:
     spec:
       domain:
@@ -356,11 +402,14 @@ simpler and follows the established `dataVolumeTemplates` pattern.
 ### Integration Tests (planned)
 
 - VM with `resourceClaimTemplates` creates ResourceClaims on start
-- ResourceClaims persist when VM is stopped
-- ResourceClaims are reused when VM is restarted
+- ResourceClaims are deleted on stop when `persistWhenStopped: false` (default)
+- ResourceClaims persist on stop when `persistWhenStopped: true`
+- ResourceClaims persist across reboots regardless of `persistWhenStopped`
+- ResourceClaims are re-created on start after a stop (default behavior)
+- ResourceClaims are reused on start when they already exist (`persistWhenStopped: true`)
 - ResourceClaims are garbage-collected when VM is deleted
 - Webhook rejects invalid configurations (missing template, duplicate names,
-  feature gate disabled)
+  name too long, feature gate disabled)
 
 ### E2E Tests (planned)
 
