@@ -132,23 +132,21 @@ on `VirtualMachineSpec`:
 type ResourceClaimTemplateEntry struct {
     // Name is the logical name used to match this entry to
     // spec.template.spec.resourceClaims[].name in the VMI template.
+    // +kubebuilder:validation:MinLength=1
     Name string `json:"name"`
     // ResourceClaimTemplateName is the name of a ResourceClaimTemplate
     // object in the same namespace to create the ResourceClaim from.
+    // +kubebuilder:validation:MinLength=1
     ResourceClaimTemplateName string `json:"resourceClaimTemplateName"`
     // PersistWhenStopped controls whether the ResourceClaim is retained
     // when the VM is explicitly stopped (runStrategy set to Halted or
-    // stop API called). When false (the default), the claim is deleted
-    // on stop and re-created on the next start — freeing the device for
-    // other workloads. When true, the claim persists for the entire VM
-    // lifetime, guaranteeing the same device across stop/start cycles.
-    //
-    // Claims always persist across reboots regardless of this setting,
-    // since the VMI pod is recreated without an intervening stop.
-    //
+    // stop API called). When nil or false (the default), the claim is
+    // deleted on stop to free the device for other workloads, and
+    // re-created on the next start. When true, the claim persists for
+    // the VM's entire lifetime. Claims always persist across reboots
+    // regardless of this setting.
     // +optional
-    // +kubebuilder:default=false
-    PersistWhenStopped bool `json:"persistWhenStopped,omitempty"`
+    PersistWhenStopped *bool `json:"persistWhenStopped,omitempty"`
 }
 
 type VirtualMachineSpec struct {
