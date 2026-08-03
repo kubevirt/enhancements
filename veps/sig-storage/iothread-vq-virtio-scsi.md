@@ -42,7 +42,7 @@ Why this enhancement is important
 
 While virtio-blk offers a higher I/O performance compared to virtio-scsi, it lacks in disk scalability since each disk must be directly mapped to an individual PCI slot. For VM workloads that require a large amount of disks, users can leverage virtio-scsi which only uses a single PCI slot for a central controller that then manages all the virtio-scsi disks.
 
-However, currently the SCSI Controller only gets allocated (at most) a single IOThread, so every virtio-scsi device competes for this single thread. For VMs that contain potentially hundreds of SCSI disks, all performing intensive I/O operations, this can quickly become a CPU bottleneck.
+However, currently the SCSI controller only gets allocated (at most) a single IOThread, so every disk attached to the virtio-scsi controller competes for this single thread. For VMs that contain potentially hundreds of SCSI disks, all performing intensive I/O operations, this can quickly become a CPU bottleneck.
 
 ## Goals
 
@@ -50,9 +50,10 @@ However, currently the SCSI Controller only gets allocated (at most) a single IO
 The desired outcome
 -->
 
-* Leverage existing `IOThreadsPolicies` API (shared, auto, supplementalPool), to extend the SCSI Controller to expose dedicated IOThreads for virtio-scsi devices.
-* Add opt-in feature gate.
-* Complete performance testing to verify that virtio-scsi disks benefit from the inclusion of iothread-vq-mapping, similar to what was seen for virtio-blk.
+* Leverage existing `IOThreadsPolicies` API (shared, auto, supplementalPool), to expose multiple IOThreads for virtio-scsi devices.
+* Users should be able to select any IOThread policy, and the resulting behavior should be consistent regardless of whether being applied for virtio-scsi or virio-blk.
+* Users should be able to opt-in to new functionality via a feature gate.
+* Performance testing should be completed as a part of this VEP to verify that virtio-scsi disks benefit from the inclusion of iothread-vq-mapping, similar to what was seen for virtio-blk.
 
 ## Non Goals
 
@@ -60,8 +61,7 @@ The desired outcome
 Why this enhancement is important Limitations to the scope of the design
 -->
 
-* Changes to existing IOThread mapping for virtio-blk
-* Changes to existing `IOThreadsPolicy` API
+* Adding new `IOThreadsPolicy`
 
 ## Definition of Users
 
@@ -78,6 +78,7 @@ List of user stories this design aims to solve
 -->
 
 * As a user I would like to dedicate multiple IOThreads for my virtio-scsi disks by leveraging iothread-vq-mapping in order to gain a performance increase during heavy I/O operations.
+* As a user I would like VMs using the auto policy to benefit from per-queue iothread assignment regardless of bus type.
 
 ## Repos
 
@@ -116,12 +117,14 @@ The following is an overview of how the SCSI controller would consume the follow
 Each disk shares the same IOThread. With these proposed changes, we would assign this same thread to be also shared by the controller.
 
 ### Policy: auto
-Each disk (excluding ones that request dedicatedIO) get assigned a thread in round robin order from the list of available iothreads. The total number of threads is equal to the amount of disks in a VMI, capped at 2 * (# of vCPUs). Since the SCSI controller cannot assign individual threads to its disks, we would instead allocate all of the "auto threads" (threads not reserved for dedicatedIO disks) to the controller. 
+Currently, each virtio-blk disk (excluding ones that request dedicatedIO) gets assigned a single thread in round robin order from the list of available iothreads. The total number of threads is equal to the number of disks in a VMI, capped at 2 * (# of vCPUs). Since the SCSI controller cannot assign individual threads to its disks, we would instead allocate all of the "auto threads" (threads not reserved for dedicatedIO disks) to the controller.
+
+In order to prevent this behavior from diverging for the two bus types, this implementation will also include modifying the `auto` policy for virtio-blk so that each blk disk will now be allocated the same auto thread pool instead of a single thread.
 
 ### Policy: supplementalPool
 Each disk gets access to a pool of threads. Same as with auto policy, the SCSI controller can only allocate threads to the virtqueues, so the entire supplemental thread pool would become shared with the SCSI controller.
 
-Note: the SCSI controller will create and manage virtqueues equal to the number of vCPUs for a given VMI. For `auto` and `supplementalPool` policies, if the number of threads passed in to the SCSI controller exceeds the number of virtqueues, we will take the `min(totalThreads, vcpus)` as to not allocate more threads than the controller needs.
+Note: the SCSI controller will create and manage virtqueues equal to the number of vCPUs for a given VMI. The same is also true for virtio-blk disks. For `auto` and `supplementalPool` policies, if the number of threads passed exceeds the number of virtqueues, we will take the `min(totalThreads, vcpus)` as to not allocate more threads than the driver needs.
 
 
 ## API Examples
@@ -158,12 +161,12 @@ spec:
 Disks will be assigned IOThreads like this:
 
 ```
-testdisk1: 1
-testdisk2: 2
+testdisk1: [1, 2]
+testdisk2: [1, 2]
 scsi-disk: [1, 2]
 ```
 
-Note: this is an example of the VMI having more auto threads (3) than virtqueues (2), so the SCSI controller here will only be allocated 2 total threads.
+Note: this is an example of the VMI having more auto threads (3) than virtqueues (2), so the disks would only be allocated 2 total threads.
 
 ### Hotplug Considerations
 
@@ -177,10 +180,10 @@ For VMs using the `auto` policy we could consider two approaches:
 
 1) always allocate the maximum thread count to the SCSI controller (# of vCPUs)
  - Pros: controller will still see performance gain if a large amount of disks are hotplugged
- - Cons: creates a lot of potentially wasted threads that could stay idle for the entire VMI lifecycle
+ - Cons: spreading light I/O across many iothreads can increase latency since each thread must wake up individually for requests
 
 2) recommend using `supplementalPool` policy for heavy-hotplug scenarios
-  - Pros: user-declared and stable, leads to less wasted threads compared to option 1
+  - Pros: user-declared and stable, leads to fewer idle threads compared to option 1
   - Cons: could be seen as restrictive
 
 For these reasons, option 2 should be adopted to reduce the number of idle iothreads while also allowing users to explicitly set the total amount of threads for a given workload.
@@ -210,7 +213,7 @@ Does this impact update compatibility and how?)
 
 The feature is additive and will be behind a feature gate. On upgrade, the existing `IOThreadsPolicy` logic will continue to work exclusively for virtio-blk devices until feature gate is enabled.
 
-On rollback, disabling the feature gate reverts the ability to perform iothread-vq-mapping for virtio-scsi and will fallback to using a single threaded SCSI controller.
+On rollback, disabling the feature gate reverts the ability to perform iothread-vq-mapping for virtio-scsi and will fallback to using a single threaded SCSI controller. This will also revert the `auto` policy behavior to only assign a single round-robin thread.
 
 
 ## Functional Testing Approach
