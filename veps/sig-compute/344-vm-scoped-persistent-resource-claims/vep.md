@@ -187,14 +187,15 @@ The VM controller manages ResourceClaims following the same pattern as
    re-enqueue it for reconciliation, using the expectations pattern to prevent
    duplicate operations.
 
-4. **Allocation preservation** (`ensureVMInClaimReservedFor`): On every
-   reconcile, the controller checks allocated claims with
-   `persistWhenStopped: true`. If the VM is not in the claim's
+4. **Allocation preservation** (`ensureVMInClaimReservedFor`): Called early
+   in every VM reconcile, before run strategy decisions. For claims with
+   `persistWhenStopped: true`, the controller checks if the claim is
+   allocated. Once allocated, if the VM is not in the claim's
    `status.reservedFor`, the controller adds a `ResourceClaimConsumerReference`
-   for the VM. This prevents the DRA resource controller from deallocating
-   the claim when the virt-launcher pod is deleted — the VM entry in
-   `reservedFor` keeps the allocation alive, ensuring the same physical
-   device is re-attached on the next start.
+   for the VM via the `resourceclaims/binding` subresource. This is
+   idempotent — subsequent reconciles skip claims that already have the VM
+   in `reservedFor`. The VM entry keeps the allocation alive when the pod
+   is deleted, ensuring the same physical device on next start.
 
 5. **Stop-time cleanup** (`cleanupNonPersistentResourceClaims`): When a VM
    is explicitly stopped, the controller deletes ResourceClaims for entries
@@ -269,9 +270,37 @@ The virt-controller service account requires:
 
 The `delete` verb is needed for stop-time cleanup of claims where
 `persistWhenStopped` is false. The `resourceclaims/binding` patch
-permission is needed to add/remove the VM from `status.reservedFor`,
-which controls whether the DRA resource controller keeps or releases
-the device allocation.
+permission is needed to add/remove the VM from `status.reservedFor`.
+The `/binding` subresource is the Kubernetes-canonical way to modify
+`reservedFor`, matching the RBAC pattern used by kube-controller-manager
+for StatefulSet volume claims.
+
+### Live Migration
+
+VMs with `persistWhenStopped: true` ResourceClaims cannot be live-migrated.
+DRA device allocations are node-specific — the allocated device exists on the
+node where the claim was bound. The VMI will have a `HostDeviceNotLiveMigratable`
+condition set by default for any VM with DRA host device passthrough, which
+blocks migration. Users who need migration should use VMI-scoped claims (the
+existing pod-level DRA flow) rather than VM-scoped persistent claims.
+
+### Security Implications
+
+The virt-controller service account has `patch` permission on
+`resourceclaims/binding`. This is equivalent to the privileges held by
+kube-scheduler and kube-controller-manager for managing pod allocations.
+The VM controller is trusted to manage `reservedFor` because:
+- It only modifies claims it owns (enforced via OwnerReference)
+- It follows the same reservation lifecycle as StatefulSets
+- Admission webhooks prevent unauthorized claim creation
+
+### Quota Implications
+
+When `persistWhenStopped: true`, the VM holds a device allocation even when
+stopped. This does not count against pod-based resource quotas, but does count
+against cluster-wide device capacity reported via ResourceSlices. Cluster admins
+should monitor ResourceClaim allocations separately from pod quotas when
+persistent claims are in use.
 
 ## API Examples
 
