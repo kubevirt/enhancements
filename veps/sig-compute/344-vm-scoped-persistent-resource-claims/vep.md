@@ -187,13 +187,28 @@ The VM controller manages ResourceClaims following the same pattern as
    re-enqueue it for reconciliation, using the expectations pattern to prevent
    duplicate operations.
 
-4. **Stop-time cleanup**: When a VM is stopped, the controller deletes
-   ResourceClaims for entries where `persistWhenStopped` is false (the
-   default), freeing the devices for other workloads. Claims with
-   `persistWhenStopped: true` are retained. On the next start, missing
-   claims are re-created from their templates.
+4. **Allocation preservation** (`ensureVMInClaimReservedFor`): On every
+   reconcile, the controller checks allocated claims with
+   `persistWhenStopped: true`. If the VM is not in the claim's
+   `status.reservedFor`, the controller adds a `ResourceClaimConsumerReference`
+   for the VM. This prevents the DRA resource controller from deallocating
+   the claim when the virt-launcher pod is deleted — the VM entry in
+   `reservedFor` keeps the allocation alive, ensuring the same physical
+   device is re-attached on the next start.
 
-5. **Garbage collection**: ResourceClaims have the VM as their controller owner
+5. **Stop-time cleanup** (`cleanupNonPersistentResourceClaims`): When a VM
+   is explicitly stopped, the controller deletes ResourceClaims for entries
+   where `persistWhenStopped` is false (the default), freeing the devices
+   for other workloads. Claims with `persistWhenStopped: true` are retained
+   with their allocation intact. On the next start, missing claims are
+   re-created from their templates.
+
+6. **VM deletion cleanup**: Before removing the VM finalizer, the controller
+   removes the VM from `reservedFor` on all persistent claims. This allows
+   the DRA resource controller to deallocate the devices. The claims are
+   then garbage-collected via owner references.
+
+7. **Garbage collection**: ResourceClaims have the VM as their controller owner
    reference. Kubernetes garbage collection automatically deletes them when the
    VM is deleted.
 
@@ -211,21 +226,27 @@ VM restarted            → new claims created (may get different device)
 VM deleted              → any remaining claims garbage-collected via owner ref
 ```
 
-With `persistWhenStopped: true`, claims persist for the VM's entire lifetime:
+With `persistWhenStopped: true`, claims persist for the VM's entire lifetime.
+The VM is added to `status.reservedFor` on the claim, which prevents the DRA
+resource controller from deallocating when the pod is deleted:
 
 ```
 VM created (Halted)     → no claims created
-VM started              → claims created, VMI created referencing them
-VM rebooted             → claims persist, VMI recreated reusing them
-VM stopped              → VMI deleted, claims PERSIST (same device reserved)
-VM restarted            → claims already exist, VMI reuses them
-VM deleted              → claims garbage-collected via owner ref
+VM started              → claims created, scheduler allocates, VM added to reservedFor
+VM rebooted             → pod removed from reservedFor, VM entry keeps allocation alive
+VM stopped              → pod deleted, VM stays in reservedFor, allocation PRESERVED
+VM restarted            → claims already allocated with same device, new pod added
+VM deleted              → VM removed from reservedFor, claims deallocated and GC'd
 ```
 
 Use `persistWhenStopped: true` for devices with persistent state (NVMe),
 identity-bound licensing (GPU tied to PCI address), or network identity
 (NIC with DHCP reservation). Use the default for devices where resource
 efficiency matters more than device stability.
+
+Validated on Dell XE9680 with 4x Samsung PM1745 NVMe drives: 4 VMs each
+holding a unique NVMe device across 10 stop/start cycles and 10 reboot
+cycles (80/80 total, zero device swaps).
 
 ### Webhook Validation
 
@@ -243,11 +264,14 @@ The validating webhook (`validateResourceClaimTemplates`) enforces:
 
 The virt-controller service account requires:
 - `resourceclaims`: get, list, watch, create, delete
+- `resourceclaims/binding`: patch
 - `resourceclaimtemplates`: get, list, watch
 
 The `delete` verb is needed for stop-time cleanup of claims where
-`persistWhenStopped` is false. No `update` or `patch` verbs are needed —
-owner references are set at creation time.
+`persistWhenStopped` is false. The `resourceclaims/binding` patch
+permission is needed to add/remove the VM from `status.reservedFor`,
+which controls whether the DRA resource controller keeps or releases
+the device allocation.
 
 ## API Examples
 
