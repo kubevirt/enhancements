@@ -493,7 +493,7 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 ### Alpha
 
-- [ ] Feature gate `MonitoringStackSeparation` guards KubeVirt-side code changes
+- [ ] Feature gate `VMStatsCollector` guards KubeVirt-side code changes
   (gRPC refactor in `virt-handler`/`virt-launcher`)
 - [ ] `GetVMStats` RPC implemented in `virt-launcher` and called by `virt-handler`
   with fallback to legacy RPCs
