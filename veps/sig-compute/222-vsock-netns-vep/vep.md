@@ -4,8 +4,8 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.9.0
-- This VEP targets beta for version:
+- This VEP targets alpha for version: v0.59.0
+- This VEP targets beta for version: v1.10.0
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -16,7 +16,7 @@ release*.
 - [ ] (R) Enhancement issue created, which links to VEP dir
   in [kubevirt/enhancements](https://github.com/kubevirt/enhancements)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
