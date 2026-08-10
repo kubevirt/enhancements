@@ -25,6 +25,9 @@ VSOCK (`AF_VSOCK`) is a socket family for communication between a virtual
 machine and its host, identified by a Context ID (CID) rather than an IP
 address.
 
+KubeVirt has supported VSOCK since v0.59.0, when it was introduced as an
+alpha feature via a
+[community proposal](https://github.com/kubevirt/community/pull/191).
 Linux 7.0
 introduces [VSOCK network namespace support](https://stefano-garzarella.github.io/posts/2026-02-11-vsock-netns/),
 allowing VSOCK sockets to be confined within network namespaces. This VEP
@@ -75,10 +78,11 @@ via a gRPC service (`System.CABundle`) that runs permanently on each node to
 deliver CA certificates to guests.
 
 With kernel-level VSOCK namespace support, the network namespace itself becomes
-the trust boundary, making the global CID allocator unnecessary and providing
-stronger isolation by default. The TLS identity verification remains valuable
-as an additional layer - proving the peer is `virt-handler` - but no longer
-needs to run permanently on the host.
+the trust boundary, making the global CID allocator unnecessary on nodes
+running in `local` mode and providing stronger isolation by default. The TLS
+identity verification remains valuable as an additional layer - proving the
+peer is `virt-handler` - but no longer needs to run permanently on the host
+for `local`-mode Pods.
 
 ## Goals
 
@@ -86,11 +90,10 @@ needs to run permanently on the host.
   network namespace, so that only processes within the same Pod can access it
 - The change should be transparent to users of the KubeVirt VSOCK API - existing
   workflows continue to work without modification
-- Support both `global` and `local` VSOCK modes during alpha and beta, so
-  clusters that have not yet adopted Linux 7.0 continue to function
-- Warn operators when VSOCK is running in `global` mode (beta onwards) to
-  encourage migration to `local` mode
-- Remove `global` mode support at GA, requiring kernel namespace confinement
+- Support both `global` and `local` VSOCK modes during beta, so clusters
+  that have not yet adopted Linux 7.0 continue to function
+- Use the beta period to gather feedback on whether `global` mode support
+  should be retained long-term or removed at GA
 
 ## Non Goals
 
@@ -128,7 +131,7 @@ needs to run permanently on the host.
 
 - As a **cluster administrator**, I want `virt-handler` to clearly log when
   VSOCK is running in `global` mode on a node, so I can identify nodes that
-  need kernel configuration updates before GA.
+  could benefit from kernel configuration updates.
 
 ## Repos
 
@@ -157,21 +160,23 @@ subsequently created child network namespaces to inherit `local` mode. Once a
 child namespace is created, its mode is immutable. A node reboot is required to
 reset `child_ns_mode` back to `global`.
 
-### Change 1: Detect VSOCK mode at `virt-handler` startup
+### Change 1: Log VSOCK mode at `virt-handler` startup
 
 When the VSOCK feature gate is enabled, `virt-handler` reads
-`/proc/sys/net/vsock/child_ns_mode` at startup and registers the
-`devices.kubevirt.io/vhost-vsock` device plugin:
+`/proc/sys/net/vsock/child_ns_mode` at startup and logs the current mode.
+It then registers the `devices.kubevirt.io/vhost-vsock` device plugin
+regardless of the mode. `virt-handler` is not bound to a specific mode at
+startup - it handles both `local` and `global` mode Pods at runtime, even
+if `child_ns_mode` is changed after startup (see Change 3).
 
-- If the sysctl exists and is set to `local`, `virt-handler` operates in
-  `local` mode.
-- If the sysctl does not exist or is set to `global`, `virt-handler` operates
-  in `global` mode. Starting with beta, this also emits a warning log.
-  Optionally, a metric (e.g. `kubevirt_virt_handler_vsock_global_mode`) can
-  be exposed so operators can set up monitoring alerts for nodes that still
-  need migration.
-- At GA, `virt-handler` will require `local` mode and refuse to register the
-  device plugin when the sysctl is missing or set to `global`.
+- If the sysctl does not exist or is set to `global`, `virt-handler` logs
+  the mode. At a later point while still in beta, this could additionally
+  emit a warning log. Optionally, a metric (e.g.
+  `kubevirt_virt_handler_vsock_global_mode`) can be exposed so operators
+  can set up monitoring alerts for nodes that still need migration.
+- At GA, `virt-handler` may require `local` mode and refuse to register the
+  device plugin when the sysctl is missing or set to `global`, or support
+  for both modes may be retained.
 
 Configuring the sysctl is the responsibility of the cluster administrator,
 using system tooling such as `systemd-sysctl`, `MachineConfig`, or the node
@@ -189,8 +194,8 @@ allocated CID, and substitutes a fixed CID (e.g. `3`, the minimum valid guest
 CID) in the libvirt domain XML, since each network namespace has its own CID
 space. On `global`-mode nodes, the allocated CID is used as before.
 
-The dynamic CID allocator can be removed at GA when `global` mode support is
-dropped and all nodes are guaranteed to run in `local` mode.
+If `global` mode support is dropped at GA, the dynamic CID allocator can be
+removed at that point.
 
 ### Change 3: Namespace-aware VSOCK dialing
 
@@ -277,7 +282,7 @@ role and leave system-level tuning to the right tools.
 
 ### Drop `VSOCKCID` from the API
 
-The `VSOCKCID` field in `VirtualMachineInstanceStatus` could be removed once
+The `VSOCKCID` field in `VirtualMachineInstanceStatus` could be removed if
 `global` mode is dropped at GA, since the CID would be fixed. This was
 rejected because removing a field from the API is a breaking change. Keeping
 the field is harmless and preserves API compatibility.
@@ -285,13 +290,13 @@ the field is harmless and preserves API compatibility.
 ### Require `local` mode from the start
 
 Instead of supporting both modes, `virt-handler` could require `local` mode
-from alpha and refuse to register the device plugin on nodes without support.
+from beta and refuse to register the device plugin on nodes without support.
 This was rejected because Linux 7.0 - the first kernel with VSOCK namespace
 support - is still very new and not yet widely deployed. Requiring it
 immediately would force all clusters to upgrade their kernel before using
-VSOCK with KubeVirt. A phased approach - support both modes, warn on `global`,
-then remove it at GA - gives operators time to adopt Linux 7.0 while still
-driving migration to the more secure mode.
+VSOCK with KubeVirt. Supporting both modes during beta gives operators time
+to adopt Linux 7.0 and provides a feedback period to decide whether `global`
+mode should be retained long-term or removed at GA.
 
 ### New feature gate for namespace confinement
 
@@ -311,10 +316,15 @@ connection, which is negligible.
 ### Upgrade
 
 No node configuration changes are required for upgrade. `virt-handler` reads
-`/proc/sys/net/vsock/child_ns_mode` at startup and operates in whichever mode
-is configured. Nodes with `local` mode get namespace-isolated VSOCK; nodes
-without the sysctl or with `global` mode continue to work as before. Starting
-with beta, `global`-mode nodes emit a warning.
+`/proc/sys/net/vsock/child_ns_mode` at startup and logs the detected mode.
+Since `child_ns_mode` can be changed from `global` to `local` at any time
+(though not back without a reboot), `virt-handler` does not rely on the
+startup value - it determines the effective mode per Pod at dial time
+(see Change 3). This means `virt-handler` can simultaneously handle
+pre-existing Pods that inherited `global` mode and new Pods created after
+the switch to `local` mode. Nodes with `local` mode get namespace-isolated
+VSOCK; nodes without the sysctl or with `global` mode continue to work as
+before.
 
 If old `virt-launcher` Pods remain (depending on `spec.workloadUpdateStrategy`
 in the KubeVirt CR), they retain their inherited mode and dynamically-assigned
@@ -331,11 +341,13 @@ configured, the administrator must reboot nodes to reset the sysctl back to
 
 ### GA upgrade
 
-The GA release will remove `global` mode support. Administrators must
-configure `child_ns_mode = local` on all nodes before upgrading to GA. Nodes
-without `local` mode will no longer register the device plugin, and VMs with
-VSOCK enabled will not be scheduled there. This requirement will be
-communicated in release notes for the preceding beta releases.
+Whether the GA release will require `local` mode or retain support for both
+modes is an open question to be decided based on beta feedback. If `global`
+mode support is removed at GA, administrators must configure
+`child_ns_mode = local` on all nodes before upgrading. Nodes without `local`
+mode would no longer register the device plugin, and VMs with VSOCK enabled
+would not be scheduled there. This requirement would be communicated in
+release notes for the preceding beta releases.
 
 ## Functional Testing Approach
 
