@@ -363,19 +363,32 @@ release notes for the preceding beta releases.
 
 ## Implementation History
 
-<!--
-To be filled as implementation progresses.
--->
+- VSOCK support was originally introduced in KubeVirt v0.59.0 as a community
+  proposal ([kubevirt/community#191](https://github.com/kubevirt/community/pull/191)),
+  before the VEP process existed
 
 ## Graduation Requirements
 
-### Alpha (v1.9.0)
+### Alpha (v0.59.0)
 
-The VSOCK feature is currently Alpha. This VEP adds namespace confinement
-support while remaining in Alpha:
+VSOCK support was introduced as a community proposal
+([kubevirt/community#191](https://github.com/kubevirt/community/pull/191))
+before the VEP process existed:
 
-- [ ] `virt-handler` detects `child_ns_mode` at startup and operates in
-  `local` or `global` mode accordingly
+- [x] `VSOCK` feature gate added (disabled by default)
+- [x] `AutoattachVSOCK` API field
+- [x] Dynamic CID allocation in `virt-controller`
+- [x] `vhost-vsock` device plugin in `virt-handler`
+- [x] VSOCK REST proxy in `virt-api`/`virt-handler`
+- [x] Mutual TLS authentication via `System.CABundle` gRPC service
+
+### Beta (v1.10.0)
+
+The VSOCK feature gate graduates to Beta. This VEP adds namespace
+confinement support as part of the graduation:
+
+- [ ] `virt-handler` logs `child_ns_mode` at startup and handles both modes
+  at runtime
 - [ ] Fixed CID used in `local` mode, dynamically-allocated CID in `global`
   mode
 - [ ] VSOCK REST proxy enters Pod network namespace before dialing
@@ -385,26 +398,24 @@ support while remaining in Alpha:
 - [ ] Unit and functional tests covering both modes
 - [ ] Documentation updated with namespace confinement behavior and kernel
   requirements
-
-### Beta
-
-- [ ] `virt-handler` emits a warning log when operating in `global` mode
+- [ ] Feature gate enabled by default
+- [ ] (optional) `virt-handler` emits a warning log when operating in
+  `global` mode
 - [ ] (optional) `virt-handler` exposes a metric for `global` mode, enabling
   monitoring alerts
-- [ ] Evaluate whether extended support for `global` mode is needed beyond GA
-  (e.g. for clusters unable to adopt Linux 7.0 in the near term)
+- [ ] Evaluate whether `global` mode support should be retained long-term or
+  removed at GA, based on feedback gathered during beta (e.g. adoption of
+  Linux 7.0, clusters that cannot upgrade in the near term)
 - [ ] Evaluate whether guests actively polling the permanent `System.CABundle`
   service in `global` mode requires extended support beyond GA
 - [ ] Stable across at least one release with no regressions
-- [ ] Documentation updated with deprecation notice for `global` mode
-- [ ] Feature gate enabled by default
 
 ### GA
 
-- [ ] `virt-handler` requires `child_ns_mode = local` and does not register
-  the VSOCK device plugin on nodes without support
-- [ ] Dynamic CID allocator removed
-- [ ] Permanent `System.CABundle` gRPC service removed
-- [ ] `global` mode code paths removed
+- [ ] Decide whether to require `local` mode or retain `global` mode support,
+  based on beta feedback
+- [ ] If `global` mode is removed: `virt-handler` requires
+  `child_ns_mode = local`, dynamic CID allocator removed, permanent
+  `System.CABundle` gRPC service removed, `global` mode code paths removed
 - [ ] Stable across multiple releases
 - [ ] No reported regressions in VSOCK connectivity
