@@ -119,7 +119,7 @@ Each disk shares the same IOThread. With these proposed changes, we would assign
 ### Policy: auto
 Currently, each virtio-blk disk (excluding ones that request dedicatedIO) gets assigned a single thread in round robin order from the list of available iothreads. The total number of threads is equal to the number of disks in a VMI, capped at 2 * (# of vCPUs). Since the SCSI controller cannot assign individual threads to its disks, we would instead allocate all of the "auto threads" (threads not reserved for dedicatedIO disks) to the controller.
 
-In order to prevent this behavior from diverging for the two bus types, this implementation will also include modifying the `auto` policy for virtio-blk so that each blk disk will now be allocated the same auto thread pool instead of a single thread.
+In order to prevent this behavior from diverging for the two bus types, this implementation will also include modifications to the `auto` policy for virtio-blk so that each blk disk will now be allocated the same auto thread pool instead of a single thread. To preserve backwards compatibility, a new KubeVirt configuration will be added to act as a toggle for this virtio-blk `auto` policy behavior. To explicitly opt-in, users must have both the feature gate as well as this new toggle set.
 
 ### Policy: supplementalPool
 Each disk gets access to a pool of threads. Same as with auto policy, the SCSI controller can only allocate threads to the virtqueues, so the entire supplemental thread pool would become shared with the SCSI controller.
@@ -215,6 +215,8 @@ The feature is additive and will be behind a feature gate. On upgrade, the exist
 
 On rollback, disabling the feature gate reverts the ability to perform iothread-vq-mapping for virtio-scsi and will fallback to using a single threaded SCSI controller. This will also revert the `auto` policy behavior to only assign a single round-robin thread.
 
+Once this feature is GA and on by default, the new KubeVirt CR configuration will remain to allow users toggle off the new multi-threaded `auto` policy in favour of preserving the single thread legacy behavior.
+
 
 ## Functional Testing Approach
 
@@ -222,7 +224,7 @@ On rollback, disabling the feature gate reverts the ability to perform iothread-
 An overview on the approaches used to functional test this design)
 -->
 
-* Unit tests to validate domain xml structure of new scsi controller
+* Unit tests to validate domain xml structure of new scsi controller as well as virtio-blk disks
 * Extend existing e2e hotplug test to verify hotplugging virtio-scsi disks when an `IOThreadsPolicy` is set
 
 ## Implementation History
@@ -252,11 +254,14 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 -->
 
 ### Alpha
-- [ ] Add new feature gate 
+- [ ] Add new feature gate to guard changes for virtio-scsi
+- [ ] Add new KubeVirt configuration to toggle new `auto` policy for virtio-blk.
 - [ ] Updates to virtio-scsi controller
-- [ ] 
+- [ ] Updates to `auto` policy behavior for virto-blk
 
 ### Beta
 - [ ] Successful performance testing
 
 ### GA
+- [ ] Feature gate is removed
+- [ ] Replace feature gate check to instead evaluate KubeVirt configuration field to allow for users to toggle the new `auto` thread policy behavior
