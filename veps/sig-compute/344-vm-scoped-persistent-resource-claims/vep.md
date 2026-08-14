@@ -111,7 +111,11 @@ created. This causes several problems:
    without risking allocation failure because another workload grabbed my
    device during the restart window.
 
-4. As a platform engineer, I want a single mechanism that works for all
+4. As a VM administrator, I want my VM's SR-IOV NIC to keep the same MAC
+   address across restarts so that DHCP reservations, firewall rules, and
+   monitoring remain valid.
+
+5. As a platform engineer, I want a single mechanism that works for all
    DRA-managed device types (GPUs, NVMe, SR-IOV NICs) without needing
    device-specific configuration in KubeVirt.
 
@@ -162,6 +166,33 @@ type VirtualMachineSpec struct {
     ResourceClaimTemplates []ResourceClaimTemplateEntry `json:"resourceClaimTemplates,omitempty"`
 }
 ```
+
+### Kubernetes DRA Background: `status.reservedFor`
+
+Kubernetes DRA ResourceClaims have a standard `status.reservedFor` field
+that lists which entities are currently using a claim. The DRA resource
+controller only deallocates a claim when this list is **empty**. This is
+an existing Kubernetes API — no upstream changes are needed.
+
+The field accepts any Kubernetes resource type, not just pods:
+
+```go
+type ResourceClaimConsumerReference struct {
+    APIGroup string  // e.g., "kubevirt.io"
+    Resource string  // e.g., "virtualmachines"
+    Name     string
+    UID      types.UID
+}
+```
+
+When a pod references a claim, the scheduler adds the pod to `reservedFor`.
+When the pod is deleted, the kubelet removes it. If no other consumers
+remain, the DRA controller deallocates the claim.
+
+This VEP uses `reservedFor` to add the VM as a consumer alongside the pod.
+When the pod is deleted (stop or reboot), the VM entry remains, keeping the
+allocation alive. No anchor pods, sidecar pods, or upstream API changes are
+required.
 
 ### Controller Behavior
 
@@ -248,6 +279,27 @@ efficiency matters more than device stability.
 Validated on Dell XE9680 with 4x Samsung PM1745 NVMe drives: 4 VMs each
 holding a unique NVMe device across 10 stop/start cycles and 10 reboot
 cycles (80/80 total, zero device swaps).
+
+### Manual Reallocation
+
+If a user needs to force a different device allocation on a **stopped** VM
+(e.g., replacing failed hardware, changing NUMA placement), they can
+delete the claim directly. Claims should only be deleted while the VM is
+stopped — deleting a claim on a running VM has no effect until the next
+start, since the running pod already has the device allocated.
+
+```
+kubectl delete resourceclaim my-vm-nvme-claim
+virtctl start my-vm   # controller recreates claim, scheduler allocates fresh
+```
+
+The controller's `handleResourceClaims` recreates missing claims on start.
+The scheduler allocates from the available device pool, which may assign a
+different physical device.
+
+For beta, a `reallocateOnNextStart` field on `ResourceClaimTemplateEntry` is
+a candidate if users need a single-step API. For alpha, the manual approach
+is sufficient — reallocation is an exceptional operation.
 
 ### Webhook Validation
 
@@ -417,6 +469,29 @@ ownership of existing pod-scoped claims to the VM using finalizers.
 **Rejected** because it introduces complex lifecycle coordination between the
 VM controller and kubelet's claim management. The pre-creation approach is
 simpler and follows the established `dataVolumeTemplates` pattern.
+
+### 4. PVCs instead of persistent ResourceClaims
+
+For NVMe storage, use PersistentVolumeClaims via a CSI driver instead of
+DRA ResourceClaims.
+
+**Rejected** because PVCs are a storage abstraction — they don't cover GPUs,
+SR-IOV NICs, FPGAs, or other non-storage devices. DRA ResourceClaims are the
+Kubernetes-standard API for dynamic device allocation, and they carry device
+metadata (NUMA node, PCIe topology, driver attributes) that PVCs lack. Even
+for NVMe, DRA VFIO passthrough gives direct hardware access without the
+filesystem/block driver overhead that CSI imposes.
+
+### 5. Dual declaration of resourceClaimTemplates
+
+The user declares `resourceClaimTemplates` entries on the VM spec **and**
+references them in `spec.template.spec.resourceClaims` on the VMI template.
+This follows the established `dataVolumeTemplates` pattern, where the VM spec
+declares what to create and the VMI template declares what to consume. The
+webhook validates that every VM-level entry has a matching VMI-level entry.
+The `SetupVMIFromVM` controller logic rewrites template references to direct
+claim name references before VMI creation, so the VMI never sees the
+template — only the concrete claim.
 
 ## Scalability
 
