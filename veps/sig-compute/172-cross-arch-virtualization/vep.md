@@ -67,8 +67,7 @@ Cross-architecture emulation would enable:
 
 ## Goals
 
-- Enable VMs to run on nodes with different architectures using either software
-  or hardware-accelerated virtualization
+- Enable VMs to run on nodes with different architectures using hardware-accelerated virtualization
 - Auto-detect hardware cross-architecture KVM support via libvirt capabilities
   and prefer it over software emulation
 - Operate independently of `useEmulation`, allowing native KVM VMs and
@@ -88,6 +87,8 @@ Cross-architecture emulation would enable:
 - Automatic installation or management of QEMU binaries on nodes
 - Kernel or QEMU development for hardware acceleration support (upstream
   responsibility)
+- Supporting Software Emulation for production use.
+- Distributing Software Emulation QEMU binaries
 
 ## Definition of Users
 
@@ -626,20 +627,11 @@ repositories. For example, `qemu-system-aarch64-core` is not available in
 CentOS Stream 9 BaseOS or AppStream for x86_64. These packages are currently
 only available via the
 [@virtmaint-sig/virt-preview](https://copr.fedorainfracloud.org/coprs/g/virtmaint-sig/virt-preview/)
-COPR repository. This is a known blocker for productization — the packages
-would need to be included in the base EL distribution or a supported
-repository before this feature can graduate beyond Alpha.
-
-#### Image Size Considerations
-
-Adding multiple QEMU system binaries increases the virt-launcher image size
-significantly (100-200MB per architecture). The approach for managing this:
-
-- **Alpha**: Include cross-arch QEMU binaries directly in the virt-launcher
-  image build
-- **Beta/Future**: Explore splitting into architecture-specific sidecars or
-  initContainers to avoid bloating the base image for clusters that do not
-  use cross-architecture emulation
+COPR repository. Critically, this is a **preview / rolling-release feed**:
+the QEMU version it ships changes frequently and is incompatible with the
+stable QEMU version built into the KubeVirt virt-launcher image.
+This is a known blocker for productization — as such Software Emulation should
+be used for internal testing only.
 
 ### Validation
 
@@ -824,6 +816,10 @@ Key characteristics of SAE:
   refactored into architecture-agnostic code (`virt/kvm/arm64/`) that both
   native ARM64 hosts and s390x SAE hosts can use
 
+More information on the Dual Architecture Processor can be found on the [announcement from 2026-08-24][dual-arch-processor].
+
+[dual-arch-processor]: https://newsroom.ibm.com/2026-08-24-ibm-unveils-next-generation-dual-architecture-processor-for-ibm-z-and-linuxone
+
 #### Kernel and Libvirt Requirements
 
 The following are required for hardware-accelerated cross-architecture
@@ -834,6 +830,7 @@ emulation (based on the [v1 patch series][kvm-patches]):
 - SAE hardware capability reported via `hwcap`
 - Minimum kernel version: TBD (patches are v1 as of 2026-04-02)
 - Libvirt with SAE capabilities reporting (minimum version TBD)
+- QEMU with SAE support
 
 #### Libvirt Capabilities Detection
 
@@ -901,9 +898,6 @@ handling, interrupt support, hypercalls, and additional features such as PMU.
 5. **Live migration**: Can an ARM64 VM be migrated between two s390x SAE-
    capable hosts? What about migration between an s390x SAE host and a
    native ARM64 host?
-6. **QEMU requirements**: Does QEMU need SAE-specific changes, or does it
-   work transparently via the KVM API with the existing `qemu-system-aarch64`
-   binary?
 
 ### Relationship to Multi-Hypervisor Support (VEP #97)
 
@@ -1149,9 +1143,9 @@ characteristics are TBD.
 
 ### Test Infrastructure Requirements
 
-- Nodes with cross-arch QEMU binaries installed
 - Multi-arch container disk images for testing
 - Ability to toggle feature gate in test environment
+- Ability to build virt-launcher images with software emulation QEMU binaries
 - s390x CI infrastructure for hardware acceleration tests (once SAE hardware
   is generally available)
 
@@ -1201,9 +1195,8 @@ characteristics are TBD.
 
 1. Performance benchmarking and documentation
 2. Production readiness review
-3. Explore automated QEMU binary distribution
-4. Multi-release stability confirmation for hardware acceleration path
-5. Clear support matrix (hardware, kernel, libvirt, QEMU versions)
+3. Multi-release stability confirmation for hardware acceleration path
+4. Clear support matrix (hardware, kernel, libvirt, QEMU versions)
 
 ## Implementation History
 
@@ -1239,6 +1232,8 @@ characteristics are TBD.
   a single feature gate. Added auto-detection of hardware cross-arch KVM
   support via libvirt capabilities, three-tier node scheduling preference,
   `HardwareEmulation` VMI condition, and SAE background.
+- 2026-08-26: Update e2e test strategy and drop binary distribution requirement
+  for software emulation.
 
 ## Graduation Requirements
 
@@ -1294,13 +1289,12 @@ characteristics are TBD.
       software cross-arch) validated end-to-end
 - [ ] CPU model and graphics device handling refined for hardware
       acceleration
-- [ ] Comprehensive test coverage across architecture pairs (E2E tests)
+- [ ]  Comprehensive test coverage across architecture pairs for software emulation (E2E tests)
 - [ ] Performance benchmarking and documented performance characteristics
 - [ ] Hardware-accelerated cross-architecture virtualization validated for
       production use (software emulation remains development/testing only)
 - [ ] At least one release in Alpha with no major issues
 - [ ] User feedback incorporated from Alpha release
-- [ ] Consider automated QEMU binary distribution approach
 - [ ] Consider per-VM emulation policy (e.g., a VMI-level field to disable
       cross-arch emulation, prefer hardware acceleration, or require hardware
       acceleration for specific workloads)
@@ -1312,9 +1306,9 @@ characteristics are TBD.
 - [ ] Established best practices and use case guidance
 - [ ] Production readiness review (acknowledging performance limitations for
       software emulation)
-- [ ] Decision on QEMU binary distribution strategy (manual vs bundled vs
-      sidecar)
 - [ ] Hardware acceleration production deployment validated (if hardware
       available)
 - [ ] Clear support matrix for hardware acceleration (hardware, kernel,
       libvirt, QEMU versions)
+- [ ] QEMU/Libvirt version bump to support SAE-capabilities
+- [ ] E2E tests using hardware acceleration are run periodically, pending hardware availability
