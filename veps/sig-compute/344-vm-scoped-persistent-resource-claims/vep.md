@@ -74,7 +74,8 @@ created. This causes several problems:
 - Ensure DRA device allocations persist across VM restarts (stop/start, reboot,
   crash recovery).
 - Support all DRA device types (GPUs, host devices, and future DRA-managed
-  devices such as SR-IOV NICs) with a single, device-agnostic mechanism.
+  devices and DRA-backed network devices) with a single, device-agnostic
+  mechanism.
 - Follow established KubeVirt patterns (`dataVolumeTemplates`) for consistency
   and maintainability.
 - Provide webhook validation to catch misconfigurations at admission time.
@@ -111,12 +112,13 @@ created. This causes several problems:
    without risking allocation failure because another workload grabbed my
    device during the restart window.
 
-4. As a VM administrator, I want my VM's SR-IOV NIC to keep the same MAC
-   address across restarts so that DHCP reservations, firewall rules, and
-   monitoring remain valid.
+4. As a VM administrator, I want my VM's DRA-managed NIC to keep the same
+   MAC address across restarts so that DHCP reservations, firewall rules,
+   and monitoring remain valid. (DRA-backed network devices are supported
+   since KubeVirt v1.9 via VEP-183.)
 
 5. As a platform engineer, I want a single mechanism that works for all
-   DRA-managed device types (GPUs, NVMe, SR-IOV NICs) without needing
+   DRA-managed device types (GPUs, NVMe, DRA-backed NICs) without needing
    device-specific configuration in KubeVirt.
 
 ## Repos
@@ -476,7 +478,7 @@ For NVMe storage, use PersistentVolumeClaims via a CSI driver instead of
 DRA ResourceClaims.
 
 **Rejected** because PVCs are a storage abstraction — they don't cover GPUs,
-SR-IOV NICs, FPGAs, or other non-storage devices. DRA ResourceClaims are the
+DRA-backed NICs, FPGAs, or other non-storage devices. DRA ResourceClaims are the
 Kubernetes-standard API for dynamic device allocation, and they carry device
 metadata (NUMA node, PCIe topology, driver attributes) that PVCs lack. Even
 for NVMe, DRA VFIO passthrough gives direct hardware access without the
