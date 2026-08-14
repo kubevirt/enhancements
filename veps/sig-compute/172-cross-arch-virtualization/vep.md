@@ -630,16 +630,55 @@ COPR repository. This is a known blocker for productization — the packages
 would need to be included in the base EL distribution or a supported
 repository before this feature can graduate beyond Alpha.
 
-#### Image Size Considerations
+#### Binary Distribution Strategy
 
 Adding multiple QEMU system binaries increases the virt-launcher image size
-significantly (100-200MB per architecture). The approach for managing this:
+significantly (100–200 MB per architecture). The approach for managing this:
 
-- **Alpha**: Include cross-arch QEMU binaries directly in the virt-launcher
+**Alpha**:
+
+Include cross-arch QEMU binaries directly in the virt-launcher
   image build
-- **Beta/Future**: Explore splitting into architecture-specific sidecars or
-  initContainers to avoid bloating the base image for clusters that do not
-  use cross-architecture emulation
+
+**Beta**:
+
+To keep the base image lean for
+clusters that do not use cross-architecture emulation, the distribution
+follows a two-image model:
+
+**`virt-launcher`** — the standard image, unchanged. Used by default.
+
+**`virt-launcher-emulation`** — an optional, additive image built `FROM
+virt-launcher` with cross-architecture QEMU system binaries layered on top
+(e.g. `qemu-system-aarch64`, `qemu-system-x86_64`).
+Operators who want cross-arch emulation pull and configure this image; the
+rest of the cluster is unaffected.
+
+Building `virt-launcher-emulation` is guarded by `KUBEVIRT_CROSS_ARCH_EMULATION`, but the rpms are cached normally using bazeldnf.
+The image is not built by default and not included in releases.
+This could only be considered for release should the binaries land in mainstream centos.
+
+##### Operator and Controller Configuration
+
+The `virt-operator` accepts an optional environment variable
+`VIRT_LAUNCHER_EMULATION_IMAGE`. When set, the value is propagated through
+the KubeVirt CR into `virt-controller`. `virt-controller` then uses this
+image when creating virt-launcher pods for VMs that require cross-arch
+emulation (i.e. when the resolved emulation preference is `Software` or
+`Hardware` and the guest architecture differs from the host).
+
+When `VIRT_LAUNCHER_EMULATION_IMAGE` is **not set**, `virt-controller` falls
+back to the standard `virt-launcher` image for all pod creation. This ensures
+the emulation image is entirely optional: clusters that never set the variable
+are completely unaffected.
+
+```
+virt-operator (env: VIRT_LAUNCHER_EMULATION_IMAGE)
+  └─► KubeVirt CR  (spec.imageRegistry / emulationImage field)
+        └─► virt-controller
+              ├─ cross-arch VM  →  use VIRT_LAUNCHER_EMULATION_IMAGE
+              └─ native VM      →  use VIRT_LAUNCHER_IMAGE  (unchanged)
+```
 
 ### Validation
 
@@ -1149,9 +1188,11 @@ characteristics are TBD.
 
 ### Test Infrastructure Requirements
 
-- Nodes with cross-arch QEMU binaries installed
+- `virt-launcher-emulation` image is built with binaries
 - Multi-arch container disk images for testing
 - Ability to toggle feature gate in test environment
+- `VIRT_LAUNCHER_EMULATION_IMAGE` set in the test cluster's `virt-operator`
+  deployment
 - s390x CI infrastructure for hardware acceleration tests (once SAE hardware
   is generally available)
 
@@ -1294,7 +1335,7 @@ characteristics are TBD.
       software cross-arch) validated end-to-end
 - [ ] CPU model and graphics device handling refined for hardware
       acceleration
-- [ ] Comprehensive test coverage across architecture pairs (E2E tests)
+- [ ] Comprehensive test coverage across architecture pairs for software emulation (E2E tests)
 - [ ] Performance benchmarking and documented performance characteristics
 - [ ] Hardware-accelerated cross-architecture virtualization validated for
       production use (software emulation remains development/testing only)
@@ -1312,9 +1353,8 @@ characteristics are TBD.
 - [ ] Established best practices and use case guidance
 - [ ] Production readiness review (acknowledging performance limitations for
       software emulation)
-- [ ] Decision on QEMU binary distribution strategy (manual vs bundled vs
-      sidecar)
 - [ ] Hardware acceleration production deployment validated (if hardware
       available)
 - [ ] Clear support matrix for hardware acceleration (hardware, kernel,
       libvirt, QEMU versions)
+- [ ] E2E tests using hardware acceleration are run periodically, pending hardware availability
