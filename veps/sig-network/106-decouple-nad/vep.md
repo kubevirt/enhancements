@@ -6,7 +6,7 @@
 
 - ~This VEP targets alpha for version:~
 - This VEP targets beta for version: v1.8
-- This VEP targets GA for version:
+- This VEP targets GA for version: v1.10
 
 ### Release Signoff Checklist
 
@@ -15,7 +15,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [ ] ~(R) Alpha target version is explicitly mentioned and approved~
 - [x] (R) Beta target version is explicitly mentioned and approved
-- [ ] (R) GA target version is explicitly mentioned and approved
+- [x] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
@@ -80,7 +80,7 @@ If the FG is enabled:
 - The VMI/Migration controller code that queries NADs and populates custom resources in the virt-launcher pod template, will be skipped.
 - The RBAC rules allowing NAD objects fetch, deployed by virt-operator, will be disabled.
 
-After 2-3 releases, the code that executes NAD querying will be removed along with the code that deploys associated RBAC rules (applies to both options below).
+At graduation, the code that executes NAD querying will be removed along with the code that deploys associated RBAC rules (applies to both options below).
 
 ### Deployment
 
@@ -190,7 +190,7 @@ The network-resources-injector approach provides several scalability advantages 
 
 ## Update/Rollback Compatibility
 
-Existing VMs in clusters opting in with the feature gate must deploy network-resources-injector before upgrade, so that new VMs and migrated VMs will be able to consume custom network resources.
+Clusters must deploy network-resources-injector before upgrading to v1.10, so that new VMs and migrated VMs will continue to consume custom network resources.
 
 Note that since the mechanism is replaced. There will be minor changes in the manner in which errors are handled. For example, if a referenced NAD is missing,
 The emitted error event will indicate:   
@@ -224,23 +224,12 @@ Warning  FailedCreatePodSandBox  0s (x6 over 72s)  kubelet  : Failed to create p
 
 Existing e2e tests already rely on mapping of custom resources and thus will validate regression.
 
-## Feature Lifecycle
+## Graduation Requirements
 
-### Beta (Skipping Alpha)
+### Beta
+- Stable continuous execution of e2e tests (running with FG enabled) ensures that network-resources-injector is a valid substitution to the NAD processing code inside KubeVirt.
+- Deprecation notice issued
+- network-resources-injector deployed in testing setups
 
-  Since no new code addition is planned (other than validation warnings), there's not much to protect with a multi-phased FG.
-  The FG is mainly used in order to provide users with sufficient preparation time, and a means to roll back if they failed to deploy network-resources-injector.
-  As such:
-  - In release 1.8, the `ExternalNetResourceInjection` FG will be introduced in **disabled by default** mode.
-    While the FG is enabled, KubeVirt will **not** map custom-resources, and will **not** deploy associated RBAC rules.
-    The NAD query and RBAC code will be marked as deprecated.
-    This provides users with 1 release period to learn about the new required dependency.
-  - In release 1.9 or 1.10 (user feedback dependent), the FG will be redesignated as **enabled by default**, essentially functioning as if the code was removed. However, users can still roll back this behavior by explicitly disabling the FG. 
-
-  Documentation will introduce the FG, highlight the deprecation and reference the network-resources-injector installation instructions.
-  A warning will be issued for the VM API in case secondary networks exist and FG is not enabled. A validation webhook will be implemented to issue the warning at VM creation. 
-
-
-### GA
-
-  In release 1.10 or 1.11, if there's no significant negative feedback from users, the NAD query and RBAC code will be removed, and the FG discontinued.
+### GA v1.10
+- The feature has been in Beta (disabled by default) for at least one release (v1.8) and enabled by default for at least one release (v1.9).
