@@ -5,6 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.9
+- This VEP targets beta for version: v1.10
 
 ### Release Signoff Checklist
 
@@ -12,15 +13,15 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 
 ## Overview
 
-This proposal adds support for [DRA (Dynamic Resource Allocation)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) provisioned network devices in KubeVirt.
+This proposal adds support for network devices provisioned via [DRA (Dynamic Resource Allocation)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) in KubeVirt.
 It extends the existing KubeVirt networks API with a new network source type for DRA-backed devices, allowing network devices to be allocated via DRA without removing the existing device-plugin + Multus-based approach, which remains supported separately.
+In this model, an external DRA driver provisions the network device, while a network binding plugin configures the VM's network interface — KubeVirt orchestrates the integration between the two.
 
 This VEP builds upon the core DRA infrastructure defined in VEP #10 ([kubevirt/enhancements/pull/11](https://github.com/kubevirt/enhancements/pull/11)) to add support for network devices.
-It defines a generic network-device model, while using SR-IOV as the concrete Alpha example.
-This feature requires Kubernetes v1.36 or newer because the DRA downward-API device information path used by KubeVirt was introduced in Kubernetes v1.36.
 
 ## Motivation
 
@@ -32,25 +33,24 @@ Key advantages for users/admins:
 - **Fine-grained and complex constraints:** DRA requests are expressed through `ResourceClaim`/`ResourceClaimTemplate` and `DeviceClass`, so users/admins can describe *what* they need (not only "one device"). This enables richer matching than a plain extended-resource count.
 - **Scheduler-aware allocation flow:** Allocation is part of a Kubernetes-native claim flow before workload finalization, so placement decisions can account for device constraints earlier.
 - **Standard, built-in Kubernetes API model:** DRA uses first-class Kubernetes APIs (`ResourceClaim`, `ResourceClaimTemplate`, `DeviceClass`) instead of plugin-specific side channels, improving portability, auditability, and ongoing operations.
-- **Lower per-driver integration overhead:** KubeVirt consumes allocated device attributes through a standardized DRA metadata/downward-API contract (aligned with VEP #10), reducing custom per-driver integration work for admins, driver authors, and KubeVirt maintainers.
+- **Lower per-driver integration overhead:** KubeVirt provides a generic integration model where the DRA driver and binding plugin exchange device attributes directly, reducing custom per-driver integration work for driver authors, binding plugin authors, and KubeVirt maintainers.
 
 ## Goals
 
 - Enable KubeVirt VMs to consume network devices via DRA, using externally supplied DRA drivers
 - Define a generic integration model for DRA-backed network devices
+- Support network binding plugins with DRA-backed network devices
+- Support live migration of VMs with DRA network devices (using `resourceClaimTemplate`-backed claims only)
 
 ## Non Goals
 
 - Replace existing Multus-based network integrations (remain fully supported)
 - Deploy/manage external DRA network drivers (provided externally)
 - Support coexistence of DRA and legacy device-plugin modes for the same device type in the same cluster
-- Live migration of VMs with DRA network devices:
-  - Not supported in Alpha (targeted for Beta, using `resourceClaimTemplate`-backed claims only)
-  - Permanently unsupported when using `resourceClaim`-backed claims direct, because a direct ResourceClaim is bound to a node after allocation, while migration requires a separate allocation on the destination node
-- In-tree `kubevirtci` provider support for DRA network device e2e in Alpha1 (targeted for Alpha follow-up)
-- In-tree CI e2e gating in Alpha1 (targeted for Alpha follow-up)
+- Live migration of VMs with DRA network devices using direct `resourceClaim`-backed claims,
+  because a direct ResourceClaim is bound to a node after allocation, while migration requires a separate allocation on the destination node
 - Standardizing a cross-driver MAC address configuration contract for DRA network devices
-- VM network interface hot-plug / hot-plug add for DRA network devices
+- Hot-plug / hot-unplug of VM network interfaces backed by DRA network devices
 
 ## Definition of Users
 
@@ -62,6 +62,8 @@ Key advantages for users/admins:
 - As a VM owner, I want to attach DRA-managed network devices to my VM using a `ResourceClaim` or `ResourceClaimTemplate`,
 so that I can consume DRA-managed devices the same way I would in a container workload
 - As an admin, I want to control network device allocation through the DRA APIs so that I can define allocation policies without modifying KubeVirt configuration.
+- As a VM owner, I want to upgrade KubeVirt without shutting down my VMs that use DRA-backed network devices so that I can apply updates without VM downtime.
+- As a VM owner, I want to live-migrate my VM with DRA-backed network devices so that I can perform maintenance or rebalancing without VM downtime.
 
 ## Repos
 
@@ -80,13 +82,14 @@ All the API changes will be gated behind this feature gate so as not to break ex
    - Deploy/configure the external DRA driver for the target network device type.
    - Create / Ensure a `DeviceClass` exists that selects the target network devices managed by that DRA driver.
 2. Enable the KubeVirt `NetworkDevicesWithDRA` feature gate.
+3. Register the network binding plugin in the KubeVirt CR.
 
 #### User flow (claim setup + per-VM attach)
 
 1. Create claim objects users will consume: one or more `ResourceClaimTemplate` objects (reusable across VMs) or `ResourceClaim` objects, with device requests that reference the selected network-device `DeviceClass` via `deviceClassName`.
-2. For each VMI, add a matching entry in `vmi.spec.resourceClaims[]` (using either a `ResourceClaim` or a `ResourceClaimTemplate`).
-3. For each VMI, define an interface with a compatible binding and a matching network with `resourceClaim` source, referencing the claim and request via `network.resourceClaim.claimName` and `network.resourceClaim.requestName`.
-4. Create the VMI.
+2. For each VM, add a matching entry in `spec.template.spec.resourceClaims[]` (using either a `ResourceClaim` or a `ResourceClaimTemplate`).
+3. For each VM, define an interface with a network binding plugin and a matching network with `resourceClaim` source, referencing the claim and request via `spec.template.spec.networks[].resourceClaim.claimName` and `spec.template.spec.networks[].resourceClaim.requestName`.
+4. Create the VM.
 
 #### Responsibility boundary
 
@@ -95,16 +98,15 @@ All the API changes will be gated behind this feature gate so as not to break ex
   - `DeviceClass` definitions
 - **User owns:**
   - provisioning/policy of `ResourceClaim`/`ResourceClaimTemplate` objects
-  - VMI interface/network wiring
+  - VM interface/network wiring
   - selecting claim/request references from provisioned `ResourceClaim`/`ResourceClaimTemplate` objects
 
 ### External Dependencies
 
+- Network binding plugin support for DRA network devices requires Kubernetes 1.34+, where DRA Structured Parameters is GA. DRA drivers that publish [device metadata](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-metadata) require Kubernetes 1.36+.
 - A DRA driver for the target network-device type is an external dependency; it is selected and deployed outside KubeVirt, and is not delivered by this VEP.
 - Driver capability requirements (for external network-device DRA drivers):
-  - Must support publishing device attributes through the Kubernetes DRA metadata/Downward API flow, including support for:
-    - `resource.kubernetes.io/pciBusID` (the device PCI address).
-    > **Note:** This capability is Alpha in Kubernetes v1.36 and requires Kubernetes >= v1.36 (see [kubernetes/enhancements#5304](https://github.com/kubernetes/enhancements/issues/5304)).
+  - DRA drivers may optionally publish device attributes through the Kubernetes [DRA device metadata](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-metadata) flow.
 
 ### API Changes
 
@@ -121,39 +123,66 @@ type NetworkSource struct {
 }
 ```
 
+A new technology-agnostic `InfoSource` value `pod-status` is introduced for network interfaces whose device is ready in the pod, regardless of the underlying mechanism (DRA, Multus, or future alternatives).
+The VMI controller determines this status from the `k8s.v1.cni.cncf.io/network-status` annotation (for Multus-backed interfaces) and `pod.status.resourceClaimStatuses` (for DRA-backed interfaces).
+
+> **Note:** The exact mechanism for determining DRA device readiness is informational and may change during implementation.
+
+This resolves the gap where `infoSource: multus-status` is not reported for DRA-backed interfaces, by providing a technology-agnostic equivalent.
+
+> **Note:** `pod-status` is a new string value in an existing field, not an API schema change.
+
+As additional sources report in, `vmi.status.interfaces[].infoSource` values are combined, e.g.:
+- `pod-status` — device is ready in the pod
+- `pod-status, domain` — device attached to the VM domain
+- `pod-status, domain, guest-agent` — guest agent also reporting the interface
+
+### Limitations Compared to Multus-based Flow
+
+With Multus, network configuration details such as MAC address and interface name can be specified through the `k8s.v1.cni.cncf.io/networks` annotation.
+The VMI controller does not populate the `k8s.v1.cni.cncf.io/networks` annotation for DRA networks, except for network binding plugins that have a NAD configured.
+
+The Kubernetes DRA API does not provide a standard way to specify these properties:
+- **MAC address:** Cannot be specified through the DRA flow. See Open Issue #1.
+- **Interface name:** Cannot be specified through the DRA flow. The guest-visible interface name is determined by libvirt/QEMU.
+
 ### Network Device Integration
 
-When a network interface has a compatible device binding and references a network with `resourceClaim` source:
+When a network interface has a network binding plugin and references a network with `resourceClaim` source:
 
 1. The network admitter validates that exactly one network source type (pod, multus, or resourceClaim) is specified
-2. Virt-controller adds the referenced resource claim to the virt-launcher pod spec
-3. The pod receives DRA allocation metadata through the Kubernetes DRA metadata-file mechanism
-4. Virt-launcher resolves the claim/request to device attributes from that metadata and generates the appropriate libvirt hostdev XML
+2. Virt-controller renders the virt-launcher pod spec with the referenced resource claim in the compute container's `resources.claims[]`.
+   If a network binding plugin sidecar is present, the claim is also added to the sidecar container's `resources.claims[]` so it can access DRA device metadata if published by the driver
+3. If the DRA driver publishes device metadata, the pod receives it through the Kubernetes DRA metadata-file mechanism
+4. The binding plugin sidecar may use this metadata to resolve allocated device attributes and adjust the domain XML accordingly
 
-This approach keeps a clean separation: DRA handles provisioning and allocation metadata publication, while KubeVirt networks API handles VM network configuration.
+The DRA device driver and the network binding plugin are the two active parties that work together to deliver a fully configured network device to the VM.
+KubeVirt orchestrates the integration: it wires the DRA allocation into the pod spec and drives the domain configuration lifecycle — but it does not own the device-specific logic on either side.
+The metadata contract is defined by the DRA driver and binding plugin authors, not by KubeVirt.
+
+> **Note:** If a request allocates more than one device (i.e., `count > 1`), only the first allocated device is used. See Open Issue #3.
 
 ### Validation
 
 Webhook validations ensure:
-1. Networks with `resourceClaim` source must map to interfaces using a DRA-compatible device binding.
+1. Networks with `resourceClaim` source must map to interfaces using a network binding plugin.
 2. Each network must reference a unique `claimName` + `requestName` combination.
    No two DRA entities (networks, hostDevices, or GPUs) can share the same tuple, because each interface/network pair must map to exactly one device allocation.
 3. Reject mixing `multus` and `resourceClaim` network sources in the same VMI.
+4. Both `claimName` and `requestName` must be non-empty.
 
 ### Component Changes
 
 **Virt-Controller:**
 - Renders virt-launcher pod spec with resource claims from `vmi.spec.resourceClaims[]` referenced by `vmi.spec.networks[].resourceClaim`
 
-**Virt-Launcher:**
-- For DRA-backed network-device interfaces, virt-launcher resolves allocated device data from DRA metadata file content available in the pod
-- Generates hostdev XML by:
-  - Filtering VMI spec interfaces with compatible device bindings that reference networks with resourceClaim source
-  - Matching claim/request identity from VMI network configuration to allocated metadata entries
-  - Extracting the PCI address (and related attributes) from metadata entries
-  - Generating standard libvirt hostdev XML
+**Network Binding Plugin Sidecars:**
+- Some network binding plugins with a sidecar may need access to allocated device attributes (e.g., PCI address) to configure the interface in the domain XML.
+  The DRA driver's [device metadata](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-metadata) file is mounted into the sidecar container, allowing it to read these attributes from the DRA allocation metadata and apply them to the domain configuration accordingly.
+  Note: DRA device metadata must be implemented by the DRA driver owner; this is outside the scope of KubeVirt.
+- When a network binding plugin has a NAD configured, Multus can still be used for CNI invocation — the pod's Multus annotation (`k8s.v1.cni.cncf.io/networks`) is populated with the plugin's NAD entry.
 
-- **Note:** If the ResourceClaim/ResourceClaimTemplate is allocating more than one device for the request, KubeVirt will consume the first device from the allocated devices
+See [Appendix A](#appendix-a-concrete-example---network-binding-plugin-with-dra) for a concrete example.
 
 ## Scalability
 
@@ -168,182 +197,147 @@ This integration follows the existing DRA scalability model used for other devic
 
 ## Functional Testing Approach
 
-- **Alpha1:**
-  - Unit tests in-tree
-  - No in-tree CI e2e gate
-  - Validation is external/local, consistent with the current DRA alpha approach
-  - Validation is executed with SR-IOV as the concrete network device type
-- **Alpha follow-up:** Add non-migration e2e coverage and an in-tree lane as follow-up work.
-- **Beta:** Extend coverage to migration scenarios (for `resourceClaimTemplateName`-backed claims only).
+- End-to-end functional tests covering:
+  - Network binding plugin with a DRA driver, including live migration
+- Stage-specific testing scope is documented in the [Graduation Requirements](#graduation-requirements) section
 
 ## Implementation History
 
 - 2026-01-20: Initial design/VEP proposal for DRA-backed network device support
+- 2026-07-12: Updated for Beta scope - network binding plugins and live migration; SR-IOV removed from scope due to competing industry approaches for integrating SR-IOV with DRA
 
 ## Graduation Requirements
 
 ### Alpha
 
-#### Alpha1
-
 - Core API and integration changes behind `NetworkDevicesWithDRA` feature gate
 - Unit tests
 - No in-tree CI e2e gate (consistent with the current DRA alpha model)
-- Validation with a concrete network-device DRA driver and provider setup (SR-IOV)
-
-#### Alpha follow-up
-
-- Non-migration DRA e2e tests added (we first need MAC support at least for some of those)
-- In-tree e2e lane for those non-migration tests
+- Alpha was validated manually with SR-IOV as the concrete network device type
 
 ### Beta
 
+- Network binding plugin support with DRA network devices
 - Live migration support for DRA network devices, for `resourceClaimTemplateName`-backed claims
-- Migration-specific e2e test coverage
-- Evaluate user and driver author experience
+- Functional e2e tests for network binding plugin with a DRA driver, including live migration
+- KubeVirt user-guide documentation
 
 ### GA
 
-- Support additional DRA-managed network device types beyond the Alpha SR-IOV example.
-- Live migration for direct `spec.resourceClaims[].resourceClaimName` claims remains unsupported by design.
+- Backward-compatible upgrade path from Beta
+- All Beta open issues resolved or explicitly deferred by design
 
-## Appendix A: Concrete Example - SR-IOV (Alpha Scope)
+> **Note:** SR-IOV is not supported as a DRA network device type. Support may be revisited once industry approaches for integrating SR-IOV with DRA converge.
 
-This VEP is intentionally generic, and uses SR-IOV as a concrete Alpha example for driver behavior and end-to-end workflow.
+## References
 
-For this SR-IOV DRA example, the `NetworkAttachmentDefinition` is an implementation detail of the external SR-IOV DRA driver, not part of the KubeVirt DRA API contract.
-This Alpha example is expected to work with the [k8snetworkplumbingwg/dra-driver-sriov](https://github.com/k8snetworkplumbingwg/dra-driver-sriov) implementation.
+- DRA: https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
+- VEP #10 (DRA devices): /veps/sig-compute/10-dra-devices/vep.md
+- Kubernetes DRA device information injection: https://github.com/kubernetes/enhancements/pull/5606
 
-### API Example: VMI with DRA SR-IOV Network
+## Open Issues
+
+1. **MAC assignment for DRA-backed network interfaces:**
+   - For the current Beta scope (binding plugins), MAC specification is outside KubeVirt's responsibility — it is part of the contract between the DRA driver and the binding plugin.
+   - A cross-driver MAC propagation mechanism may be needed for future use cases (e.g., SR-IOV with internal KubeVirt bindings).
+2. **Multiple network devices mapped to the same `ResourceClaim` / `ResourceClaimTemplate`:**
+   - Current scope focuses on one DRA network device per VM when devices map to the same RC/RCT.
+   - After [kubevirt/kubevirt#16769](https://github.com/kubevirt/kubevirt/issues/16769) is merged, support can be extended to multiple devices that reference the same RC/RCT with different `requestName` values.
+3. **`ResourceClaimTemplate` requests with [`count`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#exactdevicerequest-v1-resource-k8s-io) `> 1`:**
+   - A single request inside a `ResourceClaimTemplate` can set `count: N` to allocate multiple devices at once. This scenario has not been validated.
+   - Example with `count: 2`:
+     ```yaml
+     apiVersion: resource.k8s.io/v1
+     kind: ResourceClaimTemplate
+     metadata:
+       name: two-nics
+     spec:
+       spec:
+         devices:
+           requests:
+             - name: nics
+               deviceClassName: my-net-class
+               count: 2
+     ```
+   - The DRA driver may publish device metadata to the binding plugin sidecar; it is up to the binding plugin to handle multiple devices from a single request.
+
+
+## Appendix A: Concrete Example - Network Binding Plugin with DRA
+
+### API Example: VM with DRA Network and Binding Plugin
 
 ```yaml
 ---
-apiVersion: k8s.cni.cncf.io/v1
-kind: NetworkAttachmentDefinition
+apiVersion: kubevirt.io/v1
+kind: KubeVirt
 metadata:
-  name: sriov-nad
+  name: kubevirt
 spec:
-  config: |-
-    {
-        "cniVersion": "0.4.0",
-        "name": "sriov-nad",
-        "type": "sriov",
-        "vlan": 0,
-        "spoofchk": "on",
-        "trust": "on",
-        "vlanQoS": 0,
-        "logLevel": "info",
-        "ipam": {
-            "type": "host-local",
-            "ranges": [
-                [
-                    {
-                        "subnet": "10.0.1.0/24"
-                    }
-                ]
-            ]
-        }
-    }
+  configuration:
+    network:
+      binding:
+        my-binding-plugin:
+          sidecarImage: my-binding-plugin-sidecar:latest
+          migration: {}
 ---
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
 metadata:
-  name: sriov-claim-template
+  name: network-claim-template
 spec:
   spec:
     devices:
       requests:
-      - name: vf
+      - name: dev
         exactly:
-          deviceClassName: sriovnetwork.k8snetworkplumbingwg.io
-      config:
-      - requests: ["vf"]
-        opaque:
-          driver: sriovnetwork.k8snetworkplumbingwg.io
-          parameters:
-            apiVersion: sriovnetwork.k8snetworkplumbingwg.io/v1alpha1
-            kind: VfConfig
-            netAttachDefName: sriov-nad
-            driver: vfio-pci
-            addVhostMount: true
-
+          deviceClassName: my-device-class
 ---
 apiVersion: kubevirt.io/v1
-kind: VirtualMachineInstance
+kind: VirtualMachine
 metadata:
-  name: vmi-sriov-dra
+  name: vm-dra-binding-plugin
 spec:
-  domain:
-    devices:
-      interfaces:
-      - name: sriov-net
-        sriov: {}
-  networks:
-  - name: sriov-net
-    resourceClaim:
-      claimName: sriov-network-claim
-      requestName: vf
-  resourceClaims:
-  - name: sriov-network-claim
-    resourceClaimTemplateName: sriov-claim-template
+  template:
+    spec:
+      domain:
+        devices:
+          interfaces:
+          - name: dra-net
+            binding:
+              name: my-binding-plugin
+      networks:
+      - name: dra-net
+        resourceClaim:
+          claimName: network-claim
+          requestName: dev
+      resourceClaims:
+      - name: network-claim
+        resourceClaimTemplateName: network-claim-template
 ```
 
-The following pod is generated by `virt-controller` from the VMI above; users do not create it directly.
+The following pod is generated by `virt-controller` from the VM above; users do not create it directly.
 
 ```yaml
 ---
 apiVersion: v1
 kind: Pod
 metadata:
-  name: virt-launcher-vmi-sriov-dra
+  name: virt-launcher-vmi-dra-binding-plugin
 spec:
   containers:
   - name: compute
     image: virt-launcher
     resources:
       claims:
-      - name: sriov-network-claim
-        request: vf
+      - name: network-claim
+        request: dev
+  - name: my-binding-plugin
+    image: my-binding-plugin-sidecar:latest
+    resources:
+      claims:
+      - name: network-claim
+        request: dev
   resourceClaims:
-  - name: sriov-network-claim
-    resourceClaimTemplateName: sriov-claim-template
-status:
-  resourceClaimStatuses:
-  - name: sriov-network-claim
-    resourceClaimName: virt-launcher-vmi-sriov-dra-sriov-network-claim-abc123
+  - name: network-claim
+    resourceClaimTemplateName: network-claim-template
 ```
-
-## References
-
-- DRA: https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-- Example SR-IOV DRA driver: https://github.com/k8snetworkplumbingwg/dra-driver-sriov
-- VEP #10 (DRA devices): /veps/sig-compute/10-dra-devices/vep.md
-- Kubernetes DRA device information injection: https://github.com/kubernetes/enhancements/pull/5606
-
-## Open Issues
-
-1. **MAC assignment for DRA-backed network interfaces (post-Alpha1):**
-   - Keep MAC support as follow-up scope rather than Alpha1 core.
-   - Define the final propagation mechanism from `spec.domain.devices.interfaces[].macAddress`.
-   - Define ownership of MAC propagation metadata generation (for example, whether Virt-Controller writes it, or an alternative component/path does).
-   - If using annotation-based propagation, standardize the `kubevirt.io/dra-networks` payload shape with `claimName` / `requestName` / `mac`. (prefix subject to change, so it will be generic and not kubevirt specific)
-     example:
-     `kubevirt.io/dra-networks: '[{"claimName":"sriov-network-claim","requestName":"vf","mac":"de:ad:00:00:be:ef"}]'`
-   - Define driver-side behavior for consuming MAC requests and applying them to the target network device.
-   - Define the minimum MAC support needed to unblock non-migration, MAC based, DRA e2e tests.
-2. **Multiple network devices mapped to the same `ResourceClaim` / `ResourceClaimTemplate`:**
-   - Current scope focuses on one DRA network device per VM when devices map to the same RC/RCT.
-   - After [kubevirt/kubevirt#16769](https://github.com/kubevirt/kubevirt/issues/16769) is merged, support can be extended to multiple devices that reference the same RC/RCT with different `requestName` values.
-3. **`infoSource: multus` is not supported for DRA-backed interfaces:**
-   - For DRA-backed interfaces, `vmi.status.interfaces[].infoSource` does not report `multus-status`.
-   - User impact: consumers that may rely on `infoSource` containing `multus` to identify interface origin will not get that signal for DRA-backed interfaces.
-   - Add support for the reciprocal alternative (for example, DRA-tap based flow) according to user and product needs.
-4. **`ResourceClaimTemplate` requests with `count > 1` are not supported:**
-   - Current scope supports one allocated device per request for DRA-backed network interfaces.
-5. **Multiple matched devices are not supported:**
-   - When multiple devices match for the same request, KubeVirt fails with an error.
-   - Reference: [kubevirt/kubevirt#17028 (diff)](https://github.com/kubevirt/kubevirt/pull/17028/files#diff-0027cc61eb4150ec3e72d9bb6038bc08f5448b06d0211010de6995883126ca1aR128)
-6. **Mixed device types in the same `ResourceClaimTemplate` are not yet validated:**
-   - A `ResourceClaimTemplate` that includes mixed device types (for example, GPU and SR-IOV), with a VM that requests both, is expected to be supported.
-   - This scenario was not validated in the current scope and must be validated in follow-up work.
-   - This follow-up is important because mixed-type claims are a key DRA capability.
