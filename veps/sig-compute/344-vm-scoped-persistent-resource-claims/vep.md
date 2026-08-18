@@ -19,14 +19,15 @@
 
 This VEP introduces VM-scoped persistent ResourceClaims for Kubernetes Dynamic
 Resource Allocation (DRA). Today, KubeVirt supports DRA-provisioned devices
-(GPUs, host devices) at the VMI level, where ResourceClaims are created
-per-Pod and deleted when the Pod is removed. This means that restarting a VM
-results in a new ResourceClaim and potentially a different physical device.
+(GPUs, host devices, network devices) at the VMI level, where ResourceClaims
+are created per-Pod and deleted when the Pod is removed. This means that
+restarting a VM results in a new ResourceClaim and potentially a different
+physical device.
 
-This proposal adds a `resourceClaimTemplates` field to `VirtualMachineSpec`
-that allows the VM controller to pre-create ResourceClaims owned by the VM
-object. These claims persist across VMI restarts and are only garbage-collected
-when the VM itself is deleted, ensuring device allocation stability.
+This proposal enables ResourceClaims to be scoped to the VirtualMachine
+lifecycle instead of the VMI/Pod lifecycle. Claims persist across VMI restarts
+and are only released when the VM itself is deleted, ensuring device allocation
+stability.
 
 ## Prior Art
 
@@ -34,9 +35,7 @@ This VEP builds on the work identified in the [GSoC 2024: Persistent Device
 Claims for KubeVirt](https://github.com/kubevirt/community/issues/254) project
 proposal. That issue described the core problem — device allocations are lost
 when VM pods are recreated — and proposed using Kubernetes Dynamic Resource
-Allocation (DRA) ResourceClaims as the persistence mechanism. This VEP
-implements that vision by integrating persistent ResourceClaims into the VM
-controller, following the established `dataVolumeTemplates` pattern.
+Allocation (DRA) ResourceClaims as the persistence mechanism.
 
 ## Motivation
 
@@ -52,44 +51,42 @@ created. This causes several problems:
 2. **Device instability across reboots**: GPU passthrough users may depend on a
    specific physical device for driver compatibility, licensing, or workload
    continuity. A different GPU after a reboot can cause driver failures or
-   license revalidation. Note: for stop/start cycles, the default behavior
-   releases devices to avoid wasting resources on stopped VMs. Users who need
-   device stability across stop/start can opt in with `persistWhenStopped: true`.
+   license revalidation.
 
-3. **Allocation failures in busy clusters**: In the window between the old
+3. **Network identity loss**: DRA-managed NICs (supported since KubeVirt v1.9
+   via VEP-183) may have MAC addresses tied to DHCP reservations, firewall
+   rules, or monitoring. A different NIC after restart breaks these bindings.
+
+4. **Allocation failures in busy clusters**: In the window between the old
    claim being deleted and the new claim being created, another workload can
    claim the device. This creates a race condition where a VM restart can fail
    due to resource exhaustion, even though the device was available moments
    before.
 
-4. **Inconsistency with other VM-scoped resources**: KubeVirt already supports
-   VM-scoped DataVolumes via `dataVolumeTemplates`, which persist across VMI
-   restarts. DRA devices lack an equivalent mechanism, creating an asymmetry in
-   the resource lifecycle model.
+5. **Inconsistency with other VM-scoped resources**: KubeVirt already supports
+   VM-scoped storage resources that persist across VMI restarts. DRA devices
+   lack an equivalent mechanism, creating an asymmetry in the resource
+   lifecycle model.
 
 ## Goals
 
-- Allow users to declare ResourceClaims that are scoped to the VM lifecycle,
-  not the VMI/Pod lifecycle.
-- Ensure DRA device allocations persist across VM restarts (stop/start, reboot,
-  crash recovery).
-- Support all DRA device types (GPUs, host devices, and future DRA-managed
-  devices and DRA-backed network devices) with a single, device-agnostic
-  mechanism.
-- Follow established KubeVirt patterns (`dataVolumeTemplates`) for consistency
-  and maintainability.
-- Provide webhook validation to catch misconfigurations at admission time.
+- Allow DRA device allocations to persist across VM restarts (reboots,
+  stop/start, crash recovery).
+- Ensure the same physical device is re-attached when a VM is restarted.
+- Support all DRA device types (GPUs, host devices, DRA-backed network
+  devices) with a single, device-agnostic mechanism.
+- Allow users to control whether device allocations are released on
+  explicit stop (resource efficiency) or retained (device stability).
 
 ## Non Goals
 
-- Eager allocation (creating ResourceClaims before the VM is started). The
-  current implementation creates claims at start time, matching the
-  `dataVolumeTemplates` pattern. Eager allocation with a per-entry policy
-  (e.g., `allocationMode: Eager | Lazy`) is a potential future enhancement.
+- Eager allocation (creating ResourceClaims before the VM is started).
+  Eager allocation is a potential future enhancement.
 - Migration-aware ResourceClaim handling. Live migration with DRA devices is
   out of scope for this VEP.
-- Managing ResourceClaimTemplates themselves. Users are responsible for creating
-  the `ResourceClaimTemplate` objects that this feature references.
+- Auto-generating ResourceClaims from device declarations. That is the
+  domain of VEP-300 (managed DRA claims), which can build on this VEP's
+  lifecycle mechanisms.
 
 ## Definition of Users
 
