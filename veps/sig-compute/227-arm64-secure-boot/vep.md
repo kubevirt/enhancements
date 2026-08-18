@@ -4,7 +4,7 @@
 
 ### Target releases
 
-- This VEP targets alpha for version:
+- This VEP targets alpha for version: v1.10.0
 - This VEP targets beta for version:
 - This VEP targets GA for version:
 
@@ -12,8 +12,8 @@
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [x] (R) Alpha target version is explicitly mentioned and approved
 - [ ] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
@@ -284,18 +284,20 @@ the only difference is the architecture in the `<type>` element, which
 libvirt uses to select the correct firmware descriptor.
 
 When `arch == "aarch64"` and `secureBoot == true`:
-  - Set `UsesFirmwareAutoSelection = true` in the `EFIConfiguration`
-  - The existing auto-selection code path sets `domain.Spec.OS.Firmware`
+
+- Set `UsesFirmwareAutoSelection = true` in the `EFIConfiguration`
+- The existing auto-selection code path sets `domain.Spec.OS.Firmware`
     and `domain.Spec.OS.FirmwareInfo` with `secure-boot` and
     `enrolled-keys` features
-  - Do NOT set `BootLoader` or `NVRam` — for ARM64, libvirt uses a
+- Do NOT set `BootLoader` or `NVRam` — for ARM64, libvirt uses a
     `<varstore>` element (via the `uefi-vars` device) instead of pflash
     `<nvram>`. Note: for x86_64, VEP #241 explicitly sets `<nvram>` via
     `PathForNVram()` to preserve filename convention; this is not needed for
     ARM64 since it uses a different variable storage mechanism.
 
 When `arch == "aarch64"` and `secureBoot == false`:
-  - Continue using the existing explicit `<loader>`/`<nvram>` approach with
+
+- Continue using the existing explicit `<loader>`/`<nvram>` approach with
     AAVMF firmware (no behavior change)
 
 #### 3. Validation Webhook (`pkg/virt-api/webhooks/validating-webhook/admitters/vmi-create-admitter.go`)
@@ -491,9 +493,33 @@ No scalability impact. The change affects per-VM domain XML generation only.
   that Secure Boot is active inside the guest (e.g. via
   `mokutil --sb-state`).
 
+### Guest Image Requirements for E2E Testing
+
+E2E testing requires a guest containerdisk whose shim and GRUB are both
+properly signed for the edk2 Secure Boot trust chain. Investigation during
+the [implementation PR](https://github.com/kubevirt/kubevirt/pull/17135)
+found that:
+
+- **Fedora 40–43**: aarch64 shim is unsigned — fails UEFI db verification.
+- **CentOS Stream 10**: aarch64 shim is signed by Red Hat/CentOS keys, not
+  Microsoft keys — fails UEFI db verification against the standard edk2
+  trust store.
+- **Fedora 44**: shim is Microsoft-signed (UEFI CA 2023), but the GA
+  release shipped `grubaa64.efi` with test signatures instead of the
+  production Fedora Secure Boot CA — shim rejects GRUB.
+
+**Fedora 45** (targeted GA ~October 2026) is expected to ship aarch64
+with both shim and GRUB properly signed. However, the Fedora 45 GA target
+(~October 20, 2026) falls immediately before the
+[v1.10.0 Code Freeze](https://github.com/kubevirt/sig-release/blob/main/releases/v1.10/schedule.md)
+(October 21, 2026). Fedora releases frequently slip, so the E2E tests
+may need to use an Ubuntu-based containerdisk as a fallback if Fedora 45
+is not available in time, with a TODO to switch to Fedora 45 once it
+ships.
+
 ## Implementation History
 
-- 2026-03-20: Implementation PR opened (https://github.com/kubevirt/kubevirt/pull/17135)
+- 2026-03-20: Implementation PR opened (<https://github.com/kubevirt/kubevirt/pull/17135>)
 
 ## Graduation Requirements
 
@@ -509,6 +535,9 @@ No scalability impact. The change affects per-VM domain XML generation only.
 - [ ] Domain converter generates firmware auto-selection XML for ARM64 Secure
       Boot (reusing VEP #241 infrastructure)
 - [ ] Unit tests for all changed code paths
+- [ ] E2E test containerdisk with properly signed aarch64 shim and GRUB
+      (Fedora 45+ or Ubuntu-based fallback — see
+      [Guest Image Requirements](#guest-image-requirements-for-e2e-testing))
 - [ ] Documentation updated to mention ARM64 Secure Boot support, the feature
       gate, and host requirements (QEMU 10.0+, libvirt with varstore support,
       edk2-aarch64 firmware)
@@ -519,6 +548,15 @@ No scalability impact. The change affects per-VM domain XML generation only.
 - [ ] ARM64 CI lane with Secure Boot testing
 - [ ] E2E tests verifying Secure Boot is active inside guest
 - [ ] Verified with at least two Linux distributions as guests
+
+#### On-By-Default Readiness
+
+- [ ] CentOS Stream 10 based virt-launcher images available as default or
+      formally supported
+      ([VEP #210](https://github.com/kubevirt/enhancements/issues/210))
+- [ ] No regressions reported in ARM64 EFI boot (non-Secure-Boot) path
+- [ ] Secure Boot validation errors surface clearly to users when host
+      stack lacks required components
 
 ### GA
 
