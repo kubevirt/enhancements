@@ -242,7 +242,12 @@ effective queue counts on source and target (unchanged constraint class).
 
 ## API Examples
 
-### VM-wide cap (addresses #18012 scenario)
+### VirtualMachine
+
+**VM-wide queue cap (addresses #18012):**
+
+8 vCPU VM with 10 virtio NICs. Without a cap, each NIC receives 8 queues (80 total).
+`maxNetworkInterfaceQueues` caps every virtio NIC at 2 queues (20 total).
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -256,25 +261,32 @@ spec:
         cpu:
           cores: 8
         devices:
+          # Enables virtio multiqueue for all virtio NICs
           networkInterfaceMultiqueue: true
+          # VM-wide cap applied to every virtio interface
           maxNetworkInterfaceQueues: 2
           interfaces:
             - name: net0
               masquerade: {}
             - name: net1
               bridge: {}
-            # ... additional interfaces
+            - name: net2
+              bridge: {}
+            # ... additional interfaces (net3 through net9)
       networks:
         - name: net0
           pod: {}
         - name: net1
           multus:
             networkName: net1
+        - name: net2
+          multus:
+            networkName: net2
 ```
 
-Effective result: each NIC gets 2 queues instead of 8 (20 total vs 80 today).
+**Per-interface queue override:**
 
-### Per-interface override
+Primary NIC keeps high throughput; secondary NICs use a single queue.
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -293,9 +305,11 @@ spec:
           interfaces:
             - name: primary
               masquerade: {}
+              # Per-interface override: 8 queues for primary NIC
               queues: 8
             - name: secondary
               masquerade: {}
+              # Per-interface override: 1 queue for secondary NIC
               queues: 1
       networks:
         - name: primary
@@ -305,7 +319,12 @@ spec:
             networkName: secondary-net
 ```
 
-### Cluster administrator default (Beta)
+### KubeVirt cluster configuration (Beta)
+
+**Cluster-wide default cap:**
+
+Cluster administrators set a default upper bound. A 128 vCPU VM defaults to 16 queues
+per NIC unless the VM owner sets a lower cap.
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -316,31 +335,78 @@ metadata:
 spec:
   configuration:
     network:
+      # Cluster-wide cap on virtio network queue count
       maxInterfaceQueues: 16
 ```
 
-A 128 vCPU VM with multiqueue enabled defaults to 16 queues per NIC unless the VM
-owner sets a lower cap.
+### VirtualMachineInstance status
 
-### Status reporting
+**Reported queue count after cap applied:**
 
 ```yaml
 apiVersion: kubevirt.io/v1
 kind: VirtualMachineInstance
 metadata:
   name: windows-multi-nic
+spec:
+  domain:
+    devices:
+      networkInterfaceMultiqueue: true
+      maxNetworkInterfaceQueues: 2
+      interfaces:
+        - name: net0
+          masquerade: {}
+        - name: net1
+          bridge: {}
+  networks:
+    - name: net0
+      pod: {}
+    - name: net1
+      multus:
+        networkName: net1
 status:
   interfaces:
     - name: net0
+      # Effective queue count reported per interface
       queueCount: 2
     - name: net1
       queueCount: 2
 ```
 
-### Validation error example
+### Validation
+
+**Invalid manifest (queues exceed VM-wide cap):**
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: invalid-queue-vm
+spec:
+  template:
+    spec:
+      domain:
+        cpu:
+          cores: 8
+        devices:
+          networkInterfaceMultiqueue: true
+          maxNetworkInterfaceQueues: 16
+          interfaces:
+            - name: default
+              masquerade: {}
+              # Invalid: 32 exceeds maxNetworkInterfaceQueues (16)
+              queues: 32
+      networks:
+        - name: default
+          pod: {}
+```
+
+**Example API server validation output:**
 
 ```text
-spec.domain.devices.interfaces[3].queues: Invalid value: 32:
+Error from server (Invalid): error when creating "invalid-queue-vm.yaml":
+VirtualMachine.kubevirt.io "invalid-queue-vm" is invalid:
+spec.template.spec.domain.devices.interfaces[0].queues: Invalid value: 32:
 must be <= maxNetworkInterfaceQueues (16)
 ```
 
