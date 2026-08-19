@@ -108,7 +108,7 @@ The SCSI Controller needs to be extended to accept a list of IOThreads so that t
 </controller>
 ```
 
-The challenge here is that the SCSI controller can only assign threads to virtqueues (which currently is set to the number of vCPUs in a VMI) and not to individual disks like with virtio-blk. We can leverage the existing `IOThreadsPolicy` API to enable a multi-threaded SCSI controller that can process the virtqueues in parallel however, we cannot guarantee the same 1:1 thread to disk mapping which slightly changes how the policies will behave with SCSI disks.
+The challenge here is that the SCSI controller can only assign threads to virtqueues (which currently is set to the number of vCPUs in a VMI) and not to individual disks like with virtio-blk. We can leverage the existing `IOThreadsPolicy` API to enable a multi-threaded SCSI controller that can process the virtqueues in parallel however, we cannot guarantee the same 1:1 thread to disk mapping which slightly changes how the policies will behave with SCSI disks. For this same reasoning, the `dedicatedIOThread` disk configuration which enables the specified disk to recieve an exclusive IOThread, is not compatible with SCSI disks and is currently rejected at the VM admitter level.
 
 
 The following is an overview of how the SCSI controller would consume the following policies.
@@ -119,7 +119,7 @@ Each disk shares the same IOThread. With these proposed changes, we would assign
 ### Policy: auto
 Currently, each virtio-blk disk (excluding ones that request dedicatedIO) gets assigned a single thread in round robin order from the list of available iothreads. The total number of threads is equal to the number of disks in a VMI, capped at 2 * (# of vCPUs). Since the SCSI controller cannot assign individual threads to its disks, we would instead allocate all of the "auto threads" (threads not reserved for dedicatedIO disks) to the controller.
 
-In order to prevent this behavior from diverging for the two bus types, this implementation will also include modifications to the `auto` policy for virtio-blk so that each blk disk will now be allocated the same auto thread pool instead of a single thread. To preserve backwards compatibility, a new KubeVirt configuration will be added to act as a toggle for this virtio-blk `auto` policy behavior. To explicitly opt-in, users must have both the feature gate as well as this new toggle set.
+In order to prevent this behavior from diverging for the two bus types, this implementation will also include modifications to the `auto` policy for virtio-blk so that each blk disk will now be allocated the same auto thread pool instead of a single thread. However, to preserve backwards compatibility, a new configuration `MultiIOThreadAutoPolicy` will be added to the KubeVirt CR to act as a toggle for this new virtio-blk `auto` policy behavior. To explicitly opt-in, users must have both the feature gate as well as this new toggle enabled.
 
 ### Policy: supplementalPool
 Each disk gets access to a pool of threads. Same as with auto policy, the SCSI controller can only allocate threads to the virtqueues, so the entire supplemental thread pool would become shared with the SCSI controller.
@@ -254,8 +254,8 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 -->
 
 ### Alpha
-- [ ] Add new feature gate to guard changes for virtio-scsi
-- [ ] Add new KubeVirt configuration to toggle new `auto` policy for virtio-blk.
+- [ ] Add new `SCSIMultiIOThread` feature gate to guard changes for virtio-scsi
+- [ ] Add new KubeVirt configuration `MultiIOThreadAutoPolicy` to toggle new `auto` policy behavior for virtio-blk.
 - [ ] Updates to virtio-scsi controller
 - [ ] Updates to `auto` policy behavior for virto-blk
 
@@ -263,5 +263,5 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 - [ ] Successful performance testing
 
 ### GA
-- [ ] Feature gate is removed
+- [ ] Feature gate is graduated
 - [ ] Replace feature gate check to instead evaluate KubeVirt configuration field to allow for users to toggle the new `auto` thread policy behavior
