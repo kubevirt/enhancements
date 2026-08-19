@@ -22,10 +22,8 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 KubeVirt can observe several different ways in which a guest or its domain stops:
 shutdown initiated from inside the guest, KubeVirt/API requested shutdown,
 hypervisor-side stop, and guest crash/panic. Today these cases are mostly
-reflected through generic VMI phase and readiness condition. For example, a guest
-shutdown can eventually appear as `phase: Succeeded` with
-`Ready=False, reason=GuestNotRunning`, while other stop paths may surface as
-generic failure, pod termination, or Kubernetes events.
+reflected through generic VMI phase and readiness condition, while other stop paths
+may surface as generic failure, pod termination, or Kubernetes events.
 
 This proposal introduces a normalized guest termination state in the KubeVirt API.
 The state records the observed reason, message, and timestamp for a terminated
@@ -33,9 +31,6 @@ guest/domain lifecycle. A VM-level copy also records the source VMI UID so the
 reason remains meaningful after the VMI object is deleted or replaced. It is
 intended as a durable, machine-readable source of truth for users and
 higher-level controllers that need to understand why a VM stopped.
-
-The public API is hypervisor-agnostic. Current libvirt lifecycle events are used
-only as one implementation source for populating the normalized reasons.
 
 ## Motivation
 
@@ -73,12 +68,8 @@ termination reason API:
   - host/hypervisor requested shutdown
   - host/hypervisor observed unexpected stop/failure
   - guest crash/panic
-- Keep the public API independent from libvirt event names.
-- Preserve an observed termination reason across later low-signal terminal
-  domain notifications in the same domain lifecycle.
 - Emit a Kubernetes event when a guest termination state is observed.
 - Expose metrics for observed guest termination reasons.
-- Guard the initial implementation behind a feature gate.
 
 ## Non Goals
 
@@ -89,7 +80,6 @@ termination reason API:
 - This proposal does not guarantee attribution for node crashes where the
   virt-launcher process and hypervisor event stream are lost before an event can
   be observed.
-- This proposal does not expose libvirt event names as KubeVirt API values.
 
 ## Definition of Users
 
@@ -375,13 +365,6 @@ A condition is useful for current state, but less suitable for durable historica
 state. It also creates awkward behavior across VM restarts: a `True` condition can
 look current even when it describes a previous VMI lifecycle. A structured status
 field with source `vmiUID` is clearer for "last observed termination".
-
-### Store the reason only on the VM
-
-The VM is the best user-facing place after the VMI is deleted, but the VMI is the
-natural authoritative object for a specific domain lifecycle. Keeping both fields
-allows controllers to reason about the current VMI lifecycle while still
-preserving a durable VM-level copy.
 
 ### Use only Kubernetes events or metrics
 
