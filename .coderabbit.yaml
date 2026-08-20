@@ -16,4 +16,5 @@ knowledge_base:
     filePatterns:
       - README.md
       - veps/NNNN-vep-template/vep.md
+      - docs/vep-writing-guide.md
       - docs/feature-lifecycle.md
