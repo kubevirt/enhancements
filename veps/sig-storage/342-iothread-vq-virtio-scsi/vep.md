@@ -51,7 +51,7 @@ The desired outcome
 -->
 
 * Leverage existing `IOThreadsPolicies` API (shared, auto, supplementalPool), to expose multiple IOThreads for virtio-scsi devices.
-* Users should be able to select any IOThread policy, and the resulting behavior should be consistent regardless of whether being applied for virtio-scsi or virio-blk.
+* Users should be able to select any IOThread policy, and the resulting behavior should be consistent regardless of whether being applied for virtio-scsi or virtio-blk.
 * Users should be able to opt-in to new functionality via a feature gate.
 * Performance testing should be completed as a part of this VEP to verify that virtio-scsi disks benefit from the inclusion of iothread-vq-mapping, similar to what was seen for virtio-blk.
 
@@ -108,7 +108,7 @@ The SCSI Controller needs to be extended to accept a list of IOThreads so that t
 </controller>
 ```
 
-The challenge here is that the SCSI controller can only assign threads to virtqueues (which currently is set to the number of vCPUs in a VMI) and not to individual disks like with virtio-blk. We can leverage the existing `IOThreadsPolicy` API to enable a multi-threaded SCSI controller that can process the virtqueues in parallel however, we cannot guarantee the same 1:1 thread to disk mapping which slightly changes how the policies will behave with SCSI disks. For this same reasoning, the `dedicatedIOThread` disk configuration which enables the specified disk to recieve an exclusive IOThread, is not compatible with SCSI disks and is currently rejected at the VM admitter level.
+The challenge here is that the SCSI controller can only assign threads to virtqueues (which currently is set to the number of vCPUs in a VMI) and not to individual disks like with virtio-blk. We can leverage the existing `IOThreadsPolicy` API to enable a multi-threaded SCSI controller that can process the virtqueues in parallel however, we cannot guarantee the same 1:1 thread to disk mapping which slightly changes how the policies will behave with SCSI disks. For this same reasoning, the `dedicatedIOThread` disk configuration which enables the specified disk to receive an exclusive IOThread, is not compatible with SCSI disks and is currently rejected at the VM admitter level.
 
 
 The following is an overview of how the SCSI controller would consume the following policies.
@@ -117,14 +117,16 @@ The following is an overview of how the SCSI controller would consume the follow
 Each disk shares the same IOThread. With these proposed changes, we would assign this same thread to be also shared by the controller.
 
 ### Policy: auto
-Currently, each virtio-blk disk (excluding ones that request dedicatedIO) gets assigned a single thread in round robin order from the list of available iothreads. The total number of threads is equal to the number of disks in a VMI, capped at 2 * (# of vCPUs). Since the SCSI controller cannot assign individual threads to its disks, we would instead allocate all of the "auto threads" (threads not reserved for dedicatedIO disks) to the controller.
+Currently, each virtio-blk disk (excluding ones that request dedicatedIO) gets assigned a single thread in round robin order from the list of available iothreads. The total number of threads is equal to the number of disks in a VMI, capped at 2 * (# of vCPUs). Since the SCSI controller cannot assign individual threads to its disks, we would instead allocate a pool of these "auto threads" (threads not reserved for dedicatedIO disks) to the controller. 
 
-In order to prevent this behavior from diverging for the two bus types, this implementation will also include modifications to the `auto` policy for virtio-blk so that each blk disk will now be allocated the same auto thread pool instead of a single thread. However, to preserve backwards compatibility, a new configuration `MultiIOThreadAutoPolicy` will be added to the KubeVirt CR to act as a toggle for this new virtio-blk `auto` policy behavior. To explicitly opt-in, users must have both the feature gate as well as this new toggle enabled.
+In order to prevent this multiIOThread behavior from diverging for the two bus types, this implementation will also include modifications to the `auto` policy for virtio-blk so that each blk disk will now also be allocated the same auto thread pool that the SCSI controller would receive, instead of a single thread. However, to preserve backwards compatibility, a new configuration `MultiIOThreadAutoPolicy` will be added to the KubeVirt CR to act as a toggle for this new virtio-blk `auto` policy behavior. To explicitly opt-in, users must have both the feature gate as well as this new toggle enabled.
+
+A [performance analysis](https://developers.redhat.com/blog/2025/06/23/feature-introduction-multiple-iothreads-openshift-virtualization#feature_details) was completed when multiIOThread capabilities were introduced for virtio-blk, and the study revealed that a thread pool size of 4 "can provide very significant performance improvements. In some cases up to 8 or 16 threads could provide slightly higher performance for some very fast storage environments." However, it was also found that adding more threads beyond this range did not yield better results and could potentially have a negative impact. For this reasoning, we will impose a thread pool size maximum of 8 for VMs using this auto policy. Users who wish to override this maximum can opt for the `supplementalPool` policy where an explicit pool size can be set.
 
 ### Policy: supplementalPool
 Each disk gets access to a pool of threads. Same as with auto policy, the SCSI controller can only allocate threads to the virtqueues, so the entire supplemental thread pool would become shared with the SCSI controller.
 
-Note: the SCSI controller will create and manage virtqueues equal to the number of vCPUs for a given VMI. The same is also true for virtio-blk disks. For `auto` and `supplementalPool` policies, if the number of threads passed exceeds the number of virtqueues, we will take the `min(totalThreads, vcpus)` as to not allocate more threads than the driver needs.
+Note: the SCSI controller will create and manage virtqueues equal to the number of vCPUs for a given VMI. The same is also true for virtio-blk disks. When the feature gate is enabled, if the size of the iothread pool exceeds the number of virtqueues, we will take the `min(totalThreads, vcpus)` as to not allocate more threads than the driver needs.
 
 
 ## API Examples
@@ -215,7 +217,7 @@ The feature is additive and will be behind a feature gate. On upgrade, the exist
 
 On rollback, disabling the feature gate reverts the ability to perform iothread-vq-mapping for virtio-scsi and will fallback to using a single threaded SCSI controller. This will also revert the `auto` policy behavior to only assign a single round-robin thread.
 
-Once this feature is GA and on by default, the new KubeVirt CR configuration will remain to allow users toggle off the new multi-threaded `auto` policy in favour of preserving the single thread legacy behavior.
+Once this feature is GA and on by default, the new KubeVirt CR configuration will remain to allow users to toggle off the new multi-threaded `auto` policy in favour of preserving the single thread legacy behavior.
 
 
 ## Functional Testing Approach
@@ -257,7 +259,7 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 - [ ] Add new `SCSIMultiIOThread` feature gate to guard changes for virtio-scsi
 - [ ] Add new KubeVirt configuration `MultiIOThreadAutoPolicy` to toggle new `auto` policy behavior for virtio-blk.
 - [ ] Updates to virtio-scsi controller
-- [ ] Updates to `auto` policy behavior for virto-blk
+- [ ] Updates to `auto` policy behavior for virtio-blk
 
 ### Beta
 - [ ] Successful performance testing
