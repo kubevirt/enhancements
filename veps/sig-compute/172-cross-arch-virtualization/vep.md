@@ -76,6 +76,9 @@ Cross-architecture emulation would enable:
 - Set VMI conditions that distinguish between hardware-accelerated and
   software-emulated cross-architecture execution
 - Maintain backward compatibility with existing emulation behavior
+- Allow cluster administrators and users to configure a maximum emulation tier
+  via `emulationPolicy`, so that emulation remains explicitly opt-in and workloads
+  are never silently placed on a slower emulation tier than intended
 
 ## Non Goals
 
@@ -121,6 +124,16 @@ This feature is intended for:
    distinguish between hardware-accelerated and software-emulated
    cross-architecture VMs so I can monitor my cluster's performance
    characteristics.
+
+7. As a cluster administrator, I want to set a cluster-wide policy that
+   cross-architecture VMs **must** use hardware acceleration, so that no VM
+   silently falls back to slow software emulation without my knowledge.
+
+8. As a user, I do not want my VM to use emulation at all, since I need maximum
+   performance.
+
+9. As a user, I want to test my new app on a different architecture, for which I
+   need software emulation, even if the cluster policy is set to hardware-only.
 
 ## Repos
 
@@ -552,25 +565,75 @@ scenarios.
 
 The feature gate behavior is as follows:
 
-| Feature Gate Enabled | useEmulation | Host Arch | Guest Arch | KVM Cross-Arch | Result |
-|---------------------|--------------|-----------|------------|----------------|--------|
-| No | false | amd64 | amd64 | N/A | Native KVM execution |
-| No | true | amd64 | amd64 | No | Same-arch emulation (existing behavior) |
-| No | false | amd64 | arm64 | N/A | **ERROR** - cross-arch not allowed |
-| Yes | false | amd64 | arm64 | No | Cross-arch software emulation (TCG) |
-| Yes | false | s390x | arm64 | Yes | Cross-arch KVM-accelerated virtualization (SAE) |
-| Yes | false | s390x | arm64 | No | Cross-arch software emulation (TCG fallback) |
-| Yes | false | amd64 | amd64 | N/A | Native KVM execution |
-| Yes | true | amd64 | amd64 | No | Same-arch emulation (existing behavior) |
+| Feature Gate Enabled | useEmulation | emulationPolicy | Host Arch | Guest Arch | KVM Cross-Arch | Result |
+|---------------------|--------------|-----------------|-----------|------------|----------------|--------|
+| No | false | — | amd64 | amd64 | N/A | Native KVM execution |
+| No | true | — | amd64 | amd64 | No | Same-arch emulation (existing behavior) |
+| No | false | — | amd64 | arm64 | N/A | **ERROR** - cross-arch not allowed |
+| Yes | false | None (default) | amd64 | arm64 | No | **ERROR** - emulation not permitted |
+| Yes | false | Software | amd64 | arm64 | No | Cross-arch software emulation (TCG) |
+| Yes | false | Hardware | amd64 | arm64 | No | **ERROR** - no hardware cross-arch KVM available |
+| Yes | false | Hardware | s390x | arm64 | Yes | Cross-arch KVM-accelerated virtualization (SAE) |
+| Yes | false | Software | s390x | arm64 | Yes | Cross-arch KVM-accelerated virtualization (SAE, preferred) |
+| Yes | false | Software | s390x | arm64 | No | Cross-arch software emulation (TCG fallback) |
+| Yes | false | None (default) | amd64 | amd64 | N/A | Native KVM execution |
+| Yes | true | — | amd64 | amd64 | No | Same-arch emulation (existing behavior) |
 
 **Key Points**:
 
 - The feature gate alone is sufficient for cross-arch emulation — `useEmulation` is **not** required
 - `useEmulation` only controls same-arch emulation when KVM is unavailable
+- `emulationPolicy` controls the **maximum fallback depth** for cross-arch emulation and defaults to `None` (native KVM only)
 - Native KVM VMs and cross-arch emulated VMs can coexist on the same cluster
 - When the feature gate is disabled, attempting to run a cross-arch VM returns an error at domain conversion time
-- When the feature gate is enabled, the scheduler **prefers** nodes matching the guest architecture (native execution with KVM) and only falls back to cross-arch emulation when no matching nodes are available
-- When hardware acceleration is available, it is automatically preferred over software emulation
+- When the feature gate is enabled but `emulationPolicy` is `None` (default), cross-arch VMs are rejected — emulation must be explicitly opted in
+- When hardware acceleration is available, it is automatically preferred over software emulation (when the policy permits both)
+
+### Emulation Policy
+
+To ensure that software emulation remains an explicit opt-in feature and is
+never silently imposed on a workload, a new `emulationPolicy` field is
+introduced in both the KubeVirt CR configuration and the VM/VMI spec.
+
+The field controls **which virtualization backends are permitted** for a
+cross-architecture VM. The available tiers, from most restricted to most
+permissive, are:
+
+```
+None (native KVM only)  <  Hardware (KVM only, no TCG)  <  Software (all tiers)
+```
+
+Each value defines the **maximum fallback depth** allowed:
+
+- **`None`** (default) — no emulation permitted. Only native KVM is allowed.
+  A cross-arch VM with this setting will not start via any form of emulation —
+  it must land on a node that natively runs the guest architecture. This is the
+  safe default: enabling the feature gate does not automatically cause VMs to
+  run under emulation unless explicitly opted in.
+- **`Hardware`** — hardware cross-arch KVM is permitted, but TCG software
+  emulation is not. The VM may use native KVM or hardware cross-arch KVM.
+  It will **not** fall back to software emulation and fails to start on nodes
+  where only software emulation is available.
+  > **Alpha restriction**: `Hardware` tier is not yet implemented. Setting it
+  > will cause the validation webhook to reject the change with:
+  > `Error: Hardware emulation is not yet implemented`.
+- **`Software`** — the full fallback chain is permitted: native KVM > hardware
+  cross-arch KVM > software emulation (TCG). KubeVirt selects the best
+  available tier automatically. Also used as a per-VM override to loosen a
+  cluster-wide `Hardware` policy.
+
+#### Precedence Resolution
+
+The effective emulation policy is resolved at domain conversion time in
+`KvmDomainConfigurator` using the following precedence (highest first):
+
+1. **Per-VM** — `vmi.Spec.EmulationPolicy` (if non-empty)
+2. **Global** — `clusterConfig.GetEmulationPolicy()` (if non-empty)
+3. **Default** — `None` (no emulation; native KVM only)
+
+This means a user can set `emulationPolicy: Software` on a VM to loosen a
+cluster-wide `Hardware` policy for that specific workload, but cannot exceed
+the cluster-wide `Software` ceiling.
 
 ### VMI Conditions
 
@@ -694,8 +757,55 @@ Without this adjustment, `NodeSelectorRenderer` sets `kubernetes.io/arch` as a
 which would prevent scheduling on nodes with a different architecture —
 defeating the purpose of cross-architecture emulation.
 
-The implementation uses a combination of hard constraints and soft
-preferences:
+The `emulationPolicy` field determines which scheduling case applies:
+
+- **`None`** (default): The hard `kubernetes.io/arch` node selector is
+  preserved. The pod can only schedule on nodes natively running the guest
+  architecture. Emulation nodes are never selected.
+- **`Hardware`**: The hard `kubernetes.io/arch` node selector is removed.
+  A `requiredDuringSchedulingIgnoredDuringExecution` affinity permits nodes
+  that either natively match the guest architecture **or** carry the
+  `kubevirt.io/cross-arch-kvm-<arch>` label. Software-emulation-only nodes are
+  excluded. Preferred affinities order native (weight 100) over hardware
+  cross-arch (weight 50).
+- **`Software`**: The hard `kubernetes.io/arch` node selector is replaced by a
+  hard `kubevirt.io/vm-arch-<guest-arch>` node selector (permits native,
+  hardware cross-arch, and software nodes). Preferred affinities order native
+  (weight 100) > hardware cross-arch (weight 50) > software nodes.
+
+For the **`Hardware`** case, the resulting pod affinity looks like:
+
+```yaml
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values:
+            - arm64
+        - matchExpressions:
+          - key: kubevirt.io/cross-arch-kvm-arm64
+            operator: Exists
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values:
+            - arm64
+      - weight: 50
+        preference:
+          matchExpressions:
+          - key: kubevirt.io/cross-arch-kvm-arm64
+            operator: Exists
+```
+
+For the **`Software`** case, the implementation uses a combination of hard
+constraints and soft preferences:
 
 1. **Remove the hard `kubernetes.io/arch` node selector** so the pod is not
    restricted to nodes matching the guest architecture
@@ -717,12 +827,15 @@ Pending rather than CrashLooping.
 
 **`pkg/virt-controller/services/template.go`** (`newNodeSelectorRenderer`):
 
-When the feature gate is enabled, the `kubernetes.io/arch` node selector is
-**replaced** with a `kubevirt.io/vm-arch-<guest-arch>` node selector:
+When the effective `emulationPolicy` permits emulation (`Hardware` or `Software`),
+the hard `kubernetes.io/arch` node selector is removed. For `Software` policy, a
+`kubevirt.io/vm-arch-<guest-arch>` hard selector replaces it:
 
 ```go
 architecture := vmi.Spec.Architecture
-if t.clusterConfig.CrossArchitectureVirtualizationEnabled() {
+effectivePolicy := resolveEmulationPolicy(vmi, t.clusterConfig)
+if t.clusterConfig.CrossArchitectureVirtualizationEnabled() &&
+    effectivePolicy != emulationPolicyNone {
     architecture = ""
 }
 
@@ -745,10 +858,11 @@ if t.clusterConfig.CrossArchitectureVirtualizationEnabled() && vmi.Spec.Architec
 
 **`pkg/virt-controller/services/template.go`** (preferred affinities):
 
-Preferred node affinities are added after the pod is built:
+Preferred node affinities are added for both `Hardware` and `Software` policies:
 
 ```go
-if t.clusterConfig.CrossArchitectureVirtualizationEnabled() {
+if t.clusterConfig.CrossArchitectureVirtualizationEnabled() &&
+    effectivePolicy != emulationPolicyNone {
     // Weight 100: strongly prefer native architecture nodes
     setPreferredArchitectureAffinity(vmi.Spec.Architecture, &pod, 100)
 
@@ -914,7 +1028,7 @@ and cross-arch emulation is handled within the `KvmDomainConfigurator`.
 
 ## API Examples
 
-### Enable Cluster-Wide Cross-Architecture Emulation
+### Enable Cluster-Wide Cross-Architecture Emulation (Software Policy)
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -927,11 +1041,67 @@ spec:
     developerConfiguration:
       featureGates:
       - CrossArchitectureVirtualization
+    emulationPolicy: Software
 ```
 
 **Note**: `useEmulation` is **not** required for cross-architecture emulation.
 The feature gate alone is sufficient. `useEmulation` only controls same-arch
 emulation when KVM is unavailable and can remain disabled (the default).
+
+**Note on default policy**: Without an explicit `emulationPolicy`, the default
+is `None` — enabling the feature gate alone does **not** permit cross-arch
+emulation. Set `emulationPolicy: Software` to allow software emulation, or
+`emulationPolicy: Hardware` to allow hardware-accelerated emulation only
+(requires Beta).
+
+### Enforce Hardware-Only Emulation Cluster-Wide
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: KubeVirt
+metadata:
+  name: kubevirt
+  namespace: kubevirt
+spec:
+  configuration:
+    developerConfiguration:
+      featureGates:
+      - CrossArchitectureVirtualization
+    emulationPolicy: Hardware
+```
+
+This policy ensures no VM silently falls back to slow software emulation.
+VMs that land on a node without hardware cross-arch KVM support will fail to
+start rather than running under TCG.
+
+### Override Emulation Policy Per-VM
+
+A VM can override the cluster-wide emulation policy at the VM/VMI spec level.
+The following example loosens a cluster-wide `Hardware` policy for a specific
+development VM, allowing it to also use software emulation:
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: arm64-dev-vm
+spec:
+  architecture: arm64
+  emulationPolicy: Software  # Allows software emulation, overrides cluster policy
+  runStrategy: Always
+  template:
+    spec:
+      domain:
+        machine:
+          type: virt
+        resources:
+          requests:
+            memory: 1Gi
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: quay.io/containerdisks/fedora:40-aarch64
+```
 
 ### Create an ARM64 VMI (runs on any architecture when feature enabled)
 
@@ -1039,6 +1209,20 @@ status:
    unnecessary configuration complexity; the emulation mode is an
    implementation detail that can be auto-detected at runtime
 
+### Alternatives for Emulation Policy
+
+6. **Binary enabled/disabled field** — A boolean `allowEmulation` flag was
+   considered but rejected because it cannot express the distinction between
+   hardware-only and full software fallback; the three-tier model maps
+   naturally to the available hardware capabilities.
+7. **Global-only configuration** — Providing only a cluster-wide
+   `emulationPolicy` without a per-VM override was considered, but it prevents
+   per-VM flexibility (e.g., allowing a dev VM to use software emulation on a
+   cluster that enforces hardware-only for production VMs).
+8. **VM-level-only configuration** — Providing only a per-VM field without a
+   global default was considered, but it places the burden on every VM
+   definition and offers no cluster-wide safety floor for administrators.
+
 ## Scalability
 
 ### Performance Implications
@@ -1070,9 +1254,11 @@ characteristics are TBD.
 
 ### Update Scenarios
 
-- **Enabling feature gate**: Existing VMs on matching architectures are unaffected; new cross-arch VMs can be created
+- **Enabling feature gate**: Existing VMs on matching architectures are unaffected; new cross-arch VMs can be created (subject to `emulationPolicy`)
 - **Disabling feature gate**: Existing running cross-arch VMs continue running; new cross-arch VMs fail to start
 - **Changing useEmulation**: Only affects same-arch emulation; cross-arch VMs are unaffected
+- **Changing emulationPolicy**: Affects only new VMs; existing running VMs are unaffected until they are rescheduled
+- **Downgrading to a previous version**: The `emulationPolicy` field is ignored; existing VMs continue unaffected, new VMs cannot use the policy
 - **Kernel upgrade adding hardware cross-arch support**: virt-handler detects
   new capabilities automatically via libvirt; new node labels are applied; new
   VMs benefit without cluster reconfiguration
@@ -1103,6 +1289,12 @@ characteristics are TBD.
 6. **Configurator decision logic**: Test the three-way decision (hardware →
    software → error) with various capability combinations
 7. **Node label generation**: Test `kvmSupportedGuestArchitectures()` parsing
+8. **Emulation policy precedence**: Test per-VM override of global policy, and
+   global policy override of the `None` default
+9. **Emulation policy enforcement**: Test that `KvmDomainConfigurator` rejects
+   configurations that violate the effective policy (e.g., TCG when policy is `Hardware`)
+10. **Webhook validation**: Test that setting `emulationPolicy: Hardware` at
+    Alpha returns the expected rejection error
 
 ### Integration Tests
 
@@ -1126,6 +1318,7 @@ characteristics are TBD.
 2. **Rejection scenarios**:
    - Verify cross-arch VMI rejected when feature gate disabled
    - Verify error when QEMU binary missing
+   - Verify cross-arch VMI rejected when `emulationPolicy` is `None` (default)
 
 3. **VMI conditions**: Verify correct condition type (`SoftwareEmulation` vs
    `HardwareEmulation`) is set based on emulation mode
@@ -1137,7 +1330,13 @@ characteristics are TBD.
    - Node scheduling: verify preference ordering (native > hardware
      cross-arch > software cross-arch)
 
-5. **Performance baseline** (informational):
+5. **Emulation policy scheduling** (emulationPolicy e2e):
+   - Verify pod affinities for `None` policy prevent scheduling on emulation nodes
+   - Verify pod affinities for `Software` policy allow scheduling on software-emulation nodes
+   - Verify pod affinities for `Hardware` policy allow scheduling on hardware cross-arch nodes but not software-only nodes
+   - Verify per-VM `Software` policy overrides cluster `Hardware` policy
+
+6. **Performance baseline** (informational):
    - Measure boot time for native vs emulated
    - Document expected performance characteristics
 
@@ -1176,6 +1375,17 @@ characteristics are TBD.
    XML for cross-arch guests
 4. Documentation for manual QEMU binary installation
 
+### Phase 2.5: Emulation Policy (Alpha — v1.10)
+
+1. Introduce `emulationPolicy` field (`None` / `Hardware` / `Software`) in
+   KubeVirt CR configuration and VM/VMI spec
+2. Implement precedence resolution in `KvmDomainConfigurator` (per-VM →
+   global → default `None`)
+3. Update pod scheduling logic in `NodeSelectorRenderer` to respect the three
+   scheduling cases (`None` / `Hardware` / `Software`)
+4. Add validation webhook: reject `Hardware` policy at Alpha with clear error
+5. Unit tests for policy precedence and enforcement
+
 ### Phase 3: s390x Software Emulation and Hardware Acceleration (Beta)
 
 1. Add s390x guest support on AMD64/ARM64 hosts (software emulation)
@@ -1184,12 +1394,14 @@ characteristics are TBD.
    `kubevirt.io/cross-arch-kvm-<arch>` node labels
 4. Extend `KvmDomainConfigurator` with `kvmSupportedGuestArchitectures`
    to prefer hardware acceleration (KVM) over software emulation (TCG)
-5. Add three-tier node scheduling preference (native > hardware cross-arch >
-   software cross-arch)
-6. Validate hardware acceleration path on SAE-capable hardware (if available)
-7. CPU model and device model refinement for hardware acceleration
-8. Performance benchmarking (SAE vs native vs TCG)
-9. Comprehensive test matrix for all combinations
+5. Implement `Hardware` emulation policy tier (enable it after hardware KVM
+   detection is available)
+6. Add three-tier node scheduling preference (native > hardware cross-arch >
+   software cross-arch) validated end-to-end with `emulationPolicy`
+7. Validate hardware acceleration path on SAE-capable hardware (if available)
+8. CPU model and device model refinement for hardware acceleration
+9. Performance benchmarking (SAE vs native vs TCG)
+10. Comprehensive test matrix for all combinations
 
 ### Phase 4: Production Readiness (GA)
 
@@ -1234,6 +1446,7 @@ characteristics are TBD.
   `HardwareEmulation` VMI condition, and SAE background.
 - 2026-08-26: Update e2e test strategy and drop binary distribution requirement
   for software emulation.
+- 2026-08-26: Added `emulationPolicy` field for configuration
 
 ## Graduation Requirements
 
@@ -1286,18 +1499,20 @@ characteristics are TBD.
 - [ ] `HardwareEmulation` VMI condition set when hardware cross-arch
       emulation is active
 - [ ] Three-tier node scheduling preference (native > hardware cross-arch >
-      software cross-arch) validated end-to-end
+      software cross-arch) validated end-to-end with all `emulationPolicy` values
 - [ ] CPU model and graphics device handling refined for hardware
       acceleration
-- [ ]  Comprehensive test coverage across architecture pairs for software emulation (E2E tests)
+- [ ] Comprehensive test coverage across architecture pairs for software emulation (E2E tests)
+- [ ] E2E tests for `Software` and `None` emulationPolicy pod affinities
 - [ ] Performance benchmarking and documented performance characteristics
 - [ ] Hardware-accelerated cross-architecture virtualization validated for
       production use (software emulation remains development/testing only)
 - [ ] At least one release in Alpha with no major issues
 - [ ] User feedback incorporated from Alpha release
-- [ ] Consider per-VM emulation policy (e.g., a VMI-level field to disable
-      cross-arch emulation, prefer hardware acceleration, or require hardware
-      acceleration for specific workloads)
+- [ ] Emulation documentation updated (user-guide)
+- [ ] `emulationPolicy` field introduced and scheduling updated
+- [ ] Unit tests for policy precedence, enforcement, and webhook validation
+- [ ] `Hardware` emulation policy tier enabled
 
 ### GA
 
