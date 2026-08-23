@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.7
-- This VEP targets beta for version: v1.9
+- This VEP targets beta for version: v1.10
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
