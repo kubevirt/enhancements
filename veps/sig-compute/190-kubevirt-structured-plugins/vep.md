@@ -40,6 +40,8 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
   - [Admission Policies and Webhooks](#admission-policies-and-webhooks)
     - [Admission options](#admission-options)
     - [API example:](#api-example)
+  - [Launcher Image Selection](#launcher-image-selection)
+    - [Launcher image API example](#launcher-image-api-example)
   - [Plugin metadata](#plugin-metadata)
 - [API Examples (full version)](#api-examples-full-version)
 - [Alternatives](#alternatives)
@@ -131,6 +133,8 @@ For example, this includes:
   - A niche specialized behavior is needed that does not make sense upstream.
   - Too complex / dangerous / for most use-cases.
   - No expertise in this subject among the community members (no one to maintain it).
+
+- As a KubeVirt plugin author delivering specialised hardware support (e.g. GPU passthrough requiring a virt-launcher built against an alternative libvirt or QEMU), I want to declare an alternative launcher image in my Plugin CR so that virt-controller automatically selects it for matching VMIs — without deploying and maintaining a separate MutatingWebhookConfiguration, TLS certificates, or webhook service.
 
 ## Repos
 
@@ -294,6 +298,38 @@ spec:
     - name: "my-validating-webhook-1"
 ```
 
+### Launcher Image Selection
+
+Some out-of-tree features require a different virt-launcher image — one built against a different libvirt, QEMU, or kernel ABI — rather than modifying the domain XML or operating at the node level. The canonical example is IOMMU-based GPU passthrough, which requires a virt-launcher with IOMMUFD-capable libvirt/QEMU. Today this is commonly implemented via an external `MutatingWebhookConfiguration` that intercepts pod creation in virt-controller and swaps the container image. This approach requires deploying and maintaining a webhook service, TLS certificates, and admission infrastructure separately from the plugin itself.
+
+This proposal extends the Plugin CRD with `spec.launcherImage`. When virt-controller is about to render a virt-launcher pod for a VMI, it consults all Plugin CRs. For each Plugin with a non-empty `spec.launcherImage`, it evaluates the Plugin's `spec.condition` CEL expression against the VMI. The first matching Plugin's image is used instead of the default. Plugins are evaluated in alphabetical order by name, consistent with the ordering applied to domain hooks.
+
+This is **not a hook point** in the traditional sense — there is no outbound call, no socket, no gRPC, and no external service. virt-controller evaluates the CEL condition internally against the VMI object it already holds, and the result is a string. The full implementation consists of:
+
+1. Adding `spec.launcherImage` to `PluginSpec`.
+2. Initialising a CEL evaluator in virt-controller (reusing `pkg/plugins/cel.Evaluator`, which already declares `vmi` as a typed variable).
+3. Before rendering the compute container image in `RenderLaunchManifest`, iterating matching Plugin CRs and substituting the launcher image if a condition fires.
+
+The `spec.condition` field already exists on `PluginSpec` and is evaluated with the full VMI in scope. `spec.launcherImage` is simply the action taken when that condition matches, requiring no new CEL environment design and no new IPC mechanism.
+
+If multiple Plugins with `spec.launcherImage` match the same VMI, the first match in alphabetical plugin name order wins. Operators are responsible for ensuring only one Plugin with `spec.launcherImage` matches any given VMI.
+
+#### Launcher image API example
+
+```yaml
+apiVersion: plugin.kubevirt.io/v1alpha1
+kind: Plugin
+metadata:
+  name: aie-launcher
+spec:
+  condition: >
+    vmi.spec.domain.devices.gpus.exists(g, g.deviceName.startsWith('nvidia.com/'))
+  launcherImage: quay.io/kubevirt/virt-launcher-aie:v1.9.0
+  failureStrategy: Fail
+```
+
+No admission webhook, no TLS, no DaemonSet. The Plugin CR is the complete deployment artifact for launcher image selection.
+
 ### Plugin metadata
 
 Each plugin would have to provide some basic metadata about itself.
@@ -418,6 +454,10 @@ override each other's data.
 Only if a plugin is dependent on another plugin, both can edit the same fields, because now a clear ordering
 is defined between them. This way one plugin can do some work that another plugin would finalize.
 
+### Conflict detection for launcher image selection
+
+When multiple Plugins with `spec.launcherImage` match the same VMI, the first-match-wins rule applies silently today. A future validating admission policy could reject Plugin CRs whose condition overlaps with an already-installed Plugin, surfacing ambiguous launcher image selection at admission time rather than at runtime.
+
 ### Split to more parte CRDs
 
 Create further orthogonality and allow reuse by having a `DomainHook` CR, a `NodeHook` CR and a `Plugin` CR which can
@@ -478,6 +518,8 @@ Alpha
 - [ ] Node hooks are functional for at least PreVMStart and PreVMStop hook points.
 - [ ] failureStrategy (Fail/Ignore) and timeout are respected.
 - [ ] Basic functional tests covering domain hooks and node hooks.
+- [ ] `spec.launcherImage` is supported: virt-controller evaluates Plugin CEL conditions against the VMI at pod render time and substitutes the launcher image for the first matching Plugin (alphabetical order).
+- [ ] Functional test: VMI matching a Plugin condition uses the alternative launcher image; VMI without a match uses the default.
 
 ### Beta
 
