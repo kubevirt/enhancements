@@ -6,6 +6,7 @@
 
 - This VEP targets alpha for version: v1.8
 - This VEP targets beta for version: v1.9
+- This VEP targets the DRA metadata topology and PCIe root grouping extension for version: v1.10
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
