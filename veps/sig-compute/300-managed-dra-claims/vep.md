@@ -471,10 +471,18 @@ the ResourceClaim already exists with the correct owner reference, the
 framework converges it to the provisioner's desired spec.
 
 **RBAC:** the built-in provisioner controller needs `create`, `get`,
-`list`, `watch`, `update`, and `delete` permissions on `resourceclaims`
-in the `resource.k8s.io` API group, plus `patch` permission on
-`virtualmachineinstances/status`. Third-party provisioner controllers
-need equivalent permissions in their own RBAC configuration.
+`list`, `watch`, and `update` permissions on `resourceclaims` in the
+`resource.k8s.io` API group. The `update` verb covers adding and
+releasing the protection finalizer; the controller does not need
+`delete`, because owner-reference garbage collection removes a claim once
+its VMI is gone and the finalizer has been released. It also needs `get`,
+`list`, and `watch` on `virtualmachineinstances` and
+`managedclaimprovisioners` in the `kubevirt.io` API group, plus
+permission to emit events. It does not write VMI status: it reports
+failures as events, and virt-controller owns the aggregated VMI
+condition, preserving the single-writer invariant on VMI status.
+Third-party provisioner controllers need equivalent permissions in their
+own RBAC configuration.
 
 **Multiple managed claims per VMI:** a VMI can have multiple
 `resourceClaims[]` entries, each independently using
@@ -506,21 +514,22 @@ The validating webhook enforces:
    a managed claim.
 ### Error Handling
 
-Provisioner controllers report their own failures through the existing
-VMI status conditions list. The condition type
-`ManagedClaimProvisioningFailed` includes the managed claim entry and
-provisioner name in its reason and message; it is diagnostic only and
-is not a pod-creation readiness handshake.
+Provisioner controllers report their own failures as Kubernetes events
+on the VMI; they do not write VMI status. virt-controller aggregates the
+state of the generated ResourceClaims into a single `ManagedClaimsReady`
+condition on the VMI, which is diagnostic and not a pod-creation
+readiness handshake.
 
 **Claim generation failure:** if a provisioner controller cannot
 generate a claim (for example, no DeviceClassName is resolvable), it
-sets a `ManagedClaimProvisioningFailed` condition on the VMI. The
-condition reason is `FailedCreateResourceClaim`; its message identifies
-the managed claim entry, provisioner name, and error. The controller
-also emits a `FailedCreateResourceClaim` event and retries on the next
-reconciliation. It clears the condition after successfully reconciling
-the claim. The launcher pod remains pending until the claim exists and
-can be allocated.
+emits a `FailedManagedClaimProvisioning` warning event on the VMI whose
+message identifies the managed claim entry, provisioner name, and error,
+and retries on the next reconciliation. While a managed claim is still
+missing, virt-controller reports the VMI `ManagedClaimsReady` condition
+as false with reason `NotAllManagedClaimsReady`; the reason becomes
+`AllManagedClaimsReady` once every managed claim has been generated. The
+launcher pod remains pending until the claim exists and can be
+allocated.
 
 **ResourceClaim deleted externally:** every managed ResourceClaim carries
 a KubeVirt finalizer. If an external actor deletes the claim while the
@@ -878,8 +887,9 @@ scalability model. See
   invalid device type configuration, empty claims, duplicate request
   names, and provisioner existence
 - Integration tests with fake ManagedClaimProvisioner objects (envtest)
-- Integration tests: provisioning failure sets and successful
-  reconciliation clears `ManagedClaimProvisioningFailed`
+- Integration tests: provisioning failure emits a
+  `FailedManagedClaimProvisioning` event and holds `ManagedClaimsReady`
+  false, and successful reconciliation flips it to `AllManagedClaimsReady`
 - E2E: VMI with managed claim for GPU (requires DRA driver in CI)
 
 ## Graduation Requirements
