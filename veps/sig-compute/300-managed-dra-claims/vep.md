@@ -451,8 +451,20 @@ The framework provides this common behavior to provisioner controllers.
 
 **Claim naming:** the generated claim is named
 `<vmi-name>-<claim-name>`. If this exceeds the 253-character DNS subdomain
-limit, the name is truncated and a short hash suffix is appended to
-preserve uniqueness.
+limit, the name is built from a fixed-length prefix of both the VMI name
+and the claim name plus a short hash suffix (up to 123 characters of each
+name joined with a 5-character SHA-256 digest of the full untruncated
+name). Taking a prefix of both names keeps each recognizable even when one
+is long, and the digest keeps names that share a long prefix from
+colliding onto the same ResourceClaim.
+
+**Labels and ownership:** every generated ResourceClaim carries an owner
+reference to its VMI with `controller: true`, so owner-reference garbage
+collection removes it when the VMI is deleted. It also carries labels
+identifying the managed claim entry, the ManagedClaimProvisioner that
+configured it, and the VMI name. Recording the VMI name both on the owner
+reference and as a label lets claims be listed by VMI without walking
+owner references.
 
 **Idempotency:** provisioner reconciliation is naturally idempotent. If
 the ResourceClaim already exists with the correct owner reference, the
@@ -510,9 +522,15 @@ reconciliation. It clears the condition after successfully reconciling
 the claim. The launcher pod remains pending until the claim exists and
 can be allocated.
 
-**ResourceClaim deleted externally:** if a managed claim's ResourceClaim
-is deleted while the VMI is running, its provisioner controller detects
-this through the informer and re-creates it on the next reconciliation.
+**ResourceClaim deleted externally:** every managed ResourceClaim carries
+a KubeVirt finalizer. If an external actor deletes the claim while the
+owning VMI is still running, the finalizer holds the object in the API
+server (terminating but not yet removed) so the in-use DRA allocation is
+not torn down in the gap. The provisioner controller detects the pending
+deletion, removes its finalizer, and re-creates the ResourceClaim so the
+VMI is returned to a healthy, non-terminating state. When the owning VMI
+itself is being deleted, the controller removes the finalizer without
+re-creating, allowing owner-reference garbage collection to complete.
 
 **No provisioner controller:** if no controller serves the configured
 provisioner name, no matching ResourceClaim appears and the launcher pod
