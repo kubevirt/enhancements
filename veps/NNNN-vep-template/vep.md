@@ -86,6 +86,16 @@ Tangible API examples used for discussion
 Outline any alternative designs that have been considered)
 -->
 
+## Does it belong to core KubeVirt?
+
+<!--
+Explain why this feature belongs to the core KubeVirt repository and which other alternatives were considered.
+Other alternatives can be:
+- External controllers.
+- Plugins (see VEP-190).
+- Other existing repositories in the KubeVirt organization (e.g. HCO / CDI / etc.).
+-->
+
 ## Scalability
 
 <!--
