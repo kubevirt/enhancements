@@ -282,11 +282,15 @@ ensures all passthrough devices have metadata before the converter runs.
 #### Device Plugin Metadata Shim
 
 A topology shim in virt-launcher runs before domain conversion and writes
-KEP-5304-format metadata for any passthrough device that does not already
-have a metadata file. This covers:
+KEP-5304-format metadata for device-plugin-allocated devices, which never
+have KEP-5304 metadata.
 
-- Device-plugin-allocated devices (which never have KEP-5304 metadata)
-- DRA devices whose driver did not publish `numaNode` or `pcieRoot`
+DRA devices are out of scope for the shim. A DRA driver that does not
+publish `numaNode` or `pcieRoot` is treated as a driver-side gap to be
+resolved with that driver upstream, rather than silently backfilled from
+sysfs by KubeVirt. Missing attributes on a DRA device may indicate other
+problems with the driver's device model, so the shim never writes metadata
+for a device that a DRA driver is responsible for.
 
 The shim uses the upstream
 [`k8s.io/dynamic-resource-allocation/deviceattribute`](https://github.com/kubernetes/dynamic-resource-allocation)
@@ -301,6 +305,10 @@ library to discover topology from sysfs:
 This ensures sysfs is read in exactly one place (the shim) and the
 converter only reads metadata. Requires vendoring
 `k8s.io/dynamic-resource-allocation` in KubeVirt.
+
+This works because it is assumed that dra drivers and device plugins will
+not be activated on the same node for the same devices. If this assumption
+is broken then the paths for dra devices could collide with device plugins.
 
 ### Domain Generation
 
