@@ -197,9 +197,12 @@ This integration follows the existing DRA scalability model used for other devic
 
 ## Functional Testing Approach
 
-- End-to-end functional tests covering:
-  - Network binding plugin with a DRA driver, including live migration
-- Stage-specific testing scope is documented in the [Graduation Requirements](#graduation-requirements) section
+End-to-end functional tests cover network wiring and connectivity using a DRA driver and a network binding plugin, including across live migration.
+A dedicated test DRA driver will be implemented to allocate and manage host-based resources, offering a network connectivity backend.
+A dedicated test network binding plugin will be implemented to discover the resource and add its reference to the domain XML.
+VMs configured with those resources will be tested for connectivity and live migration, ensuring no connectivity loss after migration.
+
+Stage-specific testing scope is documented in the [Graduation Requirements](#graduation-requirements) section.
 
 ## Implementation History
 
