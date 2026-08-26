@@ -187,6 +187,11 @@ currently host VMIs. For each active node it resolves the corresponding
 `virt-handler` pod endpoint through the headless Service and issues a
 `GetVMStats` call. Nodes with no running VMIs are skipped entirely.
 
+*Per-VMI requests:* The `GetVMStats` call lets the controller filter which VMIs
+to collect from and specify the stats categories it needs on a per-VMI basis,
+rather than one set applied to every VMI on the node, so it can collect different
+data for different VMIs in a single call.
+
 *Data aggregation:* Each `virt-handler` aggregates the monitoring data from
 its local `virt-launcher` pods over the existing Unix-socket gRPC channel
 before responding, so the controller receives one consolidated response per
