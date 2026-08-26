@@ -116,6 +116,44 @@ We propose making the entire `virt-launcher` component pluggable. Each virtualiz
 
 `virt-handler` would continue to interact with a plugin `virt-launcher` through the existing command API. Within the plugin, the `CmdServer` implementation acts as a shim over that plugin's `DomainManager` implementation, translating command API calls into stack-specific domain operations. The command API is therefore the communication boundary used by `virt-handler`, while `DomainManager` is the internal interface implemented by the plugin; they are complementary layers of the same design.
 
+#### Design Alternatives
+
+Two designs were considered for introducing pluggable virtualization stacks into `virt-launcher`.
+
+##### Design 1: Make the Entire Virt-Launcher Pluggable
+
+In this design, each virtualization stack supplies a complete `virt-launcher` implementation. The plugin implements the existing command RPC API used by `virt-handler` and translates those operations directly into the interfaces of its virtualization stack. No particular intermediate management layer or VM representation is required inside the plugin.
+
+For example, a QEMU-, Cloud Hypervisor-, or OpenVMM-based plugin could convert the VMI directly into the command line, configuration, or API representation expected by its VMM. A plugin may still choose to use Libvirt internally when that is beneficial, but Libvirt is an implementation choice rather than part of the KubeVirt plugin contract. The command RPC API remains the stable integration boundary between KubeVirt and the plugin.
+
+##### Design 2: Retain Libvirt as the Common Management Layer
+
+An alternative is to retain the existing Libvirt-based `virt-launcher` and make only the stack-dependent portions within it pluggable. The VMI converter, Libvirt domain representation, event notification pathway, and much of the current lifecycle implementation could remain shared. Stack-specific extensions would customize the generated Libvirt domain XML and related behavior for the selected Libvirt driver, for example the QEMU or Cloud Hypervisor driver.
+
+This design follows Libvirt's original purpose: providing one management API and domain representation across multiple virtualization technologies. It would preserve a substantial amount of the current `virt-launcher` implementation and could reduce the initial work required for stacks already supported by Libvirt. Operations such as live migration could also be delegated to Libvirt instead of being implemented independently by each plugin.
+
+However, the common interface would also make Libvirt, rather than the command RPC API, the effective compatibility boundary for every virtualization stack. A stack could only participate if it had a sufficiently complete Libvirt driver, and KubeVirt features would depend on how quickly that driver exposed new stack capabilities.
+
+##### Decision
+
+We choose Design 1, making the entire `virt-launcher` pluggable. The principal reasons are:
+
+- **Support for stacks without Libvirt drivers:** OpenVMM and Firecracker do not have Libvirt drivers, and future virtualization stacks may make the same choice. Requiring Libvirt would exclude such stacks or require their maintainers to first build and maintain a Libvirt driver, significantly raising the cost of integrating with KubeVirt.
+
+- **Independent feature delivery:** Even when a Libvirt driver exists, new VMM capabilities must first be represented in Libvirt's API and domain XML before a KubeVirt plugin can use them. Direct integration allows plugin maintainers to expose stack features and fixes on their own release cadence, without waiting for changes to propagate through an additional project and abstraction layer.
+
+- **Mismatch with KubeVirt's process model:** Libvirt is designed to manage multiple domains on a host, whereas each KubeVirt `virt-launcher` pod runs a dedicated Libvirt instance that manages a single VMI. KubeVirt therefore pays for a general-purpose, multi-domain management daemon without using one of its primary architectural benefits.
+
+- **Resource overhead:** A Libvirt daemon and its supporting processes consume memory in every `virt-launcher` pod. Removing this mandatory layer lets lightweight VMM plugins preserve their resource-density advantages and makes the per-VMI overhead proportional to the selected stack.
+
+- **Reduced mandatory trusted code:** Libvirt is implemented primarily in C and adds a large, memory-unsafe codebase to every launcher pod. Design 1 does not guarantee that plugins are memory-safe, but it avoids requiring this particular component and allows a plugin to minimize its runtime dependencies and attack surface.
+
+- **Stack-specific images are required in either design:** Launcher images must contain only the VMM binaries, libraries, configuration, and supporting tools required by their target stack. The build and release system must therefore learn to combine shared KubeVirt interfaces with stack-specific artifacts regardless of whether Libvirt is retained. Once that packaging and build refactoring is required, keeping Libvirt provides less of an implementation advantage than it initially appears to.
+
+- **Clear ownership and abstraction boundary:** Making the command RPC API the contract allows core KubeVirt to own orchestration semantics while each plugin owns its complete VM lifecycle implementation. This avoids leaking Libvirt XML, driver capabilities, and version-specific behavior into a nominally stack-neutral interface.
+
+The main cost of Design 1 is that functionality currently supplied by Libvirt, most notably lifecycle event handling and live migration execution, cannot automatically be reused by every stack. Each plugin must implement those semantics using the facilities of its VMM, and conformance tests will be needed to ensure consistent behavior at the command API boundary. This is considered an acceptable tradeoff: stacks differ in migration capabilities and operational models, so a common KubeVirt contract should define the required behavior while allowing each plugin to implement it natively. The existing Libvirt/QEMU launcher can continue to use Libvirt internally and reuse its current migration path, preserving backward compatibility without imposing Libvirt on other plugins.
+
 ### Pluggable Admission Webhooks
 
 TBD
