@@ -142,6 +142,14 @@ VEP-300's managed claims, which handle CPUs as part of cross-device claims.
   [dra-driver-cpu#114](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/114).
 - [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu)
   v0.2.0+: publishes `pcieRoot` list attribute in grouped mode (PR #163).
+- [KEP-5075](https://github.com/kubernetes/enhancements/issues/5075) (DRA
+  consumable capacity), building on partitionable devices
+  [KEP-4815](https://github.com/kubernetes/enhancements/issues/4815):
+  `DRAConsumableCapacity` gate, beta and on by default in Kubernetes 1.36.
+  CPU claims use grouped mode: the driver advertises one device per
+  socket or NUMA node with `allowMultipleAllocations: true` and a
+  `dra.cpu/cpu` capacity, and each claim consumes a quantity of it.
+  Individual mode (one device per CPU) is deprecated upstream and not used.
 
 ### API Changes
 
@@ -165,7 +173,11 @@ spec:
   # Each name is one of cpu, gpu, hostDevice, or network.
   deviceTypes:
   - name: cpu
-    deviceClassName: cpu.dra.k8s.io
+    deviceClassName: dra.cpu
+    # Capacity key the CPU DRA driver advertises (dra-driver-cpu uses
+    # dra.cpu/cpu). The generated claim consumes the derived vCPU count
+    # from this capacity. Required for the cpu type; ignored otherwise.
+    capacityName: dra.cpu/cpu
   - name: gpu
     deviceClassName: gpu.example.com
     opaque:
@@ -192,7 +204,12 @@ pairing policy in `ManagedClaimProvisioner.spec`.
 `deviceTypes` is a named list. The name maps VMI device declarations to
 the provisioner configuration: `cpu` maps to `domain.cpu.dra`, `gpu` to
 `domain.devices.gpus[]`, `hostDevice` to `domain.devices.hostDevices[]`,
-and `network` to `spec.networks[].resourceClaim`.
+and `network` to `spec.networks[].resourceClaim`. `deviceClassName` names
+the admin-installed DeviceClass. `capacityName` is required for the `cpu`
+type and ignored for the whole-device types (`gpu`, `hostDevice`,
+`network`): CPUs allocate by consumable capacity rather than by whole
+device, so the generated request must name the capacity key the driver
+advertises (see the CPU generation section below).
 
 `opaque` is optional driver-specific configuration. When present, the
 provisioner renders a Kubernetes `DeviceClaimConfiguration` in
@@ -281,12 +298,27 @@ type CPUDRASource struct {
 ```
 
 VEP-300 scans `cpu.dra` during claim generation alongside the other
-device types. The DeviceClassName is resolved from the provisioner
-CRD's `cpu.deviceClassName` field. The CPU count in the
-generated claim is derived from VEP-152's accounting formula
-(`cores x sockets x threads + emulatorThreadCPUs + supplementalPoolThreadCount`).
-See [VEP-152 (PR #414)](https://github.com/kubevirt/enhancements/pull/414)
-for details.
+device types. The DeviceClassName is resolved from the provisioner CRD's
+`cpu.deviceClassName` field.
+
+CPUs allocate through DRA consumable capacity in grouped mode, not as
+whole devices. The CPU DRA driver advertises one device per socket or NUMA
+node with a consumable CPU capacity (dra-driver-cpu publishes it under the
+key `dra.cpu/cpu`); a claim consumes a quantity of that capacity, and
+several claims can share one device until it is exhausted. The generated
+CPU request therefore leaves `count` at its default of 1 (one grouped
+device) and places the consumed quantity in `capacity.requests`, keyed by
+the provisioner's `cpu.capacityName`. Unlike the whole-device types, the
+CPU request is driven by capacity rather than count, so `count` is omitted.
+The quantity is derived from VEP-152's accounting formula
+(`cores x sockets x threads + emulatorThreadCPUs + supplementalPoolThreadCount`),
+so the user expresses guest topology and never writes a DRA quantity
+directly. The quantity is always populated: an unset `capacity` would
+default to consuming the entire grouped device (all CPUs on the socket or
+NUMA node). Individual mode (one device per CPU) is deprecated upstream and
+is not used. See
+[VEP-152 (PR #414)](https://github.com/kubevirt/enhancements/pull/414) for
+the accounting formula.
 
 ### DeviceClassName Resolution
 
@@ -317,12 +349,13 @@ GenerateClaim(managedClaimContext) -> ResourceClaimSpec:
         DeviceClassName from deviceTypes[name=network],
         create a DeviceRequest.
      d. Scan domain.cpu.dra (VEP-152) - if claimName matches,
-        look up DeviceClassName from deviceTypes[name=cpu],
-        create a DeviceRequest with CPU count derived from
-        VEP-152's accounting formula
+        look up DeviceClassName and capacityName from
+        deviceTypes[name=cpu], and create one DeviceRequest with
+        Capacity.Requests[capacityName]=quantity (Count defaults
+        to 1), where quantity is VEP-152's accounting formula
         (cores x sockets x threads + emulator + IOThreads).
-        The claim shape (capacity vs count) is determined by
-        the DeviceClass and driver mode, not by the user.
+        CPUs use DRA consumable capacity (grouped mode); the
+        whole-device types above keep Count=1 with no capacity.
 
   2. Validate:
      - At least one device must reference the claim.
@@ -718,7 +751,8 @@ spec:
   provisioner: policy.kubevirt.io/aligner
   deviceTypes:
   - name: cpu
-    deviceClassName: cpu.dra.k8s.io
+    deviceClassName: dra.cpu
+    capacityName: dra.cpu/cpu
   - name: gpu
     deviceClassName: gpu.example.com
   - name: network
@@ -789,8 +823,10 @@ spec:
         count: 1
     - name: cpus
       exactly:
-        deviceClassName: cpu.dra.k8s.io
-        count: 16
+        deviceClassName: dra.cpu
+        capacity:
+          requests:
+            dra.cpu/cpu: "16"
     constraints:
     - matchAttribute: resource.kubernetes.io/pcieRoot
       requests: [gpu0, gpu1, nic]
@@ -803,6 +839,12 @@ pairing and constraint policy is implementation behavior, not part of
 the `ManagedClaimProvisioner` API. The CPU DRA driver publishes
 `pcieRoot` as a list attribute (KEP-5491); `matchAttribute` uses set
 intersection.
+
+The `cpus` request omits `count` (it defaults to 1) and consumes 16 units of
+the grouped device's capacity through `capacity.requests` (DRA consumable
+capacity), rather than allocating 16 devices. The 16 is the guest vCPU count
+derived from `domain.cpu` (here `cores: 16`), so the user never writes the
+DRA quantity.
 
 ## Alternatives
 
