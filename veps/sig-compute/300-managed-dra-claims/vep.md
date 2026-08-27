@@ -395,6 +395,15 @@ controller for its own provisioner name. Provisioner controllers are
 not registered in virt-controller and do not need to be compiled into
 KubeVirt.
 
+The Go package that implements this framework is a convenience for
+in-tree and third-party controllers; it is not part of KubeVirt's
+staged, versioned API surface and carries no semver or deprecation
+guarantee. The stable compatibility boundary that an external provisioner
+depends on is the wire contract: the `ManagedClaimProvisioner` and
+`ResourceClaim` API shapes, the generated-claim labels, and the
+deterministic claim-naming algorithm. A controller that reproduces those
+directly keeps working even if the helper package is refactored.
+
 ```go
 type ClaimProvisioner interface {
 	GenerateClaim(ctx *ManagedClaimContext) (*resourcev1.ResourceClaimSpec, error)
@@ -474,11 +483,14 @@ sync() -> check deletionTimestamp -> check dataVolumes ->
 The scheduler and DRA allocation wait until the referenced ResourceClaim
 exists and becomes allocatable.
 
-### Provisioner Expectations
+### Reconcile Consistency
 
-Each provisioner controller uses expectations to avoid reconciling
-before its ResourceClaim informer cache reflects a create or update.
-The framework provides this common behavior to provisioner controllers.
+Reconciliation reads the current ResourceClaim directly from the API
+server before deciding whether to create or update it, so it does not act
+on a stale informer cache. A create that loses a race with a concurrent
+create returns an already-exists error and is retried; the next reconcile
+finds the claim on the direct read and converges its spec. The framework
+provides this common behavior to provisioner controllers.
 
 ### Implementation Details
 
@@ -501,7 +513,15 @@ owner references.
 
 **Idempotency:** provisioner reconciliation is naturally idempotent. If
 the ResourceClaim already exists with the correct owner reference, the
-framework converges it to the provisioner's desired spec.
+framework converges its spec to exactly what `GenerateClaim` returned.
+Because convergence is a full-spec replace and not a partial merge,
+`GenerateClaim` must return the complete desired spec, including any
+topology constraints. A provisioner must not rely on a separate later
+mutation (for example an admission webhook that adds constraints to the
+generated claim) to finish shaping it: the framework would revert that
+mutation on the next reconcile, and the two writers would fight
+indefinitely. Whatever policy a provisioner applies, it applies inside
+`GenerateClaim`.
 
 **RBAC:** the built-in provisioner controller needs `create`, `get`,
 `list`, `watch`, and `update` permissions on `resourceclaims` in the
@@ -578,6 +598,14 @@ re-creating, allowing owner-reference garbage collection to complete.
 provisioner name, no matching ResourceClaim appears and the launcher pod
 remains pending. KubeVirt cannot distinguish this from a provisioner
 controller that is temporarily unavailable.
+
+**Colliding provisioner names:** `spec.provisioner` is a free-form string
+and its uniqueness is not enforced. If two controllers are configured
+with the same provisioner name, both match the same managed claims and
+each converges the generated ResourceClaim to its own desired spec, so
+they overwrite each other on every reconcile. Operators must give each
+provisioner controller a distinct name; enforcing uniqueness is out of
+scope.
 
 **VMI deletion during claim creation:** the controller checks
 `vmi.DeletionTimestamp` before creating claims. If the VMI is being
@@ -884,9 +912,10 @@ Rejected because:
 
 ### Alternative 3: No KubeVirt managed-claim framework
 
-Users install a separate controller (for example, a topology
-coordinator) that watches VMIs and generates ResourceClaims
-independently. KubeVirt has no managed-claim API or framework.
+Users install a separate controller (for example, an external
+topology-aligning controller) that watches VMIs and generates
+ResourceClaims independently. KubeVirt has no managed-claim API or
+framework.
 
 Rejected because:
 - No standard contract between KubeVirt and separate controllers
@@ -975,6 +1004,14 @@ scalability model. See
   entries with names, devices reference by name
 - **Memory and hugepages:** when the CPU DRA driver adds memory
   allocation support, memory can participate in managed claims
+- **Passthrough / deferred-policy provisioner:** a provisioner that
+  generates claim requests without topology constraints, for clusters
+  that defer alignment to an external policy engine. Because the
+  provisioner still mints the owned, named, finalizer-protected claim,
+  the claim keeps every managed-claim guarantee while its device
+  selection is shaped elsewhere. This can run today as an independent
+  provisioner controller using the existing framework; KubeVirt may ship
+  a built-in one later.
 
 ## References
 
