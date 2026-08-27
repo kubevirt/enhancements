@@ -164,17 +164,69 @@ We propose a new pluggable sidecar component, tentatively named `virt-runtime`, 
 
 `virt-runtime` is the `virt-handler`-side counterpart to the pluggable `virt-launcher`: `virt-handler` would delegate any operation requiring virtualization-stack knowledge or elevated privileges to the runtime associated with that stack. The API contract and the complete set of operations that belong to `virt-runtime`, beyond the initial `memlock` example, require a focused follow-up design.
 
-### Pluggable Virt-Controller Stack Calculations
+### Pluggable Virt-Controller's `virt-launcher` Pod Rendering
 
-The virtualization-stack-specific portion of `virt-controller` is limited to calculating the memory overhead and related pod specification properties needed when rendering a `virt-launcher` pod. We propose exposing a common plugin contract through which `virt-controller` supplies the relevant VMI and stack context and receives the calculated overhead and pod properties. The detailed request and response schema is deferred to a focused follow-up VEP.
+The virtualization-stack-specific portion of `virt-controller` is limited to calculating the memory overhead and related pod specification properties needed when rendering a `virt-launcher` pod. We propose exposing a common plugin contract through which `virt-controller` supplies the relevant VMI and stack context and receives the calculated overhead and pod properties. The following properties in a typical virt-launcher pod definition are virtualization-stack-specific and need to be provided by the plugin:
 
-The deployment model for this plugin remains an open decision. Both of the following models can provide the same calculation contract:
+- Launcher image, command-line and environment variables. The launcher command-line/env-vars would be used for selecting virtualization-stack-specific settings like firmware, timeouts, etc.
+
+    ```yaml
+    command:
+    - /usr/bin/virt-launcher-monitor
+    args:
+    - --qemu-timeout
+    - 345s
+    - --ovmf-path
+    - /usr/share/edk2/ovmf
+    - --hypervisor
+    - hyperv-direct
+    image: quay.io/kubevirt/virt-launcher:v1.9.0
+    ```
+
+- Devices that should be requested by the pod. E.g., `/dev/kvm`
+
+    ```yaml
+    resources:
+    limits:
+        devices.kubevirt.io/mshv: "1"
+    requests:
+        devices.kubevirt.io/mshv: "1"
+    ```
+
+- Virt-stack-specific volumes and volume mounts (e.g., `libvirt-runtime`)
+
+  ```yaml
+  volumeMounts:
+  - mountPath: /var/run/libvirt
+    name: libvirt-runtime
+  volumes:
+  - emptyDir: {}
+    name: libvirt-runtime
+  ```
+
+- Security Context and Container Capabilities.
+
+    ```yaml
+    securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+        add:
+        - NET_BIND_SERVICE
+        drop:
+        - ALL
+        runAsGroup: 107
+        runAsNonRoot: true
+        runAsUser: 107
+    ```
+
+- Node Selectors specific to the Virtualization Stack, e.g., CPU Model.
+
+The deployment model for this plugin remains an open decision. Both of the following models can provide the same contract to expose the aforementioned stack-specific information:
 
 - A sidecar co-located with `virt-controller` would provide a local call path and align the plugin lifecycle and version with each `virt-controller` deployment, but would add the plugin's resource cost to every `virt-controller` pod.
 
 - A cluster-wide service would require only one independently scalable deployment and could share cached data across callers, but would add a network hop and make launcher pod rendering dependent on the availability of that service.
 
-The selected model must also account for any stack-specific scheduling constraints derived from labels advertised by the node labeler plugin. Whether that mapping belongs to this plugin contract or to an admission policy is part of the follow-up design.
 
 ## Open Questions
 
