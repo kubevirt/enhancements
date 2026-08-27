@@ -13,8 +13,8 @@ Please avoid targeting future releases in this section. Only capture the upcomin
 For example, during the planning phase for version v1.123, do **not** target beta for v.124 in advance.
 -->
 
-- This VEP targets alpha for version: 1.9.0
-- This VEP targets beta for version: TBD
+- This VEP targets alpha for version: v1.9
+- This VEP targets beta for version: v1.10
 - This VEP targets GA for version: TBD
 
 ### Release Signoff Checklist
