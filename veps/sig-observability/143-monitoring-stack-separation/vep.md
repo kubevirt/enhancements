@@ -273,6 +273,7 @@ message GuestInfoRequest        {}
 message GuestFilesystemsRequest {}
 message GuestAgentRequest       {}
 message GuestUsersRequest       {}
+message GuestGetDevicesRequest  {}
 
 message VMStatsRequest {
   DomainStatsRequest      domainStats      = 1;
@@ -280,6 +281,7 @@ message VMStatsRequest {
   GuestFilesystemsRequest guestFilesystems = 3;
   GuestAgentRequest       guestAgent       = 4;
   GuestUsersRequest       guestUsers       = 5;
+  GuestGetDevicesRequest  guestGetDevices  = 6;
   ...
 }
 
@@ -290,12 +292,28 @@ message VMStatsResponse {
   string   guestFilesystems = 4;
   string   guestAgent       = 5;
   string   guestUsers       = 6;
+  string   guestGetDevices  = 7;
   ...
 }
 ```
 
 All response fields are JSON-encoded strings (consistent with the current
 approach).
+
+#### Guest Agent Categories
+
+This VEP is the source of truth for the categories `GetVMStats` supports. Categories are added by
+appending a request and a response field, as above; the collection, caching, aggregation, transport
+and scrape paths are unchanged by such an addition.
+
+`guestGetDevices` carries the output of the `guest-get-devices` agent command: driver name, version,
+date and PCI device/vendor ID per device. It is Windows-only, and its payload is cached with a 30
+minute time-to-live, driver information being mostly static for the life of a VM. It is added for
+[VEP #385](../385-guest-device-info/vep.md), which describes the metric built on it.
+
+An agent command the guest does not implement - `guest-get-devices` on a Linux guest, for example -
+yields an empty payload and a successful response, cached for the normal time-to-live. It does not
+mark the VMI's stats response unsuccessful, and it is not re-executed on every scrape.
 
 ### 3. Recording Rules and Alerts Migration
 
