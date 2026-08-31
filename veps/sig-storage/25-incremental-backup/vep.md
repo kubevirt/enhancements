@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.10
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -28,11 +28,14 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [Repos](#repos)
 - [Design](#design)
   - [Enable/disable QEMU backup](#enabledisable-qemu-backup)
+  - [Backup type model](#backup-type-model)
+  - [Checkpoint redefinition](#checkpoint-redefinition)
   - [Full backup](#full-backup)
   - [Incremental backup](#incremental-backup)
   - [VM crash](#vm-crash)
   - [Migration and backup](#migration-and-backup)
   - [VMSnapshot and backup](#vmsnapshot-and-backup)
+  - [TTL](#ttl)
 - [API Examples](#api-examples)
   - [Enable/disable QEMU backup](#enabledisable-qemu-backup-1)
   - [VirtualMachineBackupTracker CR](#virtualmachinebackuptracker-cr)
@@ -50,9 +53,11 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [Update/Rollback Compatibility](#updaterollback-compatibility)
 - [Functional Testing Approach](#functional-testing-approach)
 - [Known limitations](#known-limitations)
+- [Implementation History](#implementation-history)
 - [Graduation Requirements](#graduation-requirements)
   - [Alpha](#alpha)
   - [Beta](#beta)
+    - [On-By-Default Readiness](#on-by-default-readiness)
   - [GA](#ga)
 
 ## Overview
@@ -117,6 +122,20 @@ When a VM is selected for CBT:
 
 Hot-plugged disks do not require a restart because the overlay is created before the disk is presented to the guest.
 
+### Backup type model
+
+Backup type is a per-disk property determined by bitmap presence at backup start, not a whole-backup scalar. At backup start, virt-launcher inspects every disk via QMP `query-named-block-nodes` and looks for the bitmap belonging to the tracker's latest checkpoint. A bitmap that is present but flagged `inconsistent` (for example after an unclean shutdown or an interrupted migration) counts as absent. Each disk then gets `backupmode="incremental"` (usable bitmap) or `backupmode="full"` (no usable bitmap) in the libvirt backup XML, so a single `BackupBegin` call can mix both.
+
+A disk that lost its bitmap (i.e., volume live migration, volume unplug and replug, or an inconsistent bitmap after a crash) falls back to full on its own, without affecting the other disks. Per-volume type is reported on `status.includedVolumes[].type`.
+
+The `forceFullBackup` field bypasses per-disk logic and forces all VM disks to full.
+
+Checkpoints are treated by KubeVirt as opaque resume tokens: `{name, creationTime}`. They carry no per-volume contract and no guarantee about which disks have corresponding bitmaps. Bitmap presence is the source of truth, checked at backup start.
+
+### Checkpoint redefinition
+
+Libvirt checkpoint metadata is transient and must be restored after VM restart. Redefinition uses `DOMAIN_CHECKPOINT_CREATE_REDEFINE` on its own; the `DOMAIN_CHECKPOINT_CREATE_REDEFINE_VALIDATE` flag used in alpha is dropped, because redefinition exists to restore metadata and bitmap integrity is now decided per-disk at backup start. Disks without bitmaps are excluded from the redefinition XML, so a checkpoint survives partial bitmap loss instead of being discarded as a whole.
+
 ### Full backup
 
 The backup controller drives libvirt domain commands to run the QEMU backup job. A `VirtualMachineBackup` resource initiates the process.
@@ -137,11 +156,9 @@ A `VirtualMachineBackupTracker` CR tracks the latest checkpoint per VM per backu
 
 If no tracker is referenced or the tracker has no checkpoint, a full backup is performed. The `forceFullBackup` field forces a full backup even when a checkpoint exists.
 
-**Checkpoint redefinition after VM restart**: Libvirt recreates its state on VM restart, losing checkpoint metadata. The VM controller uses `VirtualMachineBackupTracker` CRs to redefine checkpoints for libvirt during initialization, ensuring incremental backups can continue after restarts.
-
 ### VM crash
 
-After a VM crash, dirty bitmaps may be corrupted. On restart, bitmap validity is checked during checkpoint redefinition. Corrupted bitmaps cause the associated checkpoints to be discarded. The first post-crash backup will be full.
+After a VM crash, dirty bitmaps may not have been flushed to the QCOW2 metadata header and can come back flagged `inconsistent`. Checkpoints are no longer discarded for this reason: redefinition restores the checkpoint metadata for whichever disks still carry a bitmap, and the examination at backup start (see [Backup type model](#backup-type-model)) demotes each affected disk to full on its own. A post-crash backup is therefore full only for the disks whose bitmaps did not survive, and stays incremental for the rest.
 
 ### Migration and backup
 
@@ -157,6 +174,10 @@ Dirty bitmaps are transferred with the disk image during migration. After migrat
 ### VMSnapshot and backup
 
 Online snapshots (a Kubernetes-level feature, not native to libvirt) interfere with bitmap integrity. Restoring from an online snapshot discards all checkpoints. The next backup after a restore will be full.
+
+### TTL
+
+`ttlDuration` (default 2 hours) bounds the lifetime of both push and pull backups, counted from the backup's creation timestamp. If the backup has not reached a terminal state by expiration, the controller cancels the QEMU job and fails the backup. In push mode this guards against stuck jobs that would otherwise block migrations and hold a utility volume indefinitely. In pull mode the same applies but since the backup consumer is the one signaling completion, TTL expiration will always fail the backup.
 
 ## API Examples
 
@@ -209,7 +230,7 @@ Namespace-scoped CR tracking the latest checkpoint per VM per backup solution. `
 - `source`: The VM this tracker is associated with.
 
 **Status:**
-- `latestCheckpoint`: Checkpoint of the latest backup (`name`, `creationTime`). Updated by the backup controller. Used as the base for the next incremental backup.
+- `latestCheckpoint`: Checkpoint of the latest backup (`name`, `creationTime`). Updated by the backup controller. Passed to virt-launcher as the reference point for bitmap examination.
 
 ```yaml
 apiVersion: backup.kubevirt.io/v1alpha1
@@ -237,17 +258,18 @@ Namespace-scoped CR that initiates a backup. Only one backup per VM at a time.
 - `mode`: `Push` (default) or `Pull`.
 - `pvcName`: Required. PVC for backup output (push) or scratch space (pull).
 - `skipQuiesce`: Skip filesystem freeze before backup.
-- `forceFullBackup`: Force a full backup even when a checkpoint exists.
+- `forceFullBackup`: Force a full backup for all VM disks, even when a checkpoint exists.
 - `tokenSecretRef`: Required for pull mode. Secret containing the authentication token.
-- `ttlDuration`: Time to live for the backup (default: 2 hours). Pull mode only.
+- `ttlDuration`: Time to live for the backup (default: 2 hours).
 
 **Status:**
 - `checkpointName`: Checkpoint created for this backup.
 - `conditions`: `Progressing`, `Complete`, `Failed`, and `Quiesced`, as standard `metav1.Condition`s. Phase detail is carried in the condition `reason`: `Initializing`, `Initiated`, `PreparingExport`, `ExportInitiated`, `ExportReady`, `Aborting`, `Completed`, `CompletedWithWarning`, `Failed`, `SourceLost`, `SourceUnhealthy`.
   `Quiesced` reports the outcome of the filesystem freeze (`QuiesceSucceeded`, `QuiesceFailed`, `QuiesceSkipped`); a failed freeze completes the backup with reason `CompletedWithWarning`.
-- `type`: Either `Full` or `Incremental`.
-- `endpointCert`: CA certificate for pull mode endpoints.
-- `includedVolumes`: Volumes included in the backup, each with `name`, `mapEndpoint` (pull mode), and `dataEndpoint` (pull mode).
+- `includedVolumes`: Volumes included in the backup, each with `volumeName` and `type` (`Full` or `Incremental`).
+- `links`: Pull mode only. Export endpoints split into `internal` and `external` entries, each carrying its own CA certificate and per-volume data/map endpoint URLs.
+
+`links` follows `VirtualMachineExport`'s `status.links` in splitting internal from external and giving each half its own `cert`. It does not reuse that API's `backups[].endpoints[]` shape: inside a `VirtualMachineBackup` the entries are volumes, and keying them by `volumeName` is what lets a client correlate them with `includedVolumes[]`.
 
 Push mode example:
 ```yaml
@@ -265,7 +287,11 @@ spec:
   pvcName: backup-output-pvc
 status:
   checkpointName: my-backup-tracker-2025-03-03T16:13:28Z
-  type: Full
+  includedVolumes:
+    - volumeName: rootdisk
+      type: Incremental
+    - volumeName: datadisk
+      type: Full
 ```
 
 Pull mode example:
@@ -285,12 +311,30 @@ spec:
   tokenSecretRef: my-token
 status:
   checkpointName: my-backup-tracker-2025-03-03T16:13:28Z
-  type: Full
-  endpointCert: "<base64-encoded CA cert>"
   includedVolumes:
-  - name: datavolumedisk1
-    mapEndpoint: https://virt-exportproxy-kubevirt.apps-crc.testing/.../datavolumedisk1/map
-    dataEndpoint: https://virt-exportproxy-kubevirt.apps-crc.testing/.../datavolumedisk1/data
+    - volumeName: rootdisk
+      type: Incremental
+    - volumeName: datadisk
+      type: Full
+  links:
+    internal:
+      cert: "<base64-encoded CA cert>"
+      volumes:
+        - volumeName: rootdisk
+          dataEndpoint: https://backup-export-backup1.ns1.svc/exports/rootdisk/data
+          mapEndpoint: https://backup-export-backup1.ns1.svc/exports/rootdisk/map
+        - volumeName: datadisk
+          dataEndpoint: https://backup-export-backup1.ns1.svc/exports/datadisk/data
+          mapEndpoint: https://backup-export-backup1.ns1.svc/exports/datadisk/map
+    external:
+      cert: "<base64-encoded CA cert>"
+      volumes:
+        - volumeName: rootdisk
+          dataEndpoint: https://virt-exportproxy-kubevirt.apps.example.com/.../rootdisk/data
+          mapEndpoint: https://virt-exportproxy-kubevirt.apps.example.com/.../rootdisk/map
+        - volumeName: datadisk
+          dataEndpoint: https://virt-exportproxy-kubevirt.apps.example.com/.../datadisk/data
+          mapEndpoint: https://virt-exportproxy-kubevirt.apps.example.com/.../datadisk/map
 ```
 
 ### Collection of the backup
@@ -462,6 +506,7 @@ Users must opt in by enabling CBT. Rollback is equivalent to disabling CBT. No d
 - Data consistency of incremental backups.
 - Data consistency after VM restart.
 - Failure scenarios where incremental backup is not possible (fallback to full).
+- Mixed full/incremental backup in a single job: unplug and replug a disk of a running VM to destroy its bitmap, then verify the replugged disk reports `Full` while the others stay `Incremental`.
 
 ## Known limitations
 
@@ -469,8 +514,13 @@ Users must opt in by enabling CBT. Rollback is equivalent to disabling CBT. No d
 - **Offline backup**: Only online (running VM) backup is supported today. Offline backup will be addressed by a separate VEP.
 - **State interruptions**: If the guest OS initiates a shutdown during backup, the backup is canceled and marked as failed because there is no way to finish cleanly before the domain disappears (pending [RHEL-8067](https://issues.redhat.com/browse/RHEL-8067)).
 - **Differential backup**: Only the latest checkpoint can serve as a base for incremental backup. Multi-checkpoint retention and the ability to back up from a specific previous checkpoint will be addressed by a separate VEP.
-- **Backup teardown during node drain**: A `system-critical` migration cancels an in-progress backup, but the migration stays blocked until the backup's utility volume detaches and fails outright if that exceeds `utilityVolumesTimeout` (default 150 seconds). Pull mode is especially sensitive here: the VMExport and exportserver pod must be torn down before the scratch PVC can detach, so a drain landing on a long-lived pull-mode backup is the likeliest way to hit the timeout.
+- **Backup teardown during node drain**: A `system-critical` migration cancels an in-progress backup, but the migration stays blocked until the backup's utility volume detaches. If teardown has not completed when `utilityVolumesTimeout` (default 150 seconds) fires, the utility volume is force-detached. Pull mode is especially sensitive here: the VMExport and exportserver pod must be torn down before the scratch PVC can detach, so a drain landing on a long-lived pull-mode backup is the likeliest path to a force-detach. Metrics are exposed to give operators visibility into how often this occurs.
 - **Orphaned overlays**: Replacing a disk's backing PVC (offline or online) can leave orphaned QCOW2 overlays on the VM state PVC with no automatic reclaim path.
+
+## Implementation History
+
+- v1.8 (Alpha): CBT enable/disable via label selectors and QCOW2 overlays, `VirtualMachineBackup` and `VirtualMachineBackupTracker` CRs, push and pull mode, single-checkpoint incremental backup, checkpoint redefinition after VM restart.
+- v1.9 (Alpha): backup conditions moved to `metav1.Condition` and consolidated into `Progressing`/`Complete`/`Failed` with the phase carried in the condition reason, `system-critical` migrations cancel an in-progress backup instead of being blocked by it.
 
 ## Graduation Requirements
 
@@ -484,8 +534,19 @@ Users must opt in by enabling CBT. Rollback is equivalent to disabling CBT. No d
 
 ### Beta
 
-TBD.
+- [ ] Per-volume backup type reporting, with disk-level fallback to full for missing or inconsistent bitmaps
+- [ ] Pull-mode internal and external endpoints reported through `status.links`
+- [ ] TTL support for both modes (Push and Pull), resulting in backup failure on expiration
+- [ ] virt-exportserver co-location with virt-launcher enforced as a hard scheduling constraint rather than a preference
+- [ ] Pull-mode teardown on a `system-critical` migration force-detaches the utility volume when `utilityVolumesTimeout` fires, with metrics exposed for operator observability
+- [ ] [VEP 90](https://github.com/kubevirt/enhancements/blob/main/veps/sig-storage/90-utility-volumes/vep.md) Utility Volumes graduates to beta
+- [ ] Backup vendor stakeholder approval
+
+#### On-By-Default Readiness
+
+- [ ] Storage cost documented for cluster admins: every CBT-enabled VM's backend storage PVC grows by 512 MiB, more on storage with a large minimum volume size (see [Scalability](#scalability)).
+- [ ] Backup cancellation on `system-critical` migration covered by functional tests, since node drain and workload updates now interact with a feature that is on by default.
 
 ### GA
 
-TBD.
+- [ ] At least one release cycle of beta stability without API changes
