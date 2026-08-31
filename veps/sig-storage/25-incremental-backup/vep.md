@@ -1,10 +1,10 @@
-# VEP #25: Storage agnostic incremental backup using qemu
+# VEP #25: Storage-agnostic incremental backup using QEMU
 
 ## VEP Status Metadata
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.6
+- This VEP targets alpha for version: v1.8
 - This VEP targets beta for version:
 - This VEP targets GA for version:
 
@@ -17,38 +17,75 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [ ] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
+## Table of contents
+
+- [Overview](#overview)
+- [Motivation](#motivation)
+- [Goals](#goals)
+- [Non Goals](#non-goals)
+- [Definition of Users](#definition-of-users)
+- [User Stories](#user-stories)
+- [Repos](#repos)
+- [Design](#design)
+  - [Enable/disable QEMU backup](#enabledisable-qemu-backup)
+  - [Full backup](#full-backup)
+  - [Incremental backup](#incremental-backup)
+  - [VM crash](#vm-crash)
+  - [Migration and backup](#migration-and-backup)
+  - [VMSnapshot and backup](#vmsnapshot-and-backup)
+- [API Examples](#api-examples)
+  - [Enable/disable QEMU backup](#enabledisable-qemu-backup-1)
+  - [VirtualMachineBackupTracker CR](#virtualmachinebackuptracker-cr)
+  - [VirtualMachineBackup CRD](#virtualmachinebackup-crd)
+  - [Collection of the backup](#collection-of-the-backup)
+  - [Restore](#restore)
+- [Pull mode](#pull-mode)
+  - [Chosen approach: export type backup](#chosen-approach-export-type-backup)
+  - [Backup handler export command](#backup-handler-export-command)
+  - [Pull mode Q&A](#pull-mode-qa)
+  - [Pull mode data path](#pull-mode-data-path)
+  - [Pull mode alternatives](#pull-mode-alternatives-considered)
+- [Alternatives](#alternatives)
+- [Scalability](#scalability)
+- [Update/Rollback Compatibility](#updaterollback-compatibility)
+- [Functional Testing Approach](#functional-testing-approach)
+- [Known limitations](#known-limitations)
+- [Graduation Requirements](#graduation-requirements)
+  - [Alpha](#alpha)
+  - [Beta](#beta)
+  - [GA](#ga)
+
 ## Overview
 
-Proposal to enable incremental backup with Changed Block Tracking (CBT) using QEMU capabilities.
+Enables differential and incremental storage agnostic VM backup.
 
 ## Motivation
 
-The current backup options rely on CSI-storage and create a full snapshot of the storage with each backup. This leads to longer backup times and increased storage space usage, whether the backup is stored in the cluster or off-site. Additionally, when stored off-site, a large amount of data needs to be copied over which further extends the backup time.
-This can be improved by leveraging QEMU's capability to create incremental backups, which use Changed Block Tracking (CBT) to save only the changes made since the last backup.
+Current backup options rely on CSI storage and create a full snapshot with each backup. A 500 GiB VM backed up daily burns through storage fast and ties the backup pipeline to a single provider. KubeVirt VM backup sidesteps both problems by leveraging QEMU and libvirt's Changed Block Tracking (CBT) to transfer only what changed, on any storage backend.
 
 ## Goals
 
-- Have an API to enable/disable incremental backup in VM.
-- Have an API to have a backup either incremental or full using QEMU capabilities that provides CBT without the need for specific storage capabilities.
+- API for cluster admins to select which VMs have CBT enabled.
+- API to perform backups using QEMU CBT without requiring specific storage capabilities.
 
->> Note: this API's main consumer is backup vendors. They will provide the backup platform and will be responsible for getting the data and moving it to a defined location. A user may imitate backup vendors capabilities for this feature is not directed to the common VM owner.
+> [!NOTE]
+> This feature exposes low-level backup primitives for backup vendors who provide the platform and handle data movement. It is not intended to be used standalone by VM owners.
 
 ## Non Goals
 
-Have an API to restore from backup. In this VEP we will present a way to do it but its not something that we will have an API for.
+API to restore from backup. This VEP presents a restore method but does not formalize it as an API.
 
 ## Definition of Users
 
-* Backup vendors
-* Cluster Admins
-* VM owners
+- Backup vendors
+- Cluster admins
+- VM owners
 
 ## User Stories
 
-* As a KubeVirt user, I would like to back up my VM in the most efficient way possible, both in terms of time and storage usage.
-* As a Kubevirt admin I would like to take a complete backup of my cluster. Then, I would like to take backup of the changes since the previous backup.
-* As a Kubevirt admin I would like to store the backups off-site and lower the amount of data I am copying each time.
-* As a Kubevirt admin I would like to restore to a specific time by applying both base backup and smaller time-specific increment.
+- As a user, I want to back up my VM efficiently in time and storage.
+- As an admin, I want to take a full backup then subsequent incremental backups of only the changes.
+- As an admin, I want to minimize data transfer when storing backups off-site.
 
 ## Repos
 
@@ -56,119 +93,76 @@ Have an API to restore from backup. In this VEP we will present a way to do it b
 
 ## Design
 
-### Enable/Disable QEMU backup
+### Enable/disable QEMU backup
 
-QEMU backup with CBT is only supported with QCOW2 images, currently, Kubevirt supports only raw images.
-To enable QEMU backup for a disk, we need to create a QCOW2 overlay that will store the **image metadata** (Not data!) and enable the use of QCOW2 features.
-This overlays will be stored on a VM state PVC, similar to how TPM and EFI are handled. If the VM uses either of these features, the overlays will be created on the same PVC. Figure 1 describes how this will look like:
+QEMU backup with CBT works on QCOW2 images, but KubeVirt uses raw. To bridge the gap, a thin QCOW2 overlay is created on top of each raw disk to hold image metadata and dirty bitmaps. These overlays live on the VM state (backend storage) PVC (introduced in [kubevirt/kubevirt#8156](https://github.com/kubevirt/kubevirt/pull/8156)), alongside TPM and EFI state.
+
 ![figure 1](qcow2overlay.png)
 
-A `changedBlockTrackingLabelSelectors` field will be added to the configurations section of the kubevirt CR. This will allow users to define `namespace` and/or `virtualMachine` label selectors.
-Virtual Machines residing in one of the selected namespaces or matching the specified virtualMachine label selector will be configured to have Changed Block Tracking enabled for their supported volumes(DataVolumes and PersistentVolumeClaims).
+A `changedBlockTrackingLabelSelectors` field in the KubeVirt CR allows defining `namespace` and/or `virtualMachine` label selectors. VMs matching these selectors have CBT enabled for their supported volumes (DataVolumes, PVCs, and HostDisks).
 
-Currently, live addition of the overlay is not supported, a limitation the Libvirt team is actively addressing. Once this capability is available, we will integrate it into KubeVirt. Until then, enabling Changed Block Tracking, along with the creation of the QCOW2 overlay, will require a VM restart.
+The `changedBlockTracking` status field on VMs and VMIs reflects the CBT state in its `state` subfield:
+- `PendingRestart`: VM needs a restart for changes to take effect.
+- `Initializing`: Restart occurred, setup in progress.
+- `Enabled`: CBT is active with QCOW2 overlays.
+- `Disabled`: CBT was enabled but the VM no longer matches the selector; resources have been cleaned up.
+- `IncrementalBackupFeatureGateDisabled`: The VM matches the selector but the `IncrementalBackup` feature gate is off, so no changes are made.
 
-To reflect the `changedBlockTracking` state, an indication will be added to the status of selected VirtualMachines and their VirtualMachineInstances. This state can be:
-- `PendingRestart`: The VM needs a restart for the changes to take effect. This state field will be deprecated once the Libvirt enhancement is available.
-- `Initializing`: A restart has occurred, and the necessary setup for the changes is in progress.
-- `Enabled`: The VM's supported volumes now have Changed Block Tracking enabled with a QCOW2 overlay.
-- `Disabled`: The feature was once enabled for this VM, but it no longer matches the label selector. All associated CBT resources have been deleted.
+When a VM is selected for CBT:
+1. VM status set to `Initializing` after restart.
+2. VM state PVC created if needed.
+3. QCOW2 overlay created for each disk, using the raw image as its data-file.
+4. Domain XML modified to use the overlay with a `data-store` tag.
+5. Status updated to `Enabled`.
 
-When a VM is selected for Changed Block Tracking:
-- `changedBlockTracking: pendingRestart` will be added to the VM status if the VMI is already running.
-- The user will restart the VM. (will not be required once libvirt enhancement is available)
-- `changedBlockTracking: Initializing` will be updated in the VM and VMI status.
-- A VM state PVC will be created (if one doesn’t already exist).
-- A QCOW2 image overlay will be created on top of the relevant disks.
-- A `data-store` tag will be added to each of these disks in the domain XML.
-- VMI `changedBlockTracking` status will be updated to `Enabled`.
-- VM `changedBlockTracking` status will be updated to `Enabled`.
-
-When a VM is removed from the Changed Block Tracking label selector:
-- `changedBlockTracking: pendingRestart` will be added to the VM status if VMI is already running.
-- The user will restart the VM. (will not be required once libvirt enhancement is available)
-- `changedBlockTracking: Disabled` will be updated in the VM and VMI status.
-- VM state PVC will be deleted (unless it is required by another feature), along with its associated QCOW2 overlays.
-- Domain XML will be generated normally, without any `data-store` tags.
-
-NOTE: For hot-plugged disks, a restart is not necessary as they can be hot-plugged with the data-store tag already present in the domain XML.
+Hot-plugged disks do not require a restart because the overlay is created before the disk is presented to the guest.
 
 ### Full backup
 
-Libvirt's domain commands will be used to leverage QEMU backup capabilities, with the aim of making our backup API similar to libvirt's backup and incremental backup API but as simple as possible on our side.
+The backup controller drives libvirt domain commands to run the QEMU backup job. A `VirtualMachineBackup` resource initiates the process.
 
-To initiate a backup, a `VirtualMachineBackup` resource will be created. This resource will be managed by a new VMBackup controller.
+Two modes are supported:
+- **Push mode**: A filesystem PVC is hot-plugged into the virt-launcher pod as a directory (see [VEP 90: Utility Volumes](https://github.com/kubevirt/enhancements/blob/main/veps/sig-storage/90-utility-volumes/vep.md)). Backup data is written directly to the PVC, then detached on completion.
+- **Pull mode**: A filesystem PVC is hot-plugged into the virt-launcher pod for scratch space. Libvirt creates a Unix domain socket exposing NBD exports. A user-facing endpoint is exposed over HTTPS for external components to read disk data and query bitmaps.
 
-As outlined in Libvirt, there are two general modes for backup:
+Before the backup begins, an FSFreeze command ensures filesystem consistency (skippable via `skipQuiesce` field on a `VirtualMachineBackup`). A failed freeze does not cancel the backup: it completes with a warning and the resulting data is crash-consistent rather than application-consistent.
 
-```
-A `push` mode (where the hypervisor writes out the data to the destination file, which may be local or remote), and a `pull` mode (where the hypervisor creates an NBD server that a third-party client can then read as needed, and which requires the use of temporary storage, typically local, until the backup is complete).
-```
-We will be implementing both modes in the following manner:
-* **Push mode**: In this mode, the user provides a filesystem-based PersistentVolumeClaim (PVC) to store the backup data for all relevant VM disks. Before the process begins, an estimation of the required backup size will be performed. If the provided PVC size is insufficient, an error will be returned.
-The PVC will be hot-plugged into the virt-launcher pod as a directory (rather than as a disk attached to the VM, as is typical for hot-plugged volumes). The backup process will then proceed, writing data directly to the mounted PVC. Once the backup is complete, the PVC will be detached. It is then the user’s responsibility to manage the backup data—for example, by transferring it to a remote storage location, if needed.
-* **Pull mode**: In this mode, the user also provides a filesystem-based PersistentVolumeClaim (PVC) to serve as temporary storage for scratch files that will be used to facilitate the backup process by storing writes during it for every disk that's included in the backup. Once the backup is initialized, libvirt creates a Unix domain socket that exposes the NBD export internally. A user-facing endpoint is then exposed to allow external components to interact with the backup over HTTP, e.g., to read the disk or query the associated bitmap.
-
-Once the backup is initialized, the controller will pass a backup command to the virt-launcher via the virt-handler using a subresource, containing all the relevant information. Before the backup begins, an FSFreeze command will be issued to ensure file system consistency during the backup. This will be the default behavior, with an option to skip filesystem quiescing if desired.
-Then, [`virDomainBackupBegin`](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainBackupBegin) will be invoked, which, as documented in libvirt, starts a point-in-time backup job for the desired disks of the running domain. This job captures the domain's disks state at the time of initiation, allowing to then call FSThaw (if needed). This minimizes guest downtime and enables the backup to be fetched while the guest continues its workload.
-
-In `push` mode, the backup job in libvirt automatically terminates once all data has been successfully backed up. The controller will be notified when the job completes and will update the `VirtualMachineBackup` phase to `Done`. At this stage, the PVC will be detached from the VM and made available for user operations. Since the `VirtualMachineBackup` resource is no longer needed, it can be safely deleted
-
-In `pull` mode, the backup job does not terminate on its own, because there is no inherent signal that the transfer has completed. Instead, the `VirtualMachineBackupStatus` gains a `ExportReady` condition to indicate that the backup data is available for retrieval and consequently, all of the volumes in `includedVolumes` list will gain the new `dataEndpoint` and `mapEndpoint` fields which will be populated with the links for disk read and bitmap query respectively. At that point, the client should begin interacting with the exposed endpoints to pull the backup. When the client has finished, it must explicitly delete the corresponding `VirtualMachineBackup` resource to signal that the process is complete. This deletion initiates the cleanup of all associated artifacts, including aborting the active libvirt backup job and deleting the Unix socket inside the virt-launcher.
-
-**Backup-PVC hotplugging**
-As mentioned, the PVC that will store the backup output in the case of `push` mode and scratch space file in the case of `pull` mode must be hot-plugged into the virt-launcher pod but without being attached to the guest. To achieve this, we will leverage [Utility Volumes](https://github.com/kubevirt/enhancements/pull/91).
-This is considered an implementation detail rather than an exposed API, as it is not user-configurable and will be handled automatically as part of the backup workflow.
+In push mode, the backup job terminates when all data is written. In pull mode, the job persists until the user deletes the `VirtualMachineBackup` CR, which triggers cleanup.
 
 ### Incremental backup
 
-The incremental backup process should closely mirror the full backup process, with a few distinctions.
+Libvirt provides [Checkpoints](https://libvirt.org/formatcheckpoint.html#checkpoint-xml) that mark when a backup was taken. A checkpoint is created for every backup. To perform an incremental backup, the checkpoint from the most recent backup is provided as the base.
 
-Libvirt provides a [Checkpoint](https://libvirt.org/formatcheckpoint.html#checkpoint-xml) resource, which marks the point in time when a backup is taken. A checkpoint is created for every backup—both full and incremental. To perform an incremental backup, the backup job must be provided with the name of a previous checkpoint. Typically, this is the checkpoint from the most recent backup, and it is used to identify which disk blocks have changed.
+A `VirtualMachineBackupTracker` CR tracks the latest checkpoint per VM per backup solution. Multiple independent trackers can exist for a single VM. The tracker stores the latest checkpoint name, which is automatically updated on backup completion and used as the base for the next incremental backup.
 
-To facilitate incremental backups by tracking previous backups, a new `VirtualMachineBackupTracker` CR will be introduced. This CR will store the checkpoint of the most recent successful backup.
-Given that a VM might be backed up by multiple independent solutions, a dedicated `VirtualMachineBackupTracker` should be created for each to manage its respective backup history.
+If no tracker is referenced or the tracker has no checkpoint, a full backup is performed. The `forceFullBackup` field forces a full backup even when a checkpoint exists.
 
-The `VirtualMachineBackupTracker` can be referenced within the `VirtualMachineBackup` CR. This association allows checkpoint metadata to be preserved and utilized for subsequent incremental backups. The tracker CR will include a field indicating the name of the latest checkpoint, which will serve as the base for the next incremental backup. This field is automatically updated in the CR status upon the successful completion of each backup along side with the checkpoint metadata, and the previous checkpoint will be deleted.
-
-If a backup is initiated without referencing a `VirtualMachineBackupTracker`, a full backup will be performed, and no checkpoint history will be maintained for future incremental backups. Similarly, if a tracker is referenced but contains no record of a previous checkpoint, the backup will also default to a full backup. To explicitly perform a full backup even if a previous checkpoint exists, the `forceFullBackup` field can be set on the backup CR.
-
-**Handling Incremental backups Across VM Restarts**
-One challenge in Kubevirt is that Libvirt is re-created each time a VM restarts, causing all existing libvirt checkpoints to be lost. To enable incremental backups after a restart—rather than falling back to a full backup, checkpoints metadata must be provided to libvirt during VM initialization. This allows libvirt to redefine the checkpoints, ensuring that an incremental backup can be continued as expected.
-To address this, the VM controller will leverage the stored metadata within the VM associated `VirtualMachineBackupTracker` CRs during VM startup. The controller will iterate through these trackers and re-create the corresponding checkpoints in Libvirt based on the stored metadata. This mechanism ensures that incremental backups can resume seamlessly, even after a VM restart.
-
-### Offline backups
-
-An initial proposed solution involves starting the VM in a paused state to perform the backup, and then either unpausing or shutting it down once the backup is complete. However, this approach introduces additional considerations and trade-offs, which justify a separate, dedicated discussion. As such, this section is intentionally left without a formal API definition for now and only online backup will be supported at first.
-
-### State interruptions during backup
-
-During an online backup, if a user tries to stop the VM, Libvirt is developing a built-in [solution](https://issues.redhat.com/browse/RHEL-8067) to ensure the backup completes cleanly before shutdown.
-Until this Libvirt feature is implemented, KubeVirt will either prevent VM state changes during a backup or wait for the VirtualMachineBackup job to finish before allowing the VM to stop.
-If the guest operating system initiates a shutdown, the backup will be aborted and fail, with an error indicated in the backup CR.
+**Checkpoint redefinition after VM restart**: Libvirt recreates its state on VM restart, losing checkpoint metadata. The VM controller uses `VirtualMachineBackupTracker` CRs to redefine checkpoints for libvirt during initialization, ensuring incremental backups can continue after restarts.
 
 ### VM crash
 
-In the event of a VM crash, the CBT information may become corrupted and must be discarded. QEMU provides an API to verify the validity of the dirty bitmaps. Upon VM restart, as part of redefining the checkpoints, we will utilize this API to check the bitmap validity. If a corrupted bitmap is detected, the associated checkpoints will be discarded.
-Consequently, the first backup performed after such a crash will likely be a full backup. If an attempt at an incremental backup fails due to the absence of a valid checkpoint, the backup status will indicate a fallback to a full backup, and a full backup will be executed instead. Following the successful full backup, the existing (and potentially invalid) checkpoint will be deleted from the VirtualMachineBackupTracker and replaced with the new checkpoint generated by the full backup.
+After a VM crash, dirty bitmaps may be corrupted. On restart, bitmap validity is checked during checkpoint redefinition. Corrupted bitmaps cause the associated checkpoints to be discarded. The first post-crash backup will be full.
 
-### Migration and Backup
+### Migration and backup
 
-Migration and backup operations are mutually exclusive and cannot be performed simultaneously.
-If a backup is in progress and a migration is initiated, the backup will be aborted to prioritize the migration. Similarly, if a migration is already in progress, any attempt to initiate a backup will fail.
+Backup and migration never run concurrently. Backup wins by default, and only a `system-critical` migration overrides it:
+- A backup requested while the VMI is migrating waits for the migration to finish; it does not fail.
+- A migration started while a backup is in progress is held with a `migrationBlockedByBackup` condition until the backup completes or is canceled.
+- A migration with `spec.priority: system-critical` (node drain/evacuation, workload update) is not held. The in-progress backup is canceled and marked `Failed`.
 
-During a migration, the dirty bitmaps from all previous backups are automatically transferred along with the disk image. The only additional step required on the destination host is similar to the process after a VM restart: the checkpoints must be redefined for the newly initialized Libvirt instance.
-If the VM state PVC is not shared between the source and destination, a new one will be created for the migrated VM. And so, since the dirty bitmaps are migrated regardless of PVC sharing, incremental backups should function normally after the checkpoints are redefined.
+Canceling the backup does not release the migration on its own. Both modes keep the backup PVC attached to the virt-launcher pod as a utility volume, so the migration then blocks on `migrationBlockedByUtilityVolumes` until the backup controller detaches it. That wait is bounded by `migrationConfiguration.utilityVolumesTimeout` (default 150 seconds, counted from the migration object's creation, so the time spent waiting for the cancellation is charged against the same budget). If the volume is still attached when the timeout expires, the migration itself fails.
 
-### VMSnapshot and Backup
+Dirty bitmaps are transferred with the disk image during migration. After migration, checkpoints are redefined for the new libvirt instance. If the VM state PVC is not shared, a new one is created. Incremental backups resume normally after redefinition.
 
-Online snapshots, being a Kubernetes-level feature rather than native to Libvirt, interfere with the integrity of backup bitmaps. Therefore, restoring a VM from an online snapshot will lead to the discarding of all existing checkpoints. As a consequence, the subsequent backup performed after such a restore will be a full backup.
+### VMSnapshot and backup
+
+Online snapshots (a Kubernetes-level feature, not native to libvirt) interfere with bitmap integrity. Restoring from an online snapshot discards all checkpoints. The next backup after a restore will be full.
 
 ## API Examples
 
 ### Enable/disable QEMU backup
 
-Kubevirt CR configurations will be added with the following field:
+KubeVirt CR configuration:
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -179,323 +173,174 @@ metadata:
 spec:
   configuration:
     changedBlockTrackingLabelSelectors:
-      namespaceSelector:
-        changedBlockTracking: true
-      virtualMachineSelector:
-        workload-type: db
+      namespaceLabelSelector:
+        matchLabels:
+          changedBlockTracking: "true"
+      virtualMachineLabelSelector:
+        matchLabels:
+          workload-type: db
 ```
 
-A `changedBlockTracking` field will be added to the VirtualMachine status.
-Example:
+VM status after enabling:
 ```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: vmfedora
-  namespace: default
-spec:
-....
 status:
-  changedBlockTracking: PendingRestart
+  changedBlockTracking:
+    state: PendingRestart
 ```
 
-After restart the field is set to `Initializing`.
-A VM state PVC will be created if doesn't already exist.
-Then, For every disk a QCOW2 image will be created using the raw disk image as its data-file.
-Before applying the domain XML and starting it in virt-launcher manager, the XML will be modified for each disk to use the newly created QCOW2 image as the disk.
-
-The XML will modified from:
+Domain XML modification (raw disk to QCOW2 overlay with data-store):
 ```xml
-    <disk type='file' device='disk' model='virtio-non-transitional'>
-      <driver name='qemu' type='raw' cache='none' error_policy='stop' discard='unmap'/>
-      <source file='/var/run/kubevirt-private/vmi-disks/datavolumedisk/disk.img' index='2'/>
-      ...
-    </disk>
-    <disk type='block' device='disk' model='virtio-non-transitional'>
-      <driver name='qemu' type='raw' cache='none' error_policy='stop' io='native' discard='unmap'/>
-      <source dev='/dev/datavolumedisk2' index='3'/>
-      ...
-    </disk>
-
-```
-
-To:
-```xml
-    <disk type='file' device='disk' model='virtio-non-transitional'>
-      <driver name='qemu' type='qcow2' cache='none' error_policy='stop' discard='unmap'/>
-      <source file='/run/kubevirt-private/libvirt/qemu/swtpm/datavolumedisk.qcow2' index='2'>
-        <dataStore type='file'>
-          <format type='raw'/>
-          <source file='/run/kubevirt-private/vmi-disks/datavolumedisk/disk.img' index='3'/>
-        </dataStore>
-      </source>
-      ...
-    </disk>
-    <disk type='file' device='disk' model='virtio-non-transitional'>
-      <driver name='qemu' type='qcow2' cache='none' error_policy='stop' discard='unmap'/>
-      <source file='/run/kubevirt-private/libvirt/qemu/swtpm/datavolumedisk2.qcow2' index='4'>
-        <dataStore type='block'>
-          <format type='raw'/>
-          <source dev='/dev/datavolumedisk2' index='5'/>
-        </dataStore>
-      </source>
-      ...
-    </disk>
+<disk type='file' device='disk' model='virtio-non-transitional'>
+  <driver name='qemu' type='qcow2' cache='none' error_policy='stop' discard='unmap'/>
+  <source file='/run/kubevirt-private/libvirt/qemu/swtpm/datavolumedisk.qcow2'>
+    <dataStore type='file'>
+      <format type='raw'/>
+      <source file='/run/kubevirt-private/vmi-disks/datavolumedisk/disk.img'/>
+    </dataStore>
+  </source>
+</disk>
 ```
 
 ### VirtualMachineBackupTracker CR
 
-`VirtualMachineBackupTracker` is a namespace-scoped Custom Resource designed to track the latest backup checkpoint per-VM, per-backup-solution basis.
-It is intended to be created by a backup provider or user for a specific VM to monitor and manage incremental backups associated with a given backup solution.
-`IncrementalBackup` FeatureGate must be enabled in order to create this CR.
-Checkpoints of this tracker will be prefixed with the backupTracker's name, followed by a timestamp representing when the backup was taken.
+Namespace-scoped CR tracking the latest checkpoint per VM per backup solution. `IncrementalBackup` feature gate must be enabled.
 
 **Spec:**
-- `source` <br>
-Specifies the VM that this backup tracker is associated with.
+- `source`: The VM this tracker is associated with.
 
-**Status**
-- `latestCheckpoint` <br>
-The checkpoint of the latest backup, updated by the backup controller. This checkpoint will serve as the base for the next incremental backup when providing this tracker as a reference.
-This struct will consist of the needed information to redefine Libvirt's checkpoint XML and will consist of:
-- name
-- disks
-- creationTime
+**Status:**
+- `latestCheckpoint`: Checkpoint of the latest backup (`name`, `creationTime`). Updated by the backup controller. Used as the base for the next incremental backup.
 
-* If no latestCheckpoint in the status, a full backup will be initiated and the latestCheckpoint will be updated with the full backup checkpoint.
-* If latestCheckpoint is in the status an incremental backup will be performed using the `latestCheckpoint` as the base for determining which changed blocks need to back up.
-
-*VirtualMachineBackupTracker
 ```yaml
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackupTracker
 metadata:
-    name: my-backup-tracker
-    namespace: ns1
+  name: my-backup-tracker
+  namespace: ns1
 spec:
-    source:
-        apiGroup: kubevirt.io
-        kind: VirtualMachine
-        name: my-vm
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: my-vm
 status:
-    latestCheckpoint:
-      name: my-backup-tracker-2025-03-03T16:13:28Z
-      creationTime: "2025-03-03T16:13:28Z"
-      disks:
-        - my-volume
+  latestCheckpoint:
+    name: my-backup-tracker-2025-03-03T16:13:28Z
+    creationTime: "2025-03-03T16:13:28Z"
 ```
 
 ### VirtualMachineBackup CRD
 
-`VirtualMachineBackup` is a namespace-scoped Custom Resource that initiates the backup process.
-
-The CR name should be a unique identifier for the backup within the namespace, with only one backup allowed per VM at a time.
+Namespace-scoped CR that initiates a backup. Only one backup per VM at a time.
 
 **Spec:**
-- `source`<br>
-Optional. Specifies the VM to back up. If not provided, a reference to a `VirtualMachineBackupTracker` must be specified instead.
-- `backupTracker` <br>
-Optional. A reference to a `VirtualMachineBackupTracker` CR. Required to enable incremental backups, will be updated with the backup latestCheckpoint and use the existing `latestCheckpoint` as a base for the incremental backup. If not specified, a full backup will be performed and the source field will be expected.
-- `mode`<br>
-Optional. Should be either `push` or `pull`. Initially, as mentioned, only `push` will be allowed. If not specified, `push` will be the default behavior.
-- `pvcName` <br>
-Required in `push` and `pull` mode. Specifies the name of the PVC where the backup output will be stored for `push` mode and where the scratch files will be created for `push` mode. A PVC with that name needs exist otherwise the backup will wait for it to exist.
-- `skipQuiesce` <br>
-Optional. If set to true, the VM's filesystem will not be quiesced before the backup. By default, the system attempts to quiesce the filesystem to ensure data consistency.
-- `forceFullBackup` <br>
-Optional. If a backupTracker is provided and this field is set to true, force a full backup (instead of incremental using `latestCheckpoint`). The `latestCheckpoint` will be updated with the new full backup checkpoint.
-- `tokenSecretRef`<br>
-Optional. Required in `pull` mode. Specifies the name of the Secret containing the authentication token for the backup export. 
-- `ttlDuration`<br>
-Optional. Only relevant for `pull` mode. Specifies the time to live for the backup, defaults to 2 hours if not specified.
+- `source`: The VM to back up, or a `VirtualMachineBackupTracker` reference (for incremental backups).
+- `mode`: `Push` (default) or `Pull`.
+- `pvcName`: Required. PVC for backup output (push) or scratch space (pull).
+- `skipQuiesce`: Skip filesystem freeze before backup.
+- `forceFullBackup`: Force a full backup even when a checkpoint exists.
+- `tokenSecretRef`: Required for pull mode. Secret containing the authentication token.
+- `ttlDuration`: Time to live for the backup (default: 2 hours). Pull mode only.
 
 **Status:**
-- `checkpointName`<br>
-The name of the checkpoint created for the current backup. This field is updated by the backup controller.
-- `conditions`<br>
-Represents the current state of the backup process, such as `Initializing`, `Progressing`, `Ready`, `Done`, `Failed`, or `Deleting`.
-- `backupType` <br>
-Either `Full` or `Incremental`. Indicates the backup's scope, allowing users to confirm it aligns with their expectations or understand any deviation.
-- `endpointCert`<br>
-CA certificate used for connecting to the backup endpoints in pull mode.
-- `includedVolumes` <br>
-A list of the names of the volumes that were included for the backup, each entry containing:
-  - `name` <br>
-    The name of the volume that was included.
-  - `mapEndpoint` <br>
-    The URL for querying the bitmap of the volume.
-  - `dataEndpoint` <br>
-    The URL for querying and pulling the data of the volume.
+- `checkpointName`: Checkpoint created for this backup.
+- `conditions`: `Progressing`, `Complete`, `Failed`, and `Quiesced`, as standard `metav1.Condition`s. Phase detail is carried in the condition `reason`: `Initializing`, `Initiated`, `PreparingExport`, `ExportInitiated`, `ExportReady`, `Aborting`, `Completed`, `CompletedWithWarning`, `Failed`, `SourceLost`, `SourceUnhealthy`.
+  `Quiesced` reports the outcome of the filesystem freeze (`QuiesceSucceeded`, `QuiesceFailed`, `QuiesceSkipped`); a failed freeze completes the backup with reason `CompletedWithWarning`.
+- `type`: Either `Full` or `Incremental`.
+- `endpointCert`: CA certificate for pull mode endpoints.
+- `includedVolumes`: Volumes included in the backup, each with `name`, `mapEndpoint` (pull mode), and `dataEndpoint` (pull mode).
 
-Examples:
+Push mode example:
 ```yaml
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
 metadata:
-    name: backup1
-    namespace: ns1
+  name: backup1
+  namespace: ns1
 spec:
-    backupTracker: my-backup-tracker
-    mode: push
-    pvcName: backup-output-pvc
+  source:
+    apiGroup: backup.kubevirt.io
+    kind: VirtualMachineBackupTracker
+    name: my-backup-tracker
+  mode: Push
+  pvcName: backup-output-pvc
 status:
-    checkpointName: my-backup-tracker-2025-03-03T16:13:28Z
-    backupType: full
+  checkpointName: my-backup-tracker-2025-03-03T16:13:28Z
+  type: Full
 ```
 
+Pull mode example:
 ```yaml
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
 metadata:
-    name: backup1
-    namespace: ns1
+  name: backup1
+  namespace: ns1
 spec:
-    backupTracker: my-backup-tracker
-    mode: pull
-    tokenSecretRef: my-token
+  source:
+    apiGroup: backup.kubevirt.io
+    kind: VirtualMachineBackupTracker
+    name: my-backup-tracker
+  mode: Pull
+  pvcName: backup-scratch-pvc
+  tokenSecretRef: my-token
 status:
-    checkpointName: my-backup-tracker-2025-03-03T16:13:28Z
-    backupType: full
-    includedVolumes:
-    - name: datavolumedisk1
-      mapEndpoint: https://virt-exportproxy-kubevirt.apps-crc.testing/api/export.kubevirt.io/v1beta1/namespaces/default/virtualmachineexports/backup-export-backup1/exports/datavolumedisk1/map
-      dataEndpoint: https://virt-exportproxy-kubevirt.apps-crc.testing/api/export.kubevirt.io/v1beta1/namespaces/default/virtualmachineexports/backup-export-backup1/exports/datavolumedisk1/data
+  checkpointName: my-backup-tracker-2025-03-03T16:13:28Z
+  type: Full
+  endpointCert: "<base64-encoded CA cert>"
+  includedVolumes:
+  - name: datavolumedisk1
+    mapEndpoint: https://virt-exportproxy-kubevirt.apps-crc.testing/.../datavolumedisk1/map
+    dataEndpoint: https://virt-exportproxy-kubevirt.apps-crc.testing/.../datavolumedisk1/data
 ```
 
 ### Collection of the backup
 
-> Note: All of the information mentioned below are suggestions for backup vendors or users to fetch the backup. **There will not be an API providing this operations.**
+> [!IMPORTANT]
+> The following are suggestions for backup vendors. KubeVirt does not provide an API for these operations.
 
-**Push mode:**
-PVC name containing the backup is provided in the `VirtualMachineBackup` CR status. The backup output will be stored as sparsed qcow2 images, one per disk. In the `Restore` section we document an example of how to stitch these files together to construct a restorable image. To move the images, a data-mover pod can be spawned to attach to the PVC and copy the data over to a remote storage. After the data is moved, the PVC can be deleted.
+**Push mode:** The backup PVC contains sparse QCOW2 images, one per disk. A data-mover pod can be spawned to copy the data to remote storage.
 
-**Pull mode:**
-Clients connect via HTTP to endpoint(s) exposed in the `VirtualMachineBackupStatus` (see `Pull Mode M.O. and Alternatives` for more information). The connection is secured with TLS and authorized using a user-provided token. The client can query the endpoint(s) in order to either retrieve the dirty bitmap of a backup export or pull ranges of data.
+**Pull mode:** Clients connect via HTTPS to endpoints in the backup status, authorized with the user-provided token (`x-kubevirt-export-token` header).
 
-The `map` and `data` endpoints will be served per backup eligible disk.
-Both endpoints require the standard export token header (`x-kubevirt-export-token: <TOKEN>`) for authorization.
-The follow diagrams depict the interaction flow with each of the endpoints:
-
-Method | Endpoint | Description
--- | -- | --
-GET | /exports/{disk}/data | Streams raw disk data. Supports `offset` and `length` to control read range.
-```mermaid
-sequenceDiagram
-    participant User
-    participant Server as virt-exportserver
-
-    Note over User, Server: HTTP/1.1 HTTPS
-    User->>Server: GET /exports/datavolumedisk1/data?offset=0&length=65536
-    
-    Server->>Server: libnbd Pread (bind-mounted NBD socket)
-    
-    Server-->>User: 206 Partial Content (Stream)
- ```
-
-Method | Endpoint | Description
--- | -- | --
-GET | /exports/{disk}/map | Returns JSON of extents (clean or dirty). Params: `offset` (byte offset), `length` (read all extents in the range of `offset`+`length`), `page_size` (max amount of extents to retrieve per query, defaults to 512).
-```mermaid
-sequenceDiagram
-    participant User
-    participant Server as virt-exportserver
-
-    Note over User, Server: HTTP/1.1 HTTPS (Page 1)
-    User->>Server: GET /exports/datavolumedisk1/map?offset=0&length=1073741824&page_size=1
-    
-    Server->>Server: libnbd BlockStatus (bind-mounted NBD socket)
-    
-    Server-->>User: {"extents": [...], "next_offset": 1073741824}
-
-    Note over User, Server: HTTP/1.1 HTTPS (Page 2 - Follow Pointer)
-    User->>Server: GET /exports/datavolumedisk1/map?offset=1073741824&length=1073741824&page_size=1
-    
-    Server->>Server: libnbd BlockStatus (bind-mounted NBD socket)
-    
-    Server-->>User: { "extents": [...], "next_offset": null }
- ```
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/exports/{disk}/data` | Streams raw disk data. Supports `offset` and `length` query params. |
+| GET | `/exports/{disk}/map` | Returns JSON extents (clean/dirty). Supports `offset`, `length`, and `page_size` query params. |
 
 ### Restore
 
-> Note: The information mentioned below is a naive option only. **There will not be an API provided for this.**
+> [!IMPORTANT]
+> The following is a naive approach only. KubeVirt does not provide an API for this operation.
 
-Assuming that the full backup and all incremental backups up to the desired restore point are available, the incremental backups must be applied in the correct order (from the first incremental to the last) to ensure proper integration with the full backup.
-
-The typical process for applying incremental backups in the QCOW2 format involves using the `qemu-img` tool, which can merge incremental backups with the base full image. You can use the qemu-img rebase command to sequentially apply each incremental backup on top of the full backup.
-
-```bash
-$ qemu-img rebase -b fullbackup.qcow2 -f qcow2 -u incremental1.qcow2
-```
-
-After applying the first incremental backup, subsequent incremental backups must be applied one by one, in the correct order. For example, apply incremental2.qcow2 on top of the image that already includes incremental1.qcow2, and continue this process for each subsequent incremental backup.
-```bash
-$ qemu-img rebase -b incremental1.qcow2 -f qcow2 -u incremental2.qcow2
-$ qemu-img rebase -b incremental2.qcow2 -f qcow2 -u incremental3.qcow2
-.
-.
-.
-```
-
-Since KubeVirt only supports raw disk images, the final step is to convert the merged QCOW2 image to a raw format.
+Assuming full and incremental backups are available, apply incrementals in order using `qemu-img rebase`:
 
 ```bash
-$ qemu-img convert -f qcow2 -O raw incremental3.qcow2 restored-raw.img
+qemu-img rebase -b fullbackup.qcow2 -f qcow2 -u incremental1.qcow2
+qemu-img rebase -b incremental1.qcow2 -f qcow2 -u incremental2.qcow2
 ```
 
-Once the raw restored image is created, you can store it in a PVC and use this PVC as the restored volume for the VM. You can use any population method like import or upload.
+Convert the final QCOW2 to raw for use in KubeVirt:
 
+```bash
+qemu-img convert -f qcow2 -O raw incremental2.qcow2 restored-raw.img
+```
 
-## Alternatives
+Store the raw image in a PVC using import or upload.
 
-The option to use [KEP-3314: CSI Changed Block Tracking](https://github.com/kubernetes/enhancements/tree/master/keps/sig-storage/3314-csi-changed-block-tracking), the native Kubernetes approach for CBT, was considered as an alternative to facilitating libvirt backups.
-Advantages:
-- Aligning with k8s ecosystem.
-- Avoid the need to implement this complex feature ourselves.
-- Backup vendors already use CSI API currently for full backups.
+## Pull mode
 
-Disadvantages:
-- This KEP is still in the early stages of implementation and will take considerable time to mature before reaching a stable v1 version and it is not under our control.
-- Beyond waiting for the Kubernetes API to mature, each storage provider must implement the optional SnapshotMetadata API as outlined in the KEP. Since this is optional, not all providers will support it, and adoption will be gradual, restricting the available options for users.
-- When using Kubernetes VolumeSnapshot, the guest must be frozen during the snapshot of all the VM volumes. In contrast, libvirt uses a dedicated job to capture the disk state quickly, minimizing guest downtime.
-- The API is limited to the design choices made by Kubernetes, offering little flexibility for adjustments or additions.
+### Chosen approach: export type backup
 
-## Pull Mode M.O. and Alternatives
+KubeVirt's `VirtualMachineExport` API is generalized to support a new source kind: `VirtualMachineBackup`.
 
-Ingress to the virt-launcher Pod is currently impossible because all incoming traffic is redirected to the guest VM. To address this limitation, several alternative approaches have been considered.
-
-### Chosen M.O. - Export Type: Backup
-
-KubeVirt currently supports a `VirtualMachineExport` API which facilitates the secure export of volume data over HTTPS. This is achieved by the export controller reconciling the `VirtualMachineExport` CR to spin up a temporary virt-exportserver pod. This pod mounts the source volumes and exposes them via an internal ClusterIP service and, optionally, an external Ingress/Route through the export proxy deployment.
-
-This proposal generalizes the `VirtualMachineExport` implementation to support a new source kind: `VirtualMachineBackup`.
-
-The flow is as follows:
-1. A user creates a `VirtualMachineBackup` CR with spec.mode: Pull.
-2. The backup controller invokes the `Backup` RPC with `Start` cmd on the target virt-launcher. This triggers the creation of the associated libvirt backup job and spins up the NBD server inside the virt-launcher pod, listening on a Unix domain socket (e.g., `/run/kubevirt/sockets/backup-nbd.sock`).
-3. Once the backup job is progressing, the backup controller automatically creates an owned `VirtualMachineExport` CR, setting its source to the `VirtualMachineBackup`.
-4. The export-controller reconciles the new `VirtualMachineExport`. It identifies the source type and launches the virt-exportserver pod.
-  - Configuration: The controller injects the included volume list (from the `VirtualMachineBackupStatus`) into the pod's environment variables.
-5. Once the export pod and service are provisioned (i.e., the `VirtualMachineExport` status has a `ServiceName` and the exporter pod exists), the backup controller instructs virt-handler to bind-mount the virt-launcher's NBD Unix socket into the virt-exportserver pod's filesystem (see [Backup Handler Export Command](#backup-handler-export-command) for the mechanism and [Pull Mode Data Path](#pull-mode-data-path) for design rationale).
-6. The virt-exportserver connects to the bind-mounted NBD Unix socket via libnbd. Since the socket is local to the pod's filesystem, no network communication between the pods is required for data transfer.
-7. Data Serving:
-  - The virt-exportserver registers dynamic HTTP handlers for every volume included in the backup under the new `Backups` status field.
-  - The backup controller recognizes that the `VirtualMachineExport` is serving and updates the `ExportReady` condition of the `VirtualMachineBackupStatus` to true.
-  - The `VirtualMachineBackupStatus` includes the created URLs for every volume in its `includedVolumes`'s list by populating the `mapEndpoint` and `dataEndpoint` fields respectively.
-  - When a client requests a specific endpoint, the virt-exportserver uses libnbd to read directly from the bind-mounted NBD socket and either:
-    1. Streams the raw binary data back in the case of a data request or;
-    2. Returns the bitmap extents in JSON format.
-
-This architecture was chosen because:
-- It preserves pull mode semantics as the data flow remains consumer-driven.
-- The data path is direct (QEMU, NBD Unix socket, libnbd, HTTP response) with no network I/O between the pods (see [Pull Mode Data Path](#pull-mode-data-path) for benchmarks).
-- No new inbound ports are opened on the VM pod, maintaining the existing security posture.
-- Leverages the existing export controller for lifecycle management of the export pod.
-- The bind-mount mechanism is equivalent to existing filesystem volume hotplug logic via virt-handler.
-- Provisions only a percentage of the total virtual disk size, rather than the full amount, because it relies on scratch space and transfers the backup data over the network.
-
-In contrast:
-- Network Push M.O. - breaks several pull-mode features and requires extending the hotplug API.
-- Ingress - requires two new internal APIs (secret hotplug and conditional networking changes), significantly expanding the scope of this VEP.
+Flow:
+1. User creates a `VirtualMachineBackup` with `mode: Pull`.
+2. Backup controller invokes `Backup` RPC on virt-launcher, starting the libvirt backup job and NBD server on a Unix socket.
+3. Backup controller creates an owned `VirtualMachineExport` with source `VirtualMachineBackup`.
+4. Export controller launches the virt-exportserver pod with volume info from the backup status, carrying a pod affinity term towards the virt-launcher pod so that it lands on the same node (required by step 5).
+5. Backup controller instructs virt-handler to bind-mount the virt-launcher's NBD Unix socket into the virt-exportserver pod's filesystem.
+6. Virt-exportserver connects to the bind-mounted NBD socket via libnbd. No network I/O between the pods for data transfer.
+7. Virt-exportserver registers HTTP handlers per backup volume. Client requests are served via libnbd reads on the local socket.
 
 ```mermaid
 sequenceDiagram
@@ -513,153 +358,62 @@ sequenceDiagram
         participant ES as Virt-Exportserver
     end
 
-    %% Phase 1: Setup
-    Note over User, Launcher: Phase 1: Initialization & Infrastructure
     User->>API: Create VMBackup (Mode: Pull)
     BC->>Launcher: RPC StartBackup()
     Launcher->>Launcher: Start NBD Server (Unix Socket)
-    
+
     BC->>API: Create VMExport (Source: VMBackup)
-    EC->>API: Watch VMExport
-    EC->>ES: Create Pod & Service (ClusterIP)
+    EC->>ES: Create Pod & Service (co-located with launcher)
     ES->>ES: Listen :8443 (External HTTPS)
 
-    %% Phase 2: Socket Bind-Mount
-    Note over BC, ES: Phase 2: NBD Socket Bind-Mount
     BC->>VH: Bind-mount NBD socket into exportserver pod
-    VH->>VH: Mount /run/kubevirt/sockets/backup-nbd.sock<br/>into virt-exportserver filesystem
+    VH->>VH: Mount backup-nbd.sock into virt-exportserver
     ES->>ES: Connect to bind-mounted NBD socket via libnbd
 
-    %% Phase 3: The Data Pull
-    Note over User, ES: Phase 3: Data Streaming
     User->>ES: HTTP GET /exports/disk1/data
-    activate ES
-    
-    ES->>ES: libnbd Pread (bind-mounted NBD socket)
-    
+    ES->>ES: libnbd Pread (local socket)
     ES-->>User: HTTP 206 Partial Content (Stream)
-    deactivate ES
 ```
 
-**Security considerations and approaches**
-- Both internal traffic and external traffic are secured using the existing export certificate API.
-- Authorization for external traffic is done via a user-provided token.
-- The bind-mounted NBD socket relies on filesystem-level isolation and the pod security context for access control. No network traffic flows between the virt-launcher and virt-exportserver pods for data transfer.
+Security: external traffic secured via the existing export certificate API with user-provided token authorization. The bind-mounted NBD socket relies on filesystem-level isolation and pod security context for access control. No network traffic between the pods for data transfer.
 
-#### Backup Handler Export Command
+### Backup handler export command
 
-The bind-mount described in step 5 above is triggered through the existing `Backup` subresource endpoint on virt-handler. Rather than introducing a new RPC or endpoint, the `Export` command is carried by the same `BackupOptions` structure used for the `Start` and `Abort` commands.
+The bind-mount is triggered through the existing `Backup` subresource on virt-handler using `BackupOptions{Cmd: Export, ExporterPodUID: "<uid>"}`. Virt-handler resolves the launcher and exporter pod paths, then performs a bind mount via `virt-chroot` to project the NBD socket into the exporter pod's emptyDir volume. The mount is recorded locally for idempotency.
 
-Once the export pod and service are provisioned, the backup controller:
-1. Resolves the virt-exportserver pod name and fetches its UID.
-2. Issues a `Backup` subresource call with `BackupOptions{Cmd: Export, ExporterPodUID: "<exporter-pod-uid>"}`.
+### Pull mode Q&A
 
-When virt-handler's `BackupHandler` receives a request with `Cmd == Export` and `ExporterPodUID` set, it handles the bind-mount directly.
-1. Looks up the virt-launcher pod UID from the VMI.
-2. Resolves the source socket path: `<kubeletPodsDir>/<launcherPodUID>/volumes/kubernetes.io~empty-dir/sockets/backup-nbd-sock`.
-3. Resolves the target directory: `<kubeletPodsDir>/<exporterPodUID>/volumes/kubernetes.io~empty-dir/nbd/`.
-4. Creates the target file `backup-nbd.sock` in the exporter's emptyDir volume.
-5. Performs a bind mount via `virt-chroot` to project the launcher's NBD socket into the exporter pod's filesystem.
-6. Records the mount in a local mount record, so that repeated calls from the backup controller's reconciliation loop are idempotent.
+**Q: How does the virt-exportserver interact with the NBD socket?**
 
-**Q&A**
+It connects to the bind-mounted NBD Unix socket via libnbd, keeping the entire data path local to the node with no network hop between the pods. For data requests it uses `libnbd.Pread` and streams binary data into the HTTP response. For map requests it uses `libnbd.BlockStatus` to query dirty bitmap extents and returns them as JSON.
 
-Q: What changes does this entail for the export API? 
+**Q: How are failures handled?**
 
-A: The changes are split to changes done to the export controller and changes done to the virt-exportserver.
+- Virt-exportserver failure: Export controller recreates the pod. Backup controller re-establishes the bind-mount. Clients retry until the endpoint is available again.
+- Virt-launcher failure: Backup is marked `Failed`. The NBD server is gone and dirty bitmaps may be inconsistent, requiring a full backup next time.
 
-For the export controller:
-A new `sourceHandler` interface will be introduced to allow preparing an export that doesn't use PVCs:
-```go
-type exportSource interface {
-	IsSourceAvailable() bool
-	HasContent() bool
-	SourceCondition() exportv1.Condition
-	ReadyCondition() exportv1.Condition
-	ServicePorts() []corev1.ServicePort
-	ConfigurePod(pod *corev1.Pod)
-	ConfigureExportLink(exportLink *exportv1.VirtualMachineExportLink, paths *ServerPaths, vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, hostAndBase, scheme string)
-	UpdateStatus(vmExport *exportv1.VirtualMachineExport, pod *corev1.Pod, svc *corev1.Service) (time.Duration, error)
-}
-```
+**Q: How are node evictions handled?**
 
-Each source will have a concrete implementation, in the case of `VirtualMachineBackup`:
+- Virt-exportserver eviction: same as abrupt termination.
+- Virt-launcher eviction: node drain issues a `system-critical` migration, which cancels the in-progress backup instead of being blocked by it (see [Migration and backup](#migration-and-backup)). The backup is marked `Failed` and the client has to start a new one once the VM has landed on the target node. In pull mode the VMExport and the exportserver pod have to be torn down before the scratch PVC can detach, so that teardown competes with the utility volume timeout that gates the migration.
 
-```go
-type VMBackupSource struct {
-	vmBackup *backupv1.VirtualMachineBackup
-	caCert   string
-}
-```
+### Pull mode data path
 
-For the virt-exportserver:
-Two new handlers will be added to the `ExportServerConfig`:
-```go
-	backupDataHandler  func(exportName string) http.Handler
-	backupMapHandler   func(exportName string) http.Handler
-```
+The data path has significant impact on pull mode throughput.
 
-```go
-func (s *exportServer) getBackupHandlerMap(bi export.BackupInfo) map[string]http.Handler {
-	result := make(map[string]http.Handler)
+#### Chosen: NBD socket bind-mount
 
-	if bi.DataURI != "" {
-		result[bi.DataURI] = s.BackupDataHandler(bi.Path)
-	}
-
-	if bi.MapURI != "" {
-		result[bi.MapURI] = s.BackupMapHandler(bi.Path)
-	}
-
-	return result
-}
-```
-
-```go
-	for _, bi := range s.Paths.Backups {
-		for path, handler := range s.getBackupHandlerMap(bi) {
-			log.Log.Infof("Handling backup path %s\n", path)
-			mux.Handle(path, tokenChecker(s.TokenGetter, handler))
-		}
-	}
-```
-
-Q: How does the virt-exportserver interact with the NBD socket?
-
-A: The virt-exportserver connects to the bind-mounted NBD Unix socket via libnbd. For `Read` requests it issues `libnbd.Pread` calls and streams the binary data directly into the HTTP response. For `Map` requests it uses `libnbd.BlockStatus` to query the dirty bitmap extents and returns them as JSON.
-
-Q: How are failures handled?
-
-A:
-- virt-exportserver failure: If the virt-exportserver pod is terminated, the export controller detects the state change and recreates the pod. The backup controller then instructs virt-handler to re-establish the bind-mount of the NBD socket into the new pod. Once the new server pod is ready and the socket is mounted, data serving resumes without interrupting the backup job logic. Clients attempting to interact with the backup endpoints while the virt-exportserver is down will encounter connection errors and should be able to recover from them until the endpoint is made available again.
-- virt-launcher failure: If the virt-launcher terminates, the backup is immediately marked as `Failed`. This is because the NBD server providing the data resides within the launcher process. Additionally, an abrupt termination may leave the QEMU dirty bitmaps in an inconsistent or "corrupted" state since they may not have been flushed to the qcow2 metadata header, necessitating a full backup run next time.
-
-Q: How are node evictions handled?
-
-A:
-- virt-exportserver eviction: If the virt-exportserver pod is evicted the same flow as abrupt termination takes place.
-- virt-launcher eviction: While a backup is active, the VM is considered non-migratable. Consequently, standard node drain or eviction requests will be blocked until the backup operation completes or is canceled.
-
-### Pull Mode Data Path
-
-The data path from the QEMU NBD server to the HTTP response has significant impact on pull mode backup throughput. This section describes the chosen approach for the read data path and the alternatives that were evaluated.
-
-#### Chosen: NBD Socket Bind-Mount
-
-Rather than tunneling backup data through an intermediary protocol, virt-handler bind-mounts the virt-launcher's NBD Unix socket directly into the virt-exportserver pod's filesystem. The virt-exportserver then connects to the QEMU NBD server via libnbd locally, resulting in a minimal data path:
+Virt-handler bind-mounts the virt-launcher's NBD Unix socket into the virt-exportserver pod. The data path is:
 
 ```
-QEMU | NBD Unix socket | libnbd Pread | HTTP response writer
+QEMU -> NBD Unix socket -> libnbd Pread -> HTTP response writer
 ```
 
-This eliminates the need for protobuf serialization, gRPC buffer pool management, double HTTP/2 framing, and inter-pod mTLS encryption that would be required by a gRPC-based tunnel.
+This eliminates protobuf serialization, gRPC framing, and inter-pod mTLS encryption.
 
-**Implementation details:**
-- The virt-exportserver pod is scheduled on the same node as the VMI, enabling the bind-mount.
-- The export pod declares an emptyDir volume at `/var/run/kubevirt/nbd` with `MountPropagationHostToContainer`, allowing the bind-mount performed by virt-handler on the host to propagate into the container.
-- The virt-exportserver watches for the socket file to appear and connects to it via `libnbd.ConnectUnix`. Reads are performed using `Pread` in 1 MiB chunks and streamed directly into the HTTP response.
-- The associated VirtalMachineExport will only become Ready once the NBD connection is established.
-- Cleanup of the bind-mount occurs when the `VirtualMachineBackup` resource is deleted.
+The export pod declares an emptyDir volume at `/var/run/kubevirt/nbd` with `MountPropagationHostToContainer`. Virt-exportserver watches for the socket and connects via `libnbd.ConnectUnix`. Reads use 1 MiB chunks streamed directly into the HTTP response. The VMExport becomes Ready once the NBD connection is established.
+
+The bind-mount only works when the exporter and the launcher share a node. This is currently expressed as a preferred (soft) pod affinity towards the virt-launcher pod, so co-location is not guaranteed and an exporter scheduled elsewhere never becomes Ready. Turning this into a hard constraint is a graduation item.
 
 **Throughput benchmarks** (full 20 GiB disk pull, external network storage):
 
@@ -670,108 +424,68 @@ This eliminates the need for protobuf serialization, gRPC buffer pool management
 | gRPC tunnel, libnbd AIO (16 in-flight), 1 MiB chunks | 117 MB/s | +31% |
 | **NBD socket bind-mount, sync Pread, 1 MiB chunks** | **132 MB/s** | **+48%** |
 
-> [!NOTE]
-> The bind-mount mechanism relies on virt-handler, equivalent to the existing filesystem volume hotplug logic. This introduces a dependency on virt-handler for establishing and re-establishing the socket mount, which follows the same delegation pattern.
-> Additionally, the virt-exportserver pod must be scheduled on the same node as the virt-launcher. This constraint is consistent with the hotplug model and benefits data locality, but it does restrict pod placement.
+The `libnbd AIO` rows replace the synchronous `Pread` loop with `AioPread` + `Poll` and up to 16 reads in flight, overlapping NBD reads with downstream writes. That optimization sits at the NBD read layer and is orthogonal to the transport, so it applies to the bind-mount path as well. The bind-mount row was measured with synchronous reads only, so it is a lower bound for the chosen approach rather than a like-for-like ceiling.
 
-#### Alternative: gRPC Tunnel
+### Pull mode alternatives considered
 
-In this alternative, the virt-launcher establishes a gRPC-over-HTTP/2-CONNECT tunnel to the virt-exportserver. Each read request traverses the following path:
-```
-QEMU | NBD Unix socket | libnbd | protobuf marshal | gRPC HTTP/2 frames
-| HTTP/2 CONNECT tunnel (mTLS) | virt-exportserver | HTTP response
-```
+**gRPC tunnel**: Virt-launcher establishes a gRPC-over-HTTP/2-CONNECT tunnel to virt-exportserver. Each read traverses: libnbd -> protobuf marshal -> gRPC HTTP/2 frames -> HTTP/2 CONNECT tunnel (mTLS) -> virt-exportserver -> HTTP response. CPU profiling shows ~28-30% in syscalls and ~6% in TLS, overhead inherent to the transport. See throughput benchmarks above.
 
-Every gRPC message is serialized to protobuf, framed as HTTP/2 data by gRPC's transport, written into the tunnel's pipe, framed again as HTTP/2 data, encrypted with AES-GCM, and written to the TCP socket. CPU profiling shows `Syscall6` at ~28-30% and TLS encryption at ~6%, overhead inherent to the transport that cannot be eliminated without replacing it.
+**Network push**: Virt-launcher connects to a remote endpoint and pushes data. Requires secret hotplug for TLS certificates. Breaks pull-mode features.
 
-In Go,  gRPC operates with a tiered buffer pool (sizedBufferPool) and clear()s the full tier capacity on every buffer reuse. For example, a 256KiB protobuf message would be promoted to the 1MiB tier, causing a 4x zeroing amplification. With 1MiB chunks, the marshaled message overflows all tiers and falls through to `simpleBufferPool`, which allocates a buffer matching the actual size. This reduces `memclr` by ~3GB per GB transferred and drops CPU utilization from ~68% to around ~48% in benchmarks.
+**Ingress**: A service exposes the virt-launcher directly. Requires conditional DNAT to route traffic to virt-launcher instead of the guest, and secret hotplug. No ingress solution for the virt-launcher pod exists today.
 
-#### Additional Optimizations
+## Alternatives
 
-Switching from synchronous libnbd `Pread` to libnbd AIO (`AioPread` + `Poll`) pipelines up to N concurrent NBD reads so that disk I/O overlaps with downstream writes instead of blocking sequentially. The implementation that was examined uses a circular FIFO queue of pre-allocated C buffers (`libnbd.MakeAioBuffer`) with zero-copy slice access, eliminating per-chunk `make([]byte)` allocations and their associated `memclrNoHeapPointers` zeroing cost. This optimization operates at the NBD read layer and is applicable to both the bind-mount and gRPC tunnel approaches. Over the gRPC tunnel it yielded 103 MB/s at 256 KiB chunks (+15%) and 117 MB/s at 1 MiB chunks (+31%).
+[KEP-3314: CSI Changed Block Tracking](https://github.com/kubernetes/enhancements/tree/master/keps/sig-storage/3314-csi-changed-block-tracking) was considered as an alternative.
 
-> [!NOTE]
-> This optimization is applicable to both approaches.
+Advantages: aligns with the Kubernetes ecosystem; backup vendors already use CSI for full backups.
 
-### Alternatives
-
-#### Network Push
-
-The backup process begins by initializing the Unix socket. The virt-launcher opens a bidirectional channel to the socket and connects to a remote endpoint provided in the `VirtualMachineBackup` CR. Once connected, it orchestrates a similar process to push mode by using an internal NBD client on the socket to read and transfer all of the disks' backup data to the remote endpoint over the established TCP channel.
-
-**Security considerations and approaches**  
-The `VirtualMachineBackup` CR includes an option to specify a Secret containing client certificates and a root CA. This Secret is hotplugged (via an internal extension of the volume hotplug API) into the virt-launcher, allowing it to initiate the connection using the provided certificates.
-
-**Pros**
-- No additional helper Pod required.
-- Simplifies implementation of pull-like flows.
-
-**Cons**
-- Cannot perform more complex operations typically available in pull mode, due to direct access to the exposed NBD endpoint.
-- Requires an internal extension to the existing volume hotplug API to support hotplugging secrets as a new Utility Volume type, enabling the injection of certificates required for the virt-launcher to establish the connection.
-
-> [!IMPORTANT]
-> As explained in the Cons section, a new kind of Utility Volume that mounts secrets will be required to support this approach. Unlike PVCs, secret data is copied into a tmpfs before being mounted, which prevents mount propagation, a key capability for enabling disk hotplug in the current model. Alternative methods, such as copying the secret data to a temporary location inside the virt-launcher, could also be explored, but overall, the implementation remains comparatively complex relative to other methods of operation.
-
-
-#### Ingress
-The backup process starts by specifying a transport address as part of the backup options. A temporary Service is created to expose access to the virt-launcher. The backup provider then interacts with that endpoint.
-
-**Security considerations and approaches**  
-Same as the chosen method of operation.
-
-**Pros**
-- No additional logic required at the virt-launcher layer (e.g., bidirectional pipe management or remote connection handling).
-- No additional helper Pod required.
-
-**Cons**
-- Requires implementation of two internal APIs:
-  - Secret hotplug (as is defined in the **Network Push** M.O.).
-  - Conditional DNAT to reserve a port that routes to the virt-launcher instead of the guest so that ingress traffic aimed at the backup endpoint wouldn't reach the guest instead.
-
-> [!IMPORTANT]
-> A dedicated ingress solution specifically for the virt-launcher and not the guest isn't available as of the time of writing this proposal.
-
+Disadvantages: still in early stages with no timeline for maturity; requires optional per-provider SnapshotMetadata API adoption; requires guest freeze during the full snapshot duration (vs. libvirt's quick state capture); limited flexibility in API design.
 
 ## Scalability
 
-- QCOW2 overlay requires a minimum PVC size.
-With certain storage providers, even when a small PVC size is requested, a larger volume may be provisioned based on the provider’s minimum volume size. When managing a large number of VMs, this behavior can lead to inefficient storage.
-**This is a general limitation that also affects VM state PVCs.**
+### QCOW2 overlay storage overhead
+
+QCOW2 overlays are stored on the VM state PVC. The overhead per overlay includes L2 tables, refcount tables, and dirty bitmap data. For a high-end scenario (5 disks x 500 GiB, 256 KiB clusters, 10 bitmaps, 64 KiB bitmap granularity), total overlay overhead is approximately 148 MiB. The backend state PVC is provisioned with 512 MiB by default to accommodate this. See [`CBTBackendStateOverhead`](https://github.com/kubevirt/kubevirt/blob/92dff93d6f/pkg/storage/cbt/cbt.go#L41-L57) for the detailed calculation.
+
+### Storage provider minimum volume size
+
+Some storage providers provision larger volumes than requested based on their minimum volume size. With many VMs, this can lead to storage inefficiency. This is a general limitation shared with VM state PVCs.
 
 ## Update/Rollback Compatibility
 
-Since the new feature allows users to enable or disable it, upgrades will not pose any issues. Users must opt in by setting the changedBlockTracking to true. The rollback will not be a problem either, as it is essentially the same as setting the changedBlockTracking to false, which will be the default value.
+Users must opt in by enabling CBT. Rollback is equivalent to disabling CBT. No data migration is required.
 
 ## Functional Testing Approach
 
-Testing should check data consistency before and after add and remove of the QCOW2 overlay.
-Data consistency of incremental backup.
-Data consistency after VM restart.
-Check failure scenario where incremental backup cannot be done and in such case full backup should be required.
+- Data consistency before and after overlay creation and removal.
+- Data consistency of incremental backups.
+- Data consistency after VM restart.
+- Failure scenarios where incremental backup is not possible (fallback to full).
 
-## Implementation Phases
+## Known limitations
 
-- Add/remove the qcow2 overlay
-- Subresource to initiate backup (full and incremental) including Libvirt wrapper backup functions.
-- New VirtualMachineBackup CR + controller for backups - online backup only
-- New VirtualMachineBackupTracker CR, Handling restart of VM and redefinition of checkpoints.
-- Handle VM failure where bitmap is corrupted - next backup needs to be full.
-- Offline backup
-- API to allow to pull the backup over network.
+- **Live overlay addition**: Enabling CBT currently requires a VM restart because overlays cannot be inserted under a running disk yet (tracked in [RHEL-80680](https://issues.redhat.com/browse/RHEL-80680)). The `PendingRestart` state will be deprecated once live addition lands.
+- **Offline backup**: Only online (running VM) backup is supported today. Offline backup will be addressed by a separate VEP.
+- **State interruptions**: If the guest OS initiates a shutdown during backup, the backup is canceled and marked as failed because there is no way to finish cleanly before the domain disappears (pending [RHEL-8067](https://issues.redhat.com/browse/RHEL-8067)).
+- **Differential backup**: Only the latest checkpoint can serve as a base for incremental backup. Multi-checkpoint retention and the ability to back up from a specific previous checkpoint will be addressed by a separate VEP.
+- **Backup teardown during node drain**: A `system-critical` migration cancels an in-progress backup, but the migration stays blocked until the backup's utility volume detaches and fails outright if that exceeds `utilityVolumesTimeout` (default 150 seconds). Pull mode is especially sensitive here: the VMExport and exportserver pod must be torn down before the scratch PVC can detach, so a drain landing on a long-lived pull-mode backup is the likeliest way to hit the timeout.
+- **Orphaned overlays**: Replacing a disk's backing PVC (offline or online) can leave orphaned QCOW2 overlays on the VM state PVC with no automatic reclaim path.
 
-* Live qcow2 overlay addition - depends on [https://issues.redhat.com/browse/RHEL-80680](https://issues.redhat.com/browse/RHEL-80680)
-
-## Feature lifecycle Phases
+## Graduation Requirements
 
 ### Alpha
 
-IncrementalBackup FeatureGate. Users will have to opt in.
+- [x] Enable/disable CBT per VM via label selectors and QCOW2 overlays
+- [x] `VirtualMachineBackup` CR with push and pull modes
+- [x] `VirtualMachineBackupTracker` CR for checkpoint tracking
+- [x] Single-checkpoint incremental backup
+- [x] Checkpoint redefinition after VM restart and migration
 
 ### Beta
 
-After several releases, when we are confident that the feature is working as expected, move to beta.
+TBD.
 
 ### GA
 
-GA once the feature has been running in production without issue.
+TBD.
