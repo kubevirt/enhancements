@@ -145,8 +145,6 @@ since a snapshot represents VM state.
     }
   ],
   "annotations": {
-    "org.opencontainers.image.title": "my-vm",
-    "org.opencontainers.image.description": "Fedora 42 Server VM",
     "org.opencontainers.image.created": "2026-04-09T12:00:00Z"
   }
 }
@@ -154,6 +152,10 @@ since a snapshot represents VM state.
 
 The `platform.architecture` field maps to `spec.template.spec.architecture`,
 defaulting to `amd64` when unset. The `platform.os` field is always `linux`.
+
+The index carries a single annotation, `org.opencontainers.image.created`, an
+RFC 3339 UTC timestamp recording when the export server prepared the artifact.
+The resource name and the rest of the object metadata live in the config blob.
 
 #### Image Manifest
 
@@ -176,9 +178,7 @@ Each manifest in the index describes one architecture variant:
       "size": 2147483648,
       "annotations": {
         "io.kubevirt.disk.name": "rootdisk",
-        "io.kubevirt.pvc.capacity": "10Gi",
-        "io.kubevirt.pvc.volumeMode": "Block",
-        "io.kubevirt.pvc.accessModes": "ReadWriteOnce",
+        "io.kubevirt.disk.size": "10Gi",
         "org.opencontainers.image.title": "rootdisk.raw.zst"
       }
     },
@@ -188,19 +188,16 @@ Each manifest in the index describes one architecture variant:
       "size": 1073741824,
       "annotations": {
         "io.kubevirt.disk.name": "datadisk",
-        "io.kubevirt.pvc.capacity": "5Gi",
-        "io.kubevirt.pvc.volumeMode": "Block",
-        "io.kubevirt.pvc.accessModes": "ReadWriteOnce",
+        "io.kubevirt.disk.size": "5Gi",
         "org.opencontainers.image.title": "datadisk.raw.zst"
       }
     }
-  ],
-  "annotations": {
-    "org.opencontainers.image.title": "fedora-server",
-    "org.opencontainers.image.created": "2026-04-09T12:00:00Z"
-  }
+  ]
 }
 ```
+
+Annotations are set on the layer descriptors only; the manifest itself carries
+none.
 
 #### Config Blob
 
@@ -244,13 +241,15 @@ by the external Go library
 
 #### Layer Annotations
 
-| Annotation                       | Description                                 |
-|----------------------------------|---------------------------------------------|
-| `io.kubevirt.disk.name`          | Volume name from the VM spec                |
-| `io.kubevirt.pvc.capacity`       | PVC requested capacity (e.g. `10Gi`)        |
-| `io.kubevirt.pvc.volumeMode`     | `Filesystem` or `Block`                     |
-| `io.kubevirt.pvc.accessModes`    | Comma-separated list (e.g. `ReadWriteOnce`) |
-| `org.opencontainers.image.title` | Human-readable filename                     |
+| Annotation                       | Description                                            |
+|----------------------------------|--------------------------------------------------------|
+| `io.kubevirt.disk.name`          | Volume name from the VM spec                           |
+| `io.kubevirt.disk.size`          | Uncompressed disk image size, binary SI (e.g. `10Gi`)  |
+| `org.opencontainers.image.title` | Filename, `<volume name>.raw.zst`                      |
+
+The descriptor `size` field is the compressed blob size, so
+`io.kubevirt.disk.size` is what an importer needs to size the target PVC
+without decompressing the layer first.
 
 ### OCI Layout Streaming Endpoint (export server)
 
