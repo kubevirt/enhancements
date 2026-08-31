@@ -4,7 +4,7 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.9
+- This VEP targets alpha for version: v1.9, v1.10
 - This VEP targets beta for version:
 - This VEP targets GA for version:
 
