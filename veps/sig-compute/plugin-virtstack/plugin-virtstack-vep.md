@@ -164,6 +164,8 @@ We propose a new pluggable sidecar component, tentatively named `virt-runtime`, 
 
 `virt-runtime` is the `virt-handler`-side counterpart to the pluggable `virt-launcher`: `virt-handler` would delegate any operation requiring virtualization-stack knowledge or elevated privileges to the runtime associated with that stack. The API contract and the complete set of operations that belong to `virt-runtime`, beyond the initial `memlock` example, require a focused follow-up design.
 
+We should continue using the `api.Domain` data structure for internal representation of a running virtual machine, that is used by `VirtualMachineController` and places. Although the data structure was designed for LibVirt, it is general enough and replacing it would require large amount of additional refactoring.
+
 ### Pluggable Virt-Controller's `virt-launcher` Pod Rendering
 
 The virtualization-stack-specific portion of `virt-controller` is limited to calculating the memory overhead and related pod specification properties needed when rendering a `virt-launcher` pod. We propose exposing a common plugin contract through which `virt-controller` supplies the relevant VMI and stack context and receives the calculated overhead and pod properties. The following properties in a typical virt-launcher pod definition are virtualization-stack-specific and need to be provided by the plugin:
