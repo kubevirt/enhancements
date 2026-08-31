@@ -177,7 +177,7 @@ Each manifest in the index describes one architecture variant:
       "digest": "sha256:111...",
       "size": 2147483648,
       "annotations": {
-        "io.kubevirt.disk.name": "rootdisk",
+        "io.kubevirt.disk.names": "rootdisk",
         "io.kubevirt.disk.size": "10Gi",
         "org.opencontainers.image.title": "rootdisk.raw.zst"
       }
@@ -187,7 +187,7 @@ Each manifest in the index describes one architecture variant:
       "digest": "sha256:222...",
       "size": 1073741824,
       "annotations": {
-        "io.kubevirt.disk.name": "datadisk",
+        "io.kubevirt.disk.names": "datadisk",
         "io.kubevirt.disk.size": "5Gi",
         "org.opencontainers.image.title": "datadisk.raw.zst"
       }
@@ -221,9 +221,13 @@ is already captured in the layers, so the exported VM definition only
 needs plain PVC references.
 
 For `VirtualMachineTemplate` exports, `DataVolumeTemplates` backed by PVCs
-are resolved and exported as layers. The `io.kubevirt.disk.name` annotation
-on each layer links it to the corresponding volume name in the VM spec
+are resolved and exported as layers. The `io.kubevirt.disk.names` annotation
+on each layer links it to the corresponding volume names in the VM spec
 (`spec.template.spec.volumes[].name`).
+
+Layers are keyed by PersistentVolumeClaim, not by volume: several volumes in
+`spec.template.spec.volumes` may reference the same claim, and such volumes
+share a single layer.
 
 #### Media Types
 
@@ -243,9 +247,25 @@ by the external Go library
 
 | Annotation                       | Description                                            |
 |----------------------------------|--------------------------------------------------------|
-| `io.kubevirt.disk.name`          | Volume name from the VM spec                           |
+| `io.kubevirt.disk.names`         | Volume names from the VM spec, comma-separated          |
 | `io.kubevirt.disk.size`          | Uncompressed disk image size, binary SI (e.g. `10Gi`)  |
-| `org.opencontainers.image.title` | Filename, `<volume name>.raw.zst`                      |
+| `org.opencontainers.image.title` | Filename, `<first volume name>.raw.zst`                |
+
+`io.kubevirt.disk.names` holds every volume name backed by the layer's claim,
+sorted lexically and joined with `,`:
+
+```json
+"io.kubevirt.disk.names": "datadisk,shareddisk"
+```
+
+The common case is a single name and no separator. Volume names are DNS
+labels, so a comma cannot occur within a name and the value needs no
+escaping. Sorting keeps the annotation - and therefore the manifest digest -
+reproducible across exports of the same VM.
+
+An importer wires each listed volume to the single PersistentVolumeClaim
+restored from the layer. `org.opencontainers.image.title` is a filename
+rather than a correlation key, so it uses the first name in the sorted list.
 
 The descriptor `size` field is the compressed blob size, so
 `io.kubevirt.disk.size` is what an importer needs to size the target PVC
