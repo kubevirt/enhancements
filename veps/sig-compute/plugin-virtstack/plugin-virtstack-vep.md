@@ -160,11 +160,33 @@ TBD
 
 ### Pluggable Virt-Handler Runtime
 
-We propose a new pluggable sidecar component, tentatively named `virt-runtime`, for operations that `virt-handler` performs against a virtualization stack on the node. The sidecar would carry out stack-specific privileged operations, such as locating the relevant VMM process and setting its `memlock` limit, so that `virt-handler` does not retain privileged Libvirt/QEMU-specific logic in-tree.
+`virt-handler` owns Kubernetes-facing, node-local VMI orchestration, but several parts of its current runtime model assume that every launcher uses Libvirt and QEMU. The main areas of coupling are:
 
-`virt-runtime` is the `virt-handler`-side counterpart to the pluggable `virt-launcher`: `virt-handler` would delegate any operation requiring virtualization-stack knowledge or elevated privileges to the runtime associated with that stack. The API contract and the complete set of operations that belong to `virt-runtime`, beyond the initial `memlock` example, require a focused follow-up design.
+- **Migration endpoints and transport:** `virt-handler` performs the communication setup for LibVirt to carry out migration. It assumes that the source and target would communicate on ports 49152 and 49153 and that is aware of the UNIX socket in virt-launcher for controlling LibVirt. It also repairs passt sockets below a fixed Libvirt/QEMU runtime directory.
+- **Process discovery and resource adjustment:** The KVM and MSHV `VirtRuntime` implementations search for `qemu-system-*` or `virtqemud` processes before applying limits such as `memlock`. The MSHV implementation therefore changes the hypervisor selection without removing the QEMU and Libvirt process model.
+- **CPU housekeeping:** CPU tuning intent is read from `api.Domain`, but the implementation discovers QEMU vCPU, emulator, and PIT threads and applies affinity according to QEMU's thread model.
+- **Launcher filesystem layout:** `virt-handler` enters the launcher mount namespace through `/proc/<pid>/root`, which is a reusable isolation mechanism, but then resolves fixed Libvirt and QEMU socket paths within that root.
+- **Node Labeling:** During startup, `virt-handler` consumes a Libvirt capability XMLs to derive supported machine types and CPU information. This makes Libvirt's
+  capability vocabulary the input to generic node labeling.
+- **Guest-agent and status interpretation:** Guest-agent is assumed to be connected via the LibVirt channel.
 
-We should continue using the `api.Domain` data structure for internal representation of a running virtual machine, that is used by `VirtualMachineController` and places. Although the data structure was designed for LibVirt, it is general enough and replacing it would require large amount of additional refactoring.
+The VMI reconciler itself is not inherently tied to the current stack. Its core state machine observes a VMI and a domain, decides whether to synchronize, shut down, kill, migrate, or clean up the VMI, and reports the result to
+Kubernetes. We should continue using `api.Domain` as the normalized desired and observed runtime representation shared by `virt-handler` and `virt-launcher`. Although it originated as a mirror of Libvirt domain XML, the lifecycle state,
+reason, metadata, device, CPU, and migration concepts used by the reconciler are sufficiently general. Each launcher plugin is responsible for translating between its native VMM representation and the versioned subset of `api.Domain`
+required by the command API. Fields should be added to this common model only when their semantics apply across virtualization stacks.
+
+We propose a pluggable node-local component, tentatively named `virt-runtime`, as the `virt-handler`-side counterpart to the pluggable `virt-launcher`. The runtime contract should expose typed, versioned stack capabilities rather than
+arbitrary commands or host paths. It should cover the following stack-specific mechanics:
+
+- Resource adjustments for VMIs (e.g., memlock limit update) would be carried out by the plugin.
+- Managing resource/cgroup allocation of housekeeping components.
+- A migration component which will setup the TLS endpoints (connected to the VMM process), coordinate the data flow and report status of migration.
+- Use a well-defined API to report virtualization capabilities to the `virt-handler` core that will be used for node labeling.
+
+Live migration should retain its existing high-level responsibility split. The source and target `virt-handler` instances will continue to prepare storage, networking, and devices, enforce migration policy, coordinate ownership transfer, and publish Kubernetes status. The `virt-runtime` plugin for the selected stack will replace the fixed Libvirt ports, Unix sockets, and passt paths by setting up the required TLS-protected endpoints to the VMM, coordinating the migration data channels, and reporting transport status to `virt-handler` through a well-defined API. The `virt-launcher` plugin will perform the VMM-specific state transfer, translating the migration request into Libvirt `MigrateToURI3`, an OpenVMM transfer, or another native migration operation. This keeps orchestration in core while moving endpoint layout, data-flow mechanics, and VMM-specific migration behavior into the selected virtualization stack.
+
+Core `virt-handler` therefore remains responsible for watches, reconciliation, work queues, launcher isolation, shutdown and migration policy, and Kubernetes status reporting. The selected stack owns native VMM lifecycle translation, process and thread identification, migration endpoint setup and mechanics, and capability publication. A focused follow-up VEP will define the runtime registration and RPC protocol, capability negotiation, failure behavior, and the precise set of
+typed privileged operations. The existing Libvirt/QEMU behavior should be the first adapter, and shared lifecycle conformance tests should run against both that adapter and a minimal non-Libvirt fake implementation.
 
 ### Pluggable Virt-Controller's `virt-launcher` Pod Rendering
 
@@ -228,7 +250,6 @@ The deployment model for this plugin remains an open decision. Both of the follo
 - A sidecar co-located with `virt-controller` would provide a local call path and align the plugin lifecycle and version with each `virt-controller` deployment, but would add the plugin's resource cost to every `virt-controller` pod.
 
 - A cluster-wide service would require only one independently scalable deployment and could share cached data across callers, but would add a network hop and make launcher pod rendering dependent on the availability of that service.
-
 
 ## Open Questions
 
