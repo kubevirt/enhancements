@@ -310,6 +310,56 @@ This works because it is assumed that dra drivers and device plugins will
 not be activated on the same node for the same devices. If this assumption
 is broken then the paths for dra devices could collide with device plugins.
 
+#### Shim Metadata File Layout
+
+Device-plugin devices have no `ResourceClaim`, so they cannot use the
+claim-keyed paths that kubelet writes for DRA devices
+(`resourceclaims/{claimName}/...` and
+`resourceclaimtemplates/{podClaimName}/...`). The shim writes topology-only
+metadata to a separate subtree that kubelet never manages:
+
+```
+/var/run/kubernetes.io/dra-device-attributes/
+  resourceclaims/...           # kubelet-owned (DRA direct and managed claims)
+  resourceclaimtemplates/...   # kubelet-owned (DRA template claims)
+  deviceplugin/<id>/topology/kubevirt-shim-metadata.json   # shim-owned
+```
+
+The synthetic identifier `<id>` is `devplugin-<pool>-<bdf>`, where `pool` is
+the device-plugin resource name and `bdf` is the device PCI address. It is
+deterministic, so a shim rerun overwrites the file rather than accumulating
+stale entries, and it is unique per node.
+
+The file is a standard `DeviceMetadata` record with `Namespace` empty and
+`PodClaimName` nil, so it can never be mistaken for a real direct or
+template claim. Its single request is named `topology`, its device `Driver`
+is a shim-specific identity, `Pool` is the resource name, `Name` is the PCI
+address, and its `Attributes` contain only `numaNode` and `pcieRoot`. The
+file deliberately omits `pciBusID` and `mdevUUID`.
+
+Disambiguation between a topology-only file and a real device-allocation
+record is structural, not a runtime flag. The builders that turn metadata
+into `<hostdev>` entries, `CreateDRAHostDevices` and
+`CreateDRAGPUHostDevices`, only iterate VMI-spec entries that satisfy
+`IsHostDeviceDRA` / `IsGPUDRA` (`DeviceName == "" && ClaimRequest != nil`).
+Device-plugin devices set `DeviceName` and have no `ClaimRequest`, so they
+never reach a metadata lookup. `resolveClaimMetadata` only builds paths
+under `resourceclaims/` and `resourceclaimtemplates/` from claim names in
+the VMI spec, so it has no code path that can construct a path into
+`deviceplugin/`. The builders therefore cannot read a shim file, regardless
+of its contents.
+
+As a second, independent safeguard, if a future change ever did point a
+builder at a shim file, `createHostDeviceForGPU` and its host-device
+counterpart require `pciBusID` or `mdevUUID` and fail loudly rather than
+render a phantom device. A topology-only file carries neither, so it can
+never produce a guest device.
+
+Only the topology consumer added by this proposal enumerates all three
+subtrees, reusing the existing metadata decode logic unchanged. It is the
+sole reader that needs a directory-wide view, because device-plugin devices
+have no claim name to look up by.
+
 ### Domain Generation
 
 We propose a new PCI NUMA-aware assigner (in addition to the existing PCI root
