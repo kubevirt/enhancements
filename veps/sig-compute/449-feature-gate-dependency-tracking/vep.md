@@ -87,124 +87,49 @@ kubevirt/kubevirt
 ### Dependency Declaration
 
 Add a `DependsOn` field to the existing `FeatureGate` struct in
-`pkg/virt-config/featuregate/feature-gates.go`:
+`pkg/virt-config/featuregate/feature-gates.go`. The field holds a list of
+feature gate constant names that must also be enabled for the gate to
+function correctly.
 
-```go
-type FeatureGate struct {
-    Name        string
-    State       State
-    VmiSpecUsed func(spec *v1.VirtualMachineInstanceSpec) bool
-    Message     string
-    DependsOn   []string
-}
-```
+Gate owners declare dependencies at registration time in `active.go` using
+the existing feature gate constants (e.g., `featuregate.IOMMUFDGate`,
+`featuregate.PCINUMAAwareTopologyEnabled`). Gates without dependencies
+continue to work unchanged — `DependsOn` defaults to an empty slice.
 
-Gate owners declare dependencies at registration time in `active.go`:
-
-```go
-RegisterFeatureGate(FeatureGate{
-    Name:      "GraceIOVirtualization",
-    State:     Alpha,
-    DependsOn: []string{"IOMMUFDGate", "PCINUMAAwareTopologyEnabled"},
-})
-```
-
-Gates without dependencies continue to work unchanged — `DependsOn` defaults
-to an empty slice.
-
-### Validation at Registration Time (Startup)
+### Validation at Registration Time
 
 When gates are registered during `init()`, three checks run:
 
-**1. Dependency existence check** — all gates listed in `DependsOn` must be
-registered. This prevents typos.
+**1. Dependency existence check** — all gates listed in `DependsOn` must
+be registered. If a dependency references an unknown gate name (e.g., due
+to a typo), registration fails immediately.
 
-```go
-for _, dep := range fg.DependsOn {
-    if FeatureGateInfo(dep) == nil {
-        return fmt.Errorf("unknown dependency %s for gate %s", dep, fg.Name)
-    }
-}
-```
+**2. Stability ordering** — a feature cannot depend on something less
+stable than itself. Stability levels from lowest to highest are:
+Deprecated, Alpha, Beta, GA. For example, a Beta gate cannot depend on an
+Alpha gate, and a GA gate cannot depend on a Beta gate. This prevents a
+stable feature from depending on something that could be removed.
 
-**2. Stability ordering** — a feature cannot depend on something less stable
-than itself. This prevents a GA feature from depending on an Alpha feature.
+**3. DFS cycle detection** — the full dependency graph is traversed using
+depth-first search to detect circular dependencies (e.g., A depends on B,
+B depends on C, C depends on A). If a cycle is found, registration fails.
 
-```
-Stability levels: Deprecated(0) < Alpha(1) < Beta(2) < GA(3)
-
-Allowed: Alpha depends on Beta, Beta depends on GA
-Blocked: Beta depends on Alpha, GA depends on Beta
-```
-
-**3. DFS cycle detection** — detects circular dependencies like A->B->C->A
-using depth-first search with visited/finished marker maps.
-
-```go
-func validateDependencyGraph() error {
-    visited := map[string]bool{}
-    finished := map[string]bool{}
-
-    var detectCycle func(name string) error
-    detectCycle = func(name string) error {
-        if finished[name] {
-            return nil
-        }
-        if visited[name] {
-            return fmt.Errorf("cycle detected with feature gate %s", name)
-        }
-        visited[name] = true
-        fg := FeatureGateInfo(name)
-        if fg != nil {
-            for _, dep := range fg.DependsOn {
-                if err := detectCycle(dep); err != nil {
-                    return err
-                }
-            }
-        }
-        finished[name] = true
-        return nil
-    }
-
-    for name := range featureGates {
-        if err := detectCycle(name); err != nil {
-            return err
-        }
-    }
-    return nil
-}
-```
-
-If any check fails, KubeVirt will not start — catching developer mistakes
-early.
+If any check fails, the virt-operator reconcile loop will surface the error
+in the KubeVirt CR status conditions, preventing the invalid configuration
+from being applied.
 
 ### Validation at Runtime (User Configuration)
 
-When a user enables feature gates via KubeVirt configuration, the system
-checks that all dependencies of enabled gates are also enabled:
+When a user enables or disables feature gates via the KubeVirt CR
+configuration, the **KubeVirt admission webhook** validates that all
+dependencies of enabled gates are also enabled. If a gate is enabled but
+one of its dependencies is not, the webhook rejects the configuration
+update with a clear error message indicating which dependencies are missing.
 
-```go
-func ValidateDependencies(devConfig *v1.DeveloperConfiguration) []error {
-    var errs []error
-    for _, fg := range GetRegisteredFeatureGates() {
-        if !IsEnabled(fg.Name, devConfig) {
-            continue
-        }
-        for _, dep := range fg.DependsOn {
-            if !IsEnabled(dep, devConfig) {
-                errs = append(errs, fmt.Errorf(
-                    "%s is enabled but depends on %s which is not enabled",
-                    fg.Name, dep))
-            }
-        }
-    }
-    return errs
-}
-```
-
-In Alpha, violations produce **warnings** (log messages). In Beta/GA,
-violations produce **errors** (config is rejected). This gives users time to
-fix configurations before enforcement.
+In Alpha, violations produce **warnings** (logged but not blocking). In
+Beta/GA, violations produce **errors** (the configuration change is
+rejected by the admission webhook). This gives users time to fix
+configurations before enforcement.
 
 ### Transitive Dependencies
 
@@ -223,39 +148,24 @@ Beta, the build fails.
 
 ### Declaring a dependency
 
-```go
-RegisterFeatureGate(FeatureGate{
-    Name:      "GraceIOVirtualization",
-    State:     Alpha,
-    DependsOn: []string{"IOMMUFDGate", "PCINUMAAwareTopologyEnabled"},
-})
-```
+Gate owners use the existing feature gate constants when declaring
+dependencies in `active.go`. For example, `GraceIOVirtualization` would
+declare its dependency on `featuregate.IOMMUFDGate` and
+`featuregate.PCINUMAAwareTopologyEnabled`.
 
 ### User config with missing dependency
 
-```yaml
-kind: KubeVirt
-spec:
-  configuration:
-    developerConfiguration:
-      featureGates:
-        - GraceIOVirtualization
-        # IOMMUFDGate is NOT enabled
-```
+If a user enables `GraceIOVirtualization` in their KubeVirt CR without
+enabling `IOMMUFDGate`, the admission webhook returns:
 
-Result:
-```
-Warning: GraceIOVirtualization is enabled but depends on IOMMUFDGate
-which is not enabled
-```
+`GraceIOVirtualization is enabled but depends on IOMMUFDGate which is not enabled`
 
 ### Cycle detection error
 
-If a developer accidentally creates a circular dependency:
-```
-Error: cycle detected with feature gate IOMMUFDGate
-```
-KubeVirt refuses to start.
+If a developer accidentally creates a circular dependency in the code,
+the virt-operator reconcile loop surfaces the error:
+
+`cycle detected with feature gate IOMMUFDGate`
 
 ## Alternatives
 
