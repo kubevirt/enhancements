@@ -21,8 +21,8 @@ For example, during the planning phase for version v1.123, do **not** target bet
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [X] (R) Alpha target version is explicitly mentioned and approved
 - [ ] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
@@ -160,11 +160,19 @@ spec:
         name: scsi-disk
 ```
 
-Disks will be assigned IOThreads like this:
+When the KubeVirt configuration `MultiIOThreadAutoPolicy` is enabled, disks will be assigned IOThreads like this:
 
 ```
 testdisk1: [1, 2]
 testdisk2: [1, 2]
+scsi-disk: [1, 2]
+```
+
+However when `MultiIOThreadAutoPolicy` is disabled, disks will be assigned IOThreads like this:
+
+```
+testdisk1: 1
+testdisk2: 2
 scsi-disk: [1, 2]
 ```
 
@@ -227,6 +235,7 @@ An overview on the approaches used to functional test this design)
 -->
 
 * Unit tests to validate domain xml structure of new scsi controller as well as virtio-blk disks
+* Test incompatibility of setting the `dedicatedIOThread` disk option for scsi disks
 * Extend existing e2e hotplug test to verify hotplugging virtio-scsi disks when an `IOThreadsPolicy` is set
 
 ## Implementation History
