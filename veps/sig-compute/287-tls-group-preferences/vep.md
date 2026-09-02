@@ -4,8 +4,8 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.10.0
-- This VEP targets beta for version:
+- This VEP targets alpha for version: N/A (alpha skipped — see *Feature Gate* under Design)
+- This VEP targets beta for version: v1.10.0
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -13,8 +13,8 @@
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [X] (R) Enhancement issue [#287](https://github.com/kubevirt/enhancements/issues/287) created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [X] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [X] (R) Alpha target version is explicitly mentioned and approved (N/A — alpha skipped, see *Feature Gate* under Design)
+- [X] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -55,9 +55,8 @@ cluster-wide TLS profile, mirroring how `ciphers` and `minTLSVersion` are
 already handled.
 
 Because a meta-operator can only adopt the API change once a KubeVirt release
-exposes the field — even an alpha release is sufficient — landing the `Groups`
-field in KubeVirt early is a prerequisite for the wider rollout. This is the
-primary reason for prioritising the alpha in v1.10.0.
+exposes the field, landing `Groups` in KubeVirt early is a prerequisite for the
+wider rollout. This is the primary reason for prioritising it in v1.10.0.
 
 ### Why Not Automatically Enable PQC Groups?
 
@@ -151,14 +150,41 @@ cluster.
 
 ### Feature Gate
 
-All changes are gated behind the `TLSGroupPreferences` feature gate (disabled
-by default). When the feature gate is disabled, the `Groups` field on
-`TLSConfiguration` is ignored and Go's default curve preferences apply.
+All changes are gated behind the `TLSGroupPreferences` feature gate, introduced
+directly at **Beta** (Alpha is skipped — see below). Per KubeVirt's
+feature-gate lifecycle a Beta gate is enabled by default and can be explicitly
+disabled; when disabled, `Groups` is ignored and Go's default curve preferences
+apply. The gate is a controlled off switch: if a misconfiguration causes TLS
+issues, disabling it restores Go defaults without editing the CR's `groups`
+field.
 
-The gate allows controlled rollout and easy rollback: if a misconfiguration
-causes TLS issues, disabling the gate immediately restores Go defaults without
-needing to clear the `groups` field from the CR. It also allows meta-operators
-to enable the feature in lockstep with their platform's TLS group support.
+#### Skipping Alpha
+
+The VEP process permits entering above Alpha when the design maturity and risk
+justify it. Both hold here, and Beta (rather than a direct GA) still keeps an
+off switch and one release of soak before the gate is removed at GA:
+
+- **Additive extension of an already-GA, ungated API.** `Groups` is a third
+  optional field on `TLSConfiguration` beside the GA `MinTLSVersion` and
+  `Ciphers`, reusing their existing plumbing. An unset field is byte-for-byte
+  the current default, so the blast radius is zero.
+- **Proven API shape.** An ordered, open list of IANA group names is the same
+  contract exposed by mature projects — Prometheus exporter-toolkit's
+  `tls_server_config.curve_preferences`
+  ([prometheus/exporter-toolkit](https://github.com/prometheus/exporter-toolkit))
+  and Envoy's `tls_params.ecdh_curves`
+  ([Envoy](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/transport_sockets/tls/v3/common.proto)),
+  both wrapping the same Go `crypto/tls` `CurvePreferences` primitive KubeVirt
+  uses. Adoption by established projects gives the confidence an Alpha soak
+  would otherwise provide.
+- **A real platform will adopt it.** OpenShift — a fully open-source, midstream
+  platform — exposes a cluster-wide `TLSSecurityProfile`
+  ([`config.openshift.io/v1`](https://github.com/openshift/api/blob/master/config/v1/types_tlssecurityprofile.go))
+  that a meta-operator already reconciles into KubeVirt's
+  `ciphers`/`minTLSVersion`, and will reconcile into `groups` the same way.
+  Adoption by an established platform is itself assurance the API is sound, and
+  an off-by-default Alpha gate cannot be relied on by such a shipping platform
+  whereas an on-by-default Beta gate can.
 
 ### API Change
 
@@ -262,7 +288,7 @@ all endpoints:
 
 All KubeVirt TLS endpoints are served directly by the virt pods listed above;
 KubeVirt has no separately-managed operand endpoints that construct their own
-`tls.Config` outside these functions. The alpha implementation should confirm
+`tls.Config` outside these functions. The implementation should confirm
 this list is exhaustive (e.g. by grepping for `tls.Config` construction across
 the tree) so no endpoint is missed.
 
@@ -375,9 +401,6 @@ metadata:
   namespace: kubevirt
 spec:
   configuration:
-    developerConfiguration:
-      featureGates:
-        - TLSGroupPreferences
     tlsConfiguration:
       minTLSVersion: VersionTLS12
       ciphers:
@@ -392,6 +415,10 @@ spec:
 
 When `groups` is omitted, `CurvePreferences` is left unset on `tls.Config`
 and Go uses its built-in defaults.
+
+The `TLSGroupPreferences` gate is on by default at Beta, so no
+`developerConfiguration.featureGates` entry is needed to use `groups`;
+explicitly disabling the gate makes `groups` ignored and Go defaults apply.
 
 ## Alternatives
 
@@ -515,12 +542,21 @@ Extend `tests/infrastructure/tls-configuration.go`:
 
 04-29-2026: Initial VEP proposed but implementation deferred from v1.9.0
 
+09-02-2026: Retargeted to enter directly at Beta in v1.10.0 (Alpha skipped),
+behind the `TLSGroupPreferences` feature gate, given the field is an additive
+extension of the already-GA `TLSConfiguration` API and the list-of-groups
+contract is established prior art in Prometheus and Envoy
+
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] Feature gate `TLSGroupPreferences` guards all code changes (disabled by
-  default)
+Skipped — see *Skipping Alpha* under Design.
+
+### Beta
+
+- [ ] Feature gate `TLSGroupPreferences` (Beta, enabled by default) guards all
+  code changes
 - [ ] `Groups []string` open string set added to `TLSConfiguration` (no hard
   enum, per #18612 §3.2), with convenience group-name constants
 - [ ] `CurvePreferenceIds([]string)` helper in `pkg/util/tls/tls.go`,
@@ -534,12 +570,10 @@ Extend `tests/infrastructure/tls-configuration.go`:
 - [ ] Functional tests verifying group enforcement on virt pod endpoints
   (including virt-template components)
 
-### Beta
+### GA
 
-- [ ] Soak the feature in alpha with no outstanding TLS-negotiation issues
+- [ ] Soak the feature in Beta with no outstanding TLS-negotiation issues
   reported against the configured groups
 - [ ] Keep the recognised group constants and the `CurvePreferenceIds` mapping
   in step with the groups supported by the Go version KubeVirt ships, extending
   them as new hybrid groups are standardised
-
-### GA
