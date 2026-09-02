@@ -149,35 +149,16 @@ cluster.
 
 ## Design
 
-### No Feature Gate
+### Feature Gate
 
-The `Groups` field is added **without** a feature gate. This is a deliberate
-departure from the typical VEP alpha process, which normally gates new
-functionality behind a `developerConfiguration.featureGates` entry that is
-disabled by default. The gate is skipped here because:
+All changes are gated behind the `TLSGroupPreferences` feature gate (disabled
+by default). When the feature gate is disabled, the `Groups` field on
+`TLSConfiguration` is ignored and Go's default curve preferences apply.
 
-- **This is an extension of an existing feature, not a new one.** `Groups` is a
-  third optional field on the already-GA `TLSConfiguration` API, alongside
-  `MinTLSVersion` and `Ciphers`. Neither existing field is gated, so gating only
-  `Groups` would be inconsistent with the surrounding API.
-- **Rollback is inherent to the field being optional.** "Disabling" the
-  behaviour is simply a matter of clearing (or never setting) the field — new
-  handshakes immediately revert to Go's default curve preferences. A feature
-  gate would be a second, redundant off switch for behaviour that is already
-  opt-in and trivially reversible.
-- **Meta-operators already control adoption by setting or omitting the field.**
-  A meta-operator enables the behaviour by populating
-  `tlsConfiguration.groups` and disables it by leaving the field unset, in
-  lockstep with its platform's TLS group support. No gate is needed to
-  coordinate this.
-- **A feature gate adds implementation and test complexity for no benefit** —
-  every TLS setup path would have to branch on the gate state, for a field that
-  is already inert when unset.
-
-Backward compatibility is preserved regardless: when `Groups` is empty,
-`CurvePreferenceIds` returns `nil`, `CurvePreferences` is left unset on
-`tls.Config`, and Go's default curve preferences apply (see *TLS Setup
-Changes*).
+The gate allows controlled rollout and easy rollback: if a misconfiguration
+causes TLS issues, disabling the gate immediately restores Go defaults without
+needing to clear the `groups` field from the CR. It also allows meta-operators
+to enable the feature in lockstep with their platform's TLS group support.
 
 ### API Change
 
@@ -394,6 +375,9 @@ metadata:
   namespace: kubevirt
 spec:
   configuration:
+    developerConfiguration:
+      featureGates:
+        - TLSGroupPreferences
     tlsConfiguration:
       minTLSVersion: VersionTLS12
       ciphers:
@@ -444,24 +428,17 @@ apiserver-level rejection of unknown values and a discoverable value set.
 This aligns `Groups` with the existing `Ciphers []string` field, which is also
 an open string set.
 
-### Feature Gate
+### No Feature Gate
 
-Gate the `Groups` field behind a `TLSGroupPreferences` feature gate (disabled by
-default), following the typical VEP alpha convention.
+Add the `Groups` field without a feature gate since it's optional and
+backward-compatible.
 
 **Rejected because:**
 
-- `Groups` is an extension of the existing, ungated `TLSConfiguration` API
-  (which already exposes `MinTLSVersion` and `Ciphers`), not a standalone new
-  feature — gating only this field is inconsistent with the surrounding API.
-- The field is optional and backward-compatible: clearing or omitting it already
-  reverts to Go defaults, so a gate would be a redundant second off switch.
-- Meta-operators control adoption by setting or omitting the field, so no gate
-  is needed to coordinate rollout.
-- A gate adds branching in every TLS setup path plus additional test states,
-  with no benefit for a field that is inert when unset.
-
-See *No Feature Gate* under Design for the full rationale.
+- Allows controlled rollout and easy rollback
+- Allows meta-operators to enable the feature in lockstep with their
+  platform's TLS group support
+- Follows KubeVirt's feature lifecycle conventions
 
 ## Scalability
 
@@ -483,8 +460,8 @@ is O(n) over a short list (the handful of standardised groups).
 
 **Downgrade:**
 
-- Clearing or omitting the `groups` field reverts to Go's default curve
-  preferences; there is no feature gate to toggle
+- If the `TLSGroupPreferences` feature gate is disabled, the `groups` field is
+  ignored and Go defaults apply
 - No impact on running connections; new handshakes use defaults
 
 **Version Skew:**
@@ -542,9 +519,10 @@ Extend `tests/infrastructure/tls-configuration.go`:
 
 ### Alpha
 
+- [ ] Feature gate `TLSGroupPreferences` guards all code changes (disabled by
+  default)
 - [ ] `Groups []string` open string set added to `TLSConfiguration` (no hard
-  enum, per #18612 §3.2), with convenience group-name constants (no feature
-  gate — see *No Feature Gate* under Design)
+  enum, per #18612 §3.2), with convenience group-name constants
 - [ ] `CurvePreferenceIds([]string)` helper in `pkg/util/tls/tls.go`,
   gracefully skipping unrecognised names
 - [ ] `CurvePreferences` set on `tls.Config` in all TLS setup functions
