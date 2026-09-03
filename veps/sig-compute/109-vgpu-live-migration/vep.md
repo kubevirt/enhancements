@@ -14,7 +14,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 -->
 
 - This VEP targets alpha for version: v1.9
-- This VEP targets beta for version: TBD
+- This VEP targets beta for version: v1.10
 - This VEP targets GA for version: TBD
 
 ### Release Signoff Checklist
@@ -141,7 +141,9 @@ N/A
 ### Beta
 
 * KubeVirt will take hypervisor OS, Virtual GPU Manager version, and ECC configuration into account when scheduling migrations, relaxing the identical version requirement where NVIDIA allows (e.g., RHEL KVM 9.6+).
-* Find a way to estimate the maximum period for the migration 
+* Allow migration for VMs with multiple vGPUs.
+* Test migration alongside VEP 248 which added a stall detector (relevant for vGPU Migration since w/o VEP 248, migration cannot succeed unless we enable `AllowWorkloadDisruption`)
+* E2E Tests
 * Needs [VEP 141](https://github.com/kubevirt/enhancements/issues/141) to be in Beta.
 
 ### GA
