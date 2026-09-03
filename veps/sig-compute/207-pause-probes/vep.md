@@ -1,12 +1,22 @@
 # VEP: Probe Proxy for Manual Probe Control
 
-## Release Signoff Checklist
+## VEP Status Metadata
+
+### Target releases
+
+- This VEP targets alpha for version: 1.9.0
+- This VEP targets beta for version:
+- This VEP targets GA for version:
+
+### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
+- [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [X] (R) Alpha target version is explicitly mentioned and approved
+- [ ] (R) Beta target version is explicitly mentioned and approved
+- [ ] (R) GA target version is explicitly mentioned and approved
+- [X] (R) Graduation criteria filled
 
 ## Overview
 
@@ -233,13 +243,13 @@ Same as Alternative 3, but paused flag via sentinel file (Alternative 2 approach
 ## Graduation Requirements
 
 **Alpha:**
-- [ ] Annotation pause/unpause works end-to-end
-- [ ] Logging at Info/Debug levels
-- [ ] Unit tests for paused/unpaused paths
-- [ ] E2E: set annotation → success without guest contact → remove → resume
+- [X] Annotation pause/unpause works end-to-end
+- [X] Logging at Info/Debug levels
+- [X] Unit tests for paused/unpaused paths
+- [X] E2E: set annotation → success without guest contact → remove → resume
 
 **Beta:**
-- [ ] Guest OS update workflow docs
+- [X] Guest OS update workflow docs
 
 **GA:**
 - [ ] Stable for ≥2 releases, no regressions
