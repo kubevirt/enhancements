@@ -415,21 +415,30 @@ visible to the guest.
 
 ### VEP-152 Interaction
 
-[VEP-152](../152-cpu-dra/vep.md) (CPU DRA support) reads CPU metadata from
-KEP-5304 files for vCPU pinning and explicitly defers NUMA passthrough to
-this proposal. `cpu.dra` is mutually exclusive with `dedicatedCpuPlacement`
-— when CPU DRA is used, there is no kubelet cpuset.
+[VEP-152](../152-cpu-dra/vep.md) adds CPU DRA support through the `CPUsWithDRA`
+feature gate. It adds no VMI API field. When the gate is enabled and a VMI sets
+`dedicatedCpuPlacement`, virt-controller synthesizes a grouped-mode CPU
+`ResourceClaim` from the existing CPU topology fields and attaches it to the
+virt-launcher pod. The allocated cpuset reaches virt-launcher as a CDI-injected
+`DRA_CPUSET_<claimUID>` environment variable, and VEP-152 parses that variable
+to write libvirt `<vcpupin>` entries. It does not read KEP-5304 metadata files
+for pinning.
 
-When both CPU DRA and device DRA are present:
+Separately, the CPU driver publishes topology attributes on the CPU devices it
+exposes, and KEP-5304 materializes the allocated device's attributes into the
+shared metadata directory. In grouped mode (the mode VEP-152 uses) the driver
+publishes one group device per NUMA node carrying
+`resource.kubernetes.io/numaNode`, and, when the driver runs with
+`--expose-pcie-roots`, `resource.kubernetes.io/pcieRoot`. This proposal reads
+those attributes for NUMA-aware device placement, on the same footing as the
+`numaNode` and `pcieRoot` published by GPU and NIC drivers. Per-CPU attributes
+such as `dra.cpu/cpuID` exist only in the driver's deprecated individual mode,
+which VEP-152 does not use, so this proposal does not depend on them.
 
-1. VEP-152 reads per-CPU metadata (cpuID, numaNodeID) from the CPU driver's
-   KEP-5304 files and generates libvirt `<vcpupin>` entries
-2. This proposal's `buildDRANUMACells` scans all metadata (including CPU
-   driver entries) for NUMA node discovery and builds guest NUMA cells
-3. `applyDRANUMATopology` overlays device placement onto those cells
-
-They compose without conflict — VEP-152 handles CPU pinning, this proposal
-handles NUMA cell construction and device placement.
+VEP-152 currently declares CPU DRA and `numa.guestMappingPassthrough` mutually
+exclusive and rejects the combination at admission. How guest NUMA topology
+construction interacts with the CPU DRA path is left to a later revision of this
+proposal.
 
 ### Schema Changes
 
