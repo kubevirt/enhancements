@@ -82,8 +82,9 @@ declarations for the managed claim and assembles the `ResourceClaim`.
 
 - As a user, I want to request a GPU and NIC co-placed on the same PCIe
   root without learning DRA claim syntax or knowing DeviceClass names
-- As a user, I want to request GPUs, NICs, and CPUs on the same NUMA
-  node with a single provisioner reference
+- As a user, I want to request GPUs, NICs, and CPUs on the same PCIe
+  root (or, when a memory DRA driver is available, the same NUMA node)
+  with a single provisioner reference
 - As an admin, I want to define DeviceClass mappings once and have all
   users reference them by name
 - As a developer, I want to implement a custom provisioner
@@ -368,9 +369,10 @@ GenerateClaim(managedClaimContext) -> ResourceClaimSpec:
      type and the configured opaque value.
 
   4. The provisioner builds spec.devices.constraints from the full set
-     of collected requests. The built-in provisioner applies its
-     PCIe-root and NUMA topology policy. Other provisioner controllers
-     define their own constraint-generation behavior.
+     of collected requests. The built-in provisioner applies PCIe-root
+     topology alignment. NUMA alignment is deferred until a memory DRA
+     driver is available (see Future Extensions). Other provisioner
+     controllers define their own constraint-generation behavior.
 
   5. Assemble ResourceClaim:
      - Name: <vmi-name>-<claim-name>
@@ -858,15 +860,20 @@ spec:
     constraints:
     - matchAttribute: resource.kubernetes.io/pcieRoot
       requests: [gpu0, gpu1, nic]
-    - matchAttribute: resource.kubernetes.io/numaNode
 ```
 
 The built-in provisioner selected the GPU and NIC requests for the
-PCIe-root constraint and all requests for the NUMA constraint. Its
-pairing and constraint policy is implementation behavior, not part of
-the `ManagedClaimProvisioner` API. The CPU DRA driver publishes
-`pcieRoot` as a list attribute (KEP-5491); `matchAttribute` uses set
-intersection.
+PCIe-root constraint. Its pairing and constraint policy is
+implementation behavior, not part of the `ManagedClaimProvisioner` API.
+The CPU DRA driver publishes `pcieRoot` as a list attribute (KEP-5491);
+`matchAttribute` uses set intersection.
+
+In alpha, the built-in provisioner emits only the PCIe-root constraint.
+NUMA alignment (`matchAttribute: resource.kubernetes.io/numaNode`) is
+not emitted until a memory DRA driver is available, because NUMA
+alignment without co-located memory misrepresents the system's
+guarantees. The API and provisioner framework already support NUMA
+constraints; enabling them requires no API changes.
 
 The `cpus` request omits `count` (it defaults to 1) and consumes 16 units of
 the grouped device's capacity through `capacity.requests` (DRA consumable
@@ -925,6 +932,65 @@ Rejected because:
 - KubeVirt should provide a built-in default implementation while
   allowing independent provisioner controllers.
 
+### Alternative 4: Label-selector provisioner with implicit claim routing
+
+A label-selector-based policy CRD (similar to MigrationPolicy) matches
+VMIs by label and routes them to a provisioner implicitly. The
+provisioner sees the VMI spec, decides which ResourceClaims to generate,
+and hands claim names to virt-controller through VMI status and a
+readiness condition. Direct `resourceClaimName` /
+`resourceClaimTemplateName` references would remain as an advanced
+opt-out. A related suggestion proposed routing all devices through this
+layer and deprecating (not removing) the per-device `claimName` /
+`requestName` fields in favor of the policy path as the recommended
+default.
+
+Rejected because:
+
+- **Precedence ambiguity and loss of the simple user path.** When both
+  an explicit `resourceClaims[]` entry and a label-matched policy apply
+  to the same VMI, the system must resolve which wins. MigrationPolicy
+  already has this problem (specificity-based resolution), and it is a
+  known source of confusion. The per-entry model avoids precedence
+  entirely: each entry is independently and unambiguously either direct
+  or managed. Additionally, if the policy path becomes the recommended
+  default and direct references are deprecated, users who want to author
+  a single ResourceClaimTemplate and reuse it across VMIs would need a
+  running provisioner controller even for trivial single-device claims.
+- **virt-launcher cannot resolve device metadata without spec-resident
+  claim names.** virt-launcher reads KEP-5304 device metadata (PCI
+  root, bus ID, NUMA) by file-path lookup keyed on `claimName` and
+  `requestName`. While virt-controller could read claim names from VMI
+  status and copy them into the pod spec, virt-launcher itself has no
+  Kubernetes API access to look up a provisioner CR or pod spec at
+  runtime. The claim and request names must be reachable from the VMI
+  spec that virt-launcher already holds. This is also load-bearing for
+  live migration: on the target node, kubelet and the DRA driver write
+  fresh metadata under the same claim/request key names, and
+  virt-launcher re-resolves them the same way. The key names must
+  remain stable and present in the target pod spec without an API
+  round-trip.
+- **Breaks multi-provisioner per VMI.** The current design allows
+  multiple `resourceClaims[]` entries on a single VMI, each backed by a
+  different provisioner. A label-selector-based policy resolves to one
+  winning policy per VMI (the MigrationPolicy precedent). Supporting
+  multiple labels selecting multiple provisioners introduces a
+  coordination problem (ensuring two provisioners acting on the same
+  VMI do not conflict), which the per-entry model avoids by
+  construction.
+- **Device-to-claim binding becomes implicit on the policy path.** With
+  explicit `claimName` / `requestName` on each device, the user
+  controls which devices share a claim and which get separate claims.
+  On the policy-matched path, that binding becomes an implementation
+  detail of the provisioner, which different provisioners may resolve
+  differently for the same VMI spec. The opt-out via direct
+  `resourceClaimName` preserves this control for users who need it, but
+  makes the two paths behave differently for the same logical operation.
+- **Reduced observability.** With implicit provisioner selection, no
+  VMI spec field identifies which provisioner was chosen or why. The
+  per-entry `managedClaimProvisionerName` makes the selection explicit
+  and inspectable without consulting external policy state.
+
 ## Implementation History
 
 - 2026-08-05: Initial VEP draft based on VEP-10 Appendix C design
@@ -974,7 +1040,8 @@ scalability model. See
   (`policy.kubevirt.io/aligner`)
 - API changes behind `ManagedDRAClaims` feature gate (off by default)
 - GPU, HostDevice, Network, and CPU support
-- Built-in PCIe-root and NUMA topology constraint generation
+- Built-in PCIe-root topology constraint generation (NUMA deferred
+  until a memory DRA driver is available)
 - Opaque device configuration rendering
 - Controller-based claim generation with deterministic claim naming
 - User-visible provisioning failure condition
@@ -1004,6 +1071,13 @@ scalability model. See
   entries with names, devices reference by name
 - **Memory and hugepages:** when the CPU DRA driver adds memory
   allocation support, memory can participate in managed claims
+- **NUMA alignment:** when a memory DRA driver is available, the
+  built-in provisioner can emit `matchAttribute:
+  resource.kubernetes.io/numaNode` constraints alongside the PCIe-root
+  constraint. The API and provisioner framework already support this; no
+  API changes are needed. Until then, emitting NUMA constraints would
+  misrepresent the system's guarantees, because memory is not guaranteed
+  to be co-located with the aligned devices.
 - **Passthrough / deferred-policy provisioner:** a provisioner that
   generates claim requests without topology constraints, for clusters
   that defer alignment to an external policy engine. Because the
