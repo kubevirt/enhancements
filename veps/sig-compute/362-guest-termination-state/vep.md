@@ -25,7 +25,7 @@ briefly as a hypervisor lifecycle event in virt-launcher. It is lost once the
 launcher pod and VMI are gone.
 
 This VEP adds a `GuestTerminated` condition to the VMI and mirrors it to the VM.
-The condition is `False` while the guest is active and `True` after KubeVirt
+The condition is absent while the guest is active and `True` after KubeVirt
 observes a supported termination reason. If the domain is no longer active but
 the reason is unavailable, the condition is `Unknown` instead of guessing.
 
@@ -56,11 +56,11 @@ owned by KubeVirt's `RunStrategy`.
 
 ## Goals
 
-- Report whether the guest represented by a VMI has terminated.
-- Give a terminated guest a normalized, machine-readable reason when KubeVirt
-  observed one.
-- Keep the latest condition on the owning VM after the VMI is deleted.
-- Reset stale termination state when a new guest or replacement VMI starts.
+- Report whether the guest represented by a VMI has terminated at some point,
+  with a normalized, machine-readable reason when KubeVirt observed one.
+- Preserve a queryable record of when and why the guest stopped, including
+  after its VMI is deleted, resetting stale termination state when a new guest
+  or replacement VMI starts.
 - Preserve a useful termination reason across later hypervisor events that no
   longer carry it.
 - Emit Kubernetes events and metrics for supported termination reasons.
@@ -117,16 +117,12 @@ For a VMI, the condition has the following meaning:
 
 | Status | Meaning |
 |--------|---------|
-| `False` | The current guest incarnation has not terminated. |
 | `True` | The current guest incarnation has terminated and KubeVirt observed a supported reason. |
-| `Unknown` | The domain is no longer active, but KubeVirt could not determine a supported termination reason. |
+| `Unknown` | KubeVirt observed that the current guest incarnation terminated, but no supported termination reason was available. |
 
 `GuestTerminated=True` is not an event pulse. It remains true for the terminal
 remainder of that VMI's current guest incarnation. Starting a new incarnation
-resets it to `False`.
-
-Before KubeVirt has observed an active domain, the condition may be absent.
-When the feature is disabled, the condition is removed.
+clears it from both the VMI and VM.
 
 Standard condition timestamps are used. Both timestamps are set when the
 condition is created or its status or reason changes. Reconciliation leaves the
@@ -135,11 +131,19 @@ second, custom termination timestamp.
 
 ### Reasons
 
-When the condition is `False`, it uses:
+Below are constants for all supported `GuestTerminated` reasons.
+The same constants cover both VMI and VM conditions because the condition is
+copied unchanged.
 
-| Reason | Message |
-|--------|---------|
-| `GuestNotTerminated` | `Guest has not terminated` |
+```go
+const (
+    GuestShutdownReason                  = "GuestShutdown"
+    PlatformRequestedShutdownReason      = "PlatformRequestedShutdown"
+    HostShutdownReason                   = "HostShutdown"
+    HostStoppedFailedReason              = "HostStoppedFailed"
+    GuestCrashedReason                   = "GuestCrashed"
+)
+```
 
 When the condition is `True`, it uses one of these normalized reasons:
 
@@ -229,23 +233,27 @@ per-launcher state before attempting to enqueue the generic notification. It
 then signals the notification loop independently. Queue saturation may coalesce
 notifications, but it must not discard the retained termination reason.
 
-The retained data belongs to one guest incarnation. A libvirt
-`DOMAIN_EVENT_STARTED` clears it as a fast path. Reconciliation also compares
-the active runtime identity with the identity stored alongside the retained
-event. If the identity changed, the old event is cleared even if the `STARTED`
-callback was dropped.
+The retained data is scoped to one virt-launcher process and its VMI. A
+replacement VMI runs in a new launcher process with a new cache and therefore
+cannot inherit the previous VMI's retained event.
+
+Within the same launcher process, a libvirt `DOMAIN_EVENT_STARTED` callback
+clears the retained event and any pending platform termination intent before
+the generic domain notification is enqueued. Queue saturation or notification
+coalescing therefore cannot lose this reset. This proposal does not add a
+separate runtime identity or a fallback for a `DOMAIN_EVENT_STARTED` callback
+that libvirt does not deliver.
 
 Later low-signal events from the same incarnation keep the retained reason. If
 the domain reaches a terminal state and no reason was retained, virt-handler
-sets `GuestTerminated=Unknown` rather than leaving a stale `False` condition or
-inventing a reason.
+sets `GuestTerminated=Unknown` rather than inventing a reason.
 
 ### VMI condition update
 
 virt-handler derives the condition from the latest domain observation:
 
 1. A supported terminal reason produces `GuestTerminated=True`.
-2. An active domain produces `GuestTerminated=False`.
+2. An active domain produces no condition.
 3. A terminal domain without a supported reason produces
    `GuestTerminated=Unknown`.
 4. A later low-signal update from the same incarnation does not erase an
@@ -271,14 +279,15 @@ condition-copy loop:
   previous VM condition. This prevents a reason from the old VMI from looking
   current.
 - Once the VMI is gone, retain the condition last copied from it.
-- A new VMI's `False`, `True`, or `Unknown` condition replaces the retained
+- A new VMI's `True`, or `Unknown` condition replaces the retained
   value normally.
 
 VM-owned VMIs already carry `VirtualMachineControllerFinalizer`.
 virt-controller updates VM status before removing that finalizer. If the VM
 status update fails, the finalizer remains and the copy is retried. Therefore a
 VMI carrying `GuestTerminated` cannot disappear before virt-controller has had
-the opportunity to persist it on the VM.
+the opportunity to persist it on the VM. However, virt-controller will need to
+ensure that virt-handler has added this condition before removing the finalizer.
 
 For a stopped VM without a VMI, `GuestTerminated=True` describes the latest
 guest that belonged to that VM. It stops being current as soon as a replacement
@@ -322,17 +331,6 @@ virt-launcher domain event path, but it has no user-visible effect while the
 gate is disabled.
 
 ## API Examples
-
-An active guest:
-
-```yaml
-status:
-  conditions:
-  - type: GuestTerminated
-    status: "False"
-    reason: GuestNotTerminated
-    message: Guest has not terminated
-```
 
 A guest that ran `shutdown now`:
 
@@ -411,8 +409,8 @@ source VMI UID directly, but it introduces a separate status structure for a
 small finite state that fits the standard condition model.
 
 The condition is valid as current state when its lifecycle is defined clearly:
-it is `False` for the active incarnation, `True` for its terminal remainder,
-and reset when a new incarnation or replacement VMI starts.
+it is absent for the active incarnation, `True` for its terminal remainder,
+and cleared when a new incarnation or replacement VMI starts.
 
 ### Add a separate platform-termination condition
 
@@ -451,22 +449,34 @@ VMI cleanup.
 
 ## Update/Rollback Compatibility
 
-This is an additive condition type and is backward compatible. Older clients
-ignore condition types they do not recognize. Consumers must treat the
-condition as optional because it may be absent before the domain is observed,
-while the feature is disabled, or during a mixed-version rollout.
+The new condition type is an additive API change and is backward compatible for
+condition consumers. Older clients ignore condition types they do not
+recognize. Consumers must treat `GuestTerminated` as optional because it may be
+absent while the feature is disabled or during a mixed-version rollout.
 
-After rollback or disabling the gate, controllers stop publishing the condition
-and remove it when they next reconcile the affected objects. A value can remain
-temporarily on an object that is no longer being reconciled, which is why clients
-must not assume the condition is always present.
+This does not guarantee that every older status writer preserves the condition.
+Mixed-version behavior for virt-launcher, virt-handler, and virt-controller will
+be covered before Beta.
+
+VMIs that continue using a pre-feature virt-launcher after an upgrade cannot
+report a normalized termination reason. A new virt-handler may report 
+`GuestTerminated=Unknown` if it observes the terminal domain state; otherwise,
+the condition remains absent. Classified reasons become available after the VMI
+is recreated with an upgraded virt-launcher.
+
+Disabling the feature gate while supporting controllers are running removes the
+condition when the affected objects are reconciled. Rolling back directly to
+binaries that do not know about the condition is different: an existing value
+may remain until the object is replaced, deleted, or reconciled again by a
+supporting version. Consumers must therefore not use the presence of the
+condition to determine whether the feature is currently enabled.
 
 ## Functional Testing Approach
 
 Unit coverage will verify:
 
 - Mapping supported hypervisor lifecycle events to normalized reasons.
-- `False`, `True`, and `Unknown` VMI condition transitions.
+- `True`, absent, and `Unknown` VMI condition transitions.
 - A terminal VMI receives `True` or `Unknown` before its finalizers can be
   removed, including when the classifying event arrives late.
 - Platform intent precedence, expiry, consumption, and cleanup on start.
@@ -475,8 +485,8 @@ Unit coverage will verify:
 - Low-signal terminal events preserve a previously observed reason.
 - Termination state is retained before the best-effort event queue and survives
   queue saturation.
-- A changed runtime incarnation clears stale state even when the `STARTED`
-  callback is missed.
+- A `DOMAIN_EVENT_STARTED` callback clears retained termination state before
+  notification delivery, including when the notification queue is saturated.
 - VM status is updated before the VM controller finalizer is removed from the
   terminated VMI.
 - A replacement VMI removes or replaces the previous VM condition.
@@ -511,11 +521,11 @@ delivered.
 - [ ] VMI and VM `GuestTerminated` condition types added.
 - [ ] Initial normalized reason set implemented.
 - [ ] Termination-classifying events retained before any best-effort queue.
-- [ ] Retained state scoped to a domain incarnation with a reconciliation
-      fallback when `STARTED` is missed.
+- [ ] Retained state scoped to a launcher process and cleared synchronously on
+      `DOMAIN_EVENT_STARTED`.
 - [ ] Dedicated VM synchronization preserves the terminal condition after VMI
       deletion and clears it for a replacement VMI.
-- [ ] Kubernetes events and Prometheus metrics implemented.
+- [ ] Kubernetes events implemented.
 - [ ] Unit and functional tests cover the supported paths and lifecycle reset.
 
 ### Beta
@@ -526,6 +536,7 @@ delivered.
       and virt-controller versions.
 - [ ] Operational feedback shows no unresolved stale-condition or silent event
       loss cases.
+- [ ] Prometheus metrics implemented.
 - [ ] User documentation describes condition semantics and known attribution
       limits.
 
