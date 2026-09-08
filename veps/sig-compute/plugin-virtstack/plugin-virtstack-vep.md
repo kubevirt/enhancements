@@ -56,7 +56,7 @@ The mechanisms are therefore orthogonal. A virtualization stack plugin supplies 
 
 - Refactor KubeVirt to decouple it from Libvirt, QEMU and KVM.
 
-- Introduce a dedicated `VirtualizationStackPlugins` CRD for selecting and configuring virtualization stack plugins.
+- Introduce a dedicated `VirtualizationStackPlugin` CRD for selecting and configuring virtualization stack plugins.
 
 - Streamline the process of building and deployment of KubeVirt for alternative virtualization stacks.
 
@@ -188,7 +188,7 @@ We propose exposing a common plugin contract through which `virt-controller` con
 
 #### Virt-Controller Plugin Deployment Model
 
-The plugin will be reached through the cluster Service declared by the `VirtualizationStackPlugins` CRD. The detailed VEP for virt-controller plugin will describe timeout and retry behavior, and caching results for a given plugin service.
+The plugin will be reached through the cluster Service declared by the `VirtualizationStackPlugin` CRD. The detailed VEP for virt-controller plugin will describe timeout and retry behavior, and caching results for a given plugin service.
 
 #### Alternative Deployment Model: Sidecar
 
@@ -292,42 +292,33 @@ The `virt-launcher` plugin will run the Command API server listening on a UNIX s
 
 ### Pluggable Admission Webhooks
 
-Stack-specific mutating and validating webhooks will be deployed as independent Kubernetes Services and selected through the `VirtualizationStackPlugins` CRD. The `virt-operator` will register and reconcile their webhook configurations with the Kubernetes API server.
+Stack-specific mutating and validating webhooks will be deployed as independent Kubernetes Services and selected through the `VirtualizationStackPlugin` CRD. The `virt-operator` will register and reconcile their webhook configurations with the Kubernetes API server.
 
+## VirtualizationStackPlugin CRD
 
-## VirtualizationStackPlugins CRD
+This section will define the cluster-scoped `VirtualizationStackPlugin` CRD that registers each virtualization stack and provides KubeVirt core components with the information needed to select and invoke its plugins.
 
-This section will define the cluster-scoped `VirtualizationStackPlugins` CRD that registers each virtualization stack and provides KubeVirt core components with the information needed to select and invoke its plugins. The detailed schema, validation rules, default Libvirt/QEMU entry, and upgrade behavior will be specified here.
+```yaml
+apiVersion: virstackplugin.kubevirt.io/v1alpha1
+kind: VirtualizationStackPlugin
+metadata:
+  # The resource name is the stable stack ID referenced by VMIs.
+  name: cloud-hypervisor-mshv
+spec:
+  controller:
+    service:
+      namespace: cloud-hypervisor-system
+      name: cloud-hypervisor-controller-plugin
+      port: 9443
+  runtime:
+    # Resolved below a KubeVirt-owned runtime directory on each node.
+    socketName: cloud-hypervisor-mshv.sock
 
-### Stack Identity and Compatibility
+  launcher:
+    image: quay.io/company-x/virt-launcher:clh-mshv
+```
 
-This subsection will define the stack identifier, supported plugin API versions, KubeVirt compatibility information, and any feature declarations used to select a stack for a VMI.
-
-### Control-Plane RPC Service
-
-This subsection will define the Kubernetes Service URI, transport security settings, and connection information used by control-plane components to invoke the stack's RPC APIs. It will also describe how callers discover which API versions and functions the service implements.
-
-### Virt-Launcher Pod Information
-
-This subsection will define the declarative information, or references to RPC functions, needed by `virt-controller` to build the selected stack's `virt-launcher` pod, including its image, command, resources, volumes, security context, and scheduling constraints.
-
-### Node-Local Virt-Runtime Socket
-
-This subsection will define the UNIX socket name exposed on every applicable node by the stack's `virt-runtime` DaemonSet. It will also describe how `virt-handler` resolves the socket, verifies the serving plugin, and invokes node-local stack-specific operations.
-
-### Admission and Validation Webhook Registration
-
-This subsection will define references to the independently deployed mutating and validating webhook Services and their registration rules. The `virt-operator` will use this information to create and reconcile the corresponding Kubernetes webhook configurations; admission requests will be sent directly by the Kubernetes API server rather than proxied through another KubeVirt component.
-
-### Discovery, Availability, and Failure Policy
-
-This subsection will define discovery and health checks, call timeouts, failure policy, retry guidance, and status conditions for registered plugins. The design will adapt the useful parts of the Cluster API Runtime SDK pattern while accounting for calls made on KubeVirt's reconciliation and pod-rendering paths.
-
-## Plugin API Conventions
-
-This section will define the common RPC conventions shared by the plugin APIs below: typed and versioned request/response messages, a discovery function, deadlines, authentication, error classification, retry-after semantics, idempotency, and compatibility rules. Component-specific functions will be cataloged and documented independently so implementations can advertise only the contracts they support.
-
-
+A cluster administrator creates the `VirtualizationStackPlugin` resource after deploying the plugin components. The resource registers endpoints and launcher information with KubeVirt; it does not deploy or manage those components. In the initial design, consuming KubeVirt components (such as `virt-controller` and `virt-handler`) independently resolve the plugin endpoints and report invocation or availability failures through events and/or conditions on the affected resources (e.g., VMI). 
 
 ## Open Questions
 
