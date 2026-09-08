@@ -110,6 +110,54 @@ The intent is to keep this document focused on overall architecture and coordina
 
 This section will walk through each key component of KubeVirt that performs virtualization stack related functions - listing the areas of tight-coupling with the traditional stack and proposing plugin API for extension.
 
+### Architecture Overview
+
+Several KubeVirt components are tightly coupled to the default Libvirt/QEMU/KVM virtualization stack. This proposal moves stack-specific logic behind plugins used by `virt-controller` and `virt-handler`, and makes `virt-launcher` a stack-specific component. The controller plugin is exposed through a Kubernetes Service backed by a Deployment. The node-local `virt-runtime` plugin is deployed as a DaemonSet, providing an instance on each node for `virt-handler` to invoke.
+
+```mermaid
+flowchart LR
+  VSP[VirtualizationStackPlugin CR]
+  DS[virt-runtime DaemonSet]
+
+  subgraph ControlPlane[      sssssss Control plane]
+    VC[virt-controller]
+    SVC[Controller plugin Service]
+    DEP[Controller plugin Deployment]
+
+    VC -->|RPC query for launcher pod rendering| SVC
+    SVC --> DEP
+  end
+
+  subgraph Node[Each compute node]
+    VH[virt-handler]
+    VR[virt-runtime plugin]
+    VL[Stack-specific virt-launcher pod]
+
+    VH -->|UNIX socket RPC| VR
+    VH <-->|Command and Notify APIs| VL
+  end
+
+  VC -.->|Creates pod using stack-specific image| VL
+  DS -.->|Deploys| VR
+  VSP -.->|References Service| SVC
+  VSP -.->|Declares socket name| VH
+  VSP -.->|Declares launcher image and Controller Plugin Service| VC
+
+  classDef core fill:#dbeafe,stroke:#2563eb,color:#172554
+  classDef plugin fill:#dcfce7,stroke:#16a34a,color:#052e16
+  classDef registration fill:#fef3c7,stroke:#d97706,color:#451a03
+
+  class VC,VH core
+  class SVC,DEP,DS,VR,VL plugin
+  class VSP registration
+```
+
+| Style | Meaning |
+| --- | --- |
+| Blue | Core KubeVirt component |
+| Green | Stack-specific component supplied by the plugin provider |
+| Yellow | Virtualization stack registration |
+
 ### Virt-Controller
 
 #### Current tight-coupling with LibVirt/QEMU
