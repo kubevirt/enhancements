@@ -131,10 +131,15 @@ type VirtualMachineInstanceSpec struct {
 	ResourceClaims []VirtualMachineInstanceResourceClaim `json:"resourceClaims,omitempty"`
 }
 
-// VirtualMachineInstanceResourceClaim wraps the k8sv1.PodResourceClaim to allow
-// VMI-specific extensions while preserving the upstream wire format.
+// VirtualMachineInstanceResourceClaim describes a ResourceClaim that must be
+// allocated for the VMI before virt-launcher can start.
 type VirtualMachineInstanceResourceClaim struct {
-	k8sv1.PodResourceClaim `json:",inline"`
+	// Name uniquely identifies this claim entry within the VMI.
+	Name string `json:"name"`
+	// ResourceClaimName references an existing ResourceClaim.
+	ResourceClaimName *string `json:"resourceClaimName,omitempty"`
+	// ResourceClaimTemplateName references a ResourceClaimTemplate.
+	ResourceClaimTemplateName *string `json:"resourceClaimTemplateName,omitempty"`
 }
 
 type GPU struct {
@@ -194,21 +199,36 @@ used" contract explicit. The feature is still alpha-gated, so the Go-side
 refactor can land cleanly with downstream consumers recompiling against the
 new types.
 
-### `vmi.spec.resourceClaims[]` Wrapper Type Rationale
+### `vmi.spec.resourceClaims[]` KubeVirt's Own Type Rationale
 
 Starting in beta (v1.9), the element type of `vmi.spec.resourceClaims[]` is
-an in-tree type (`VirtualMachineInstanceResourceClaim`) that inlines the upstream
-`k8sv1.PodResourceClaim`. The wrapper exists because KubeVirt cannot add
-fields such as `managedClaim` (see [Appendix C](#c-managed-resource-claims))
-to `k8sv1.PodResourceClaim` itself; without it, additional policy fields
-would have to live in a parallel array, making the API awkward.
+an in-tree type (`VirtualMachineInstanceResourceClaim`) owned by KubeVirt.
+It mirrors the upstream `PodResourceClaim` wire shape today (`name`,
+`resourceClaimName`, and `resourceClaimTemplateName`) while leaving room for
+VMI-specific extensions such as `managedClaim` (see
+[Appendix C](#c-managed-resource-claims)). Without an in-tree type, those
+additional policy fields would have to live in a parallel array, making the API
+awkward.
 
-Like the `*string` -> `string` change above, introducing the wrapper is a
+Like the `*string` -> `string` change above, introducing KubeVirt's own type is a
 **Go type change, not a wire-format break**, hence no user manifests will
-be affected. Inlining `k8sv1.PodResourceClaim` keeps existing fields
-(`name`, `resourceClaimName`, `resourceClaimTemplateName`) at the same
-JSON/YAML level, so existing VMIs round-trip identically; only Go consumers
-compiling against the generated client-go types are affected.
+be affected. Keeping `name`, `resourceClaimName`, and
+`resourceClaimTemplateName` at the same JSON/YAML level means existing VMIs
+round-trip identically; only Go consumers compiling against the generated
+client-go types are affected.
+
+Inlining `k8sv1.PodResourceClaim` was considered and rejected. Keeping the
+fields explicit gives KubeVirt control over which parts of the upstream
+`PodResourceClaim` API are supported by `vmi.spec.resourceClaims[]`. If
+Kubernetes adds fields to `PodResourceClaim` in the future, KubeVirt should
+vet those fields before making them part of the VMI API contract; embedding
+the upstream type would make those fields appear in the VMI API silently.
+Explicit fields keep the current wire format while preventing unsupported
+upstream fields from creeping in unnoticed. Owning the type also lets
+KubeVirt validate `resourceClaims` at VMI admission time rather than
+deferring errors to virt-launcher Pod creation. This is an immediate
+practical benefit already implemented in
+[kubevirt/kubevirt#17797](https://github.com/kubevirt/kubevirt/pull/17797).
 
 Note: VMI status does not include device attributes. Virt-launcher reads device metadata directly from files mounted
 by the DRA driver via the DRA Attributes Downward API (see [KEP-5304](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api)).
@@ -1029,7 +1049,7 @@ A VMI spec example that solves this issue:
 spec:
   resourceClaims:
   - name: gpu-nic
-    managedClaim:                              # NEW additive field 1: KubeVirt-managed claim wrapper
+    managedClaim:                              # NEW additive field 1: KubeVirt-managed claim on KubeVirt's own type
       policies:
       - policy: Aligned
         attribute: resource.kubernetes.io/pcieRoot
