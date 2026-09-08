@@ -318,7 +318,50 @@ spec:
     image: quay.io/company-x/virt-launcher:clh-mshv
 ```
 
-A cluster administrator creates the `VirtualizationStackPlugin` resource after deploying the plugin components. The resource registers endpoints and launcher information with KubeVirt; it does not deploy or manage those components. In the initial design, consuming KubeVirt components (such as `virt-controller` and `virt-handler`) independently resolve the plugin endpoints and report invocation or availability failures through events and/or conditions on the affected resources (e.g., VMI). 
+A cluster administrator creates the `VirtualizationStackPlugin` resource after deploying the plugin components. The resource registers endpoints and launcher information with KubeVirt; it does not deploy or manage those components. In the initial design, consuming KubeVirt components (such as `virt-controller` and `virt-handler`) independently resolve the plugin endpoints and report invocation or availability failures through events and/or conditions on the affected resources (e.g., VMI).
+
+### Deployment and Readiness Lifecycle
+
+During the alpha stage, this architecture is enabled through the `PluggableVirtualizationStacks` feature gate. The deployment proceeds as follows:
+
+1. The cluster administrator deploys KubeVirt with the feature gate enabled. Core components start and remain ready while waiting for a virtualization stack to be registered.
+2. The administrator deploys the stack-provided components: the controller plugin Deployment and Service, the `virt-runtime` DaemonSet, the launcher image, and any optional admission webhooks.
+3. The administrator creates a `VirtualizationStackPlugin` resource containing the controller Service, node-local runtime socket name, and launcher image. Plugin workloads and the registration may be created in either order because discovery is retried.
+4. `virt-controller` watches the registration, repeatedly resolves the referenced Service, and negotiates a compatible plugin API. If the plugin is unavailable, `virt-controller` remains ready, but launcher pod rendering for VMIs selecting that stack fails and is retried with an event or condition reported on the VMI.
+5. Each `virt-handler` discovers the registered runtime through its published UNIX socket, negotiates a compatible API, calls `GetNodeLabels()`, and applies the returned labels to its node. A failure to discover the required runtime keeps the existing `kubevirt.io/schedulable` label set to `false`; successful discovery allows it to be set to `true`.
+
+```mermaid
+sequenceDiagram
+  actor Admin as Cluster administrator
+  participant Operator as virt-operator
+  participant Controller as virt-controller
+  participant API as Kubernetes API
+  participant Runtime as virt-runtime
+  participant Handler as virt-handler
+
+  Admin->>API: Deploy KubeVirt with feature gate
+  API-->>Operator: Observe KubeVirt CR creation
+  Operator->>API: Create core KubeVirt components
+
+  Admin->>API: Deploy plugin Service, Deployment, and DaemonSet
+  Runtime->>Runtime: Publish node-local UNIX socket
+
+  Admin->>API: Create VirtualizationStackPlugin
+
+  API-->>Controller: Observe plugin registration
+  Controller->>API: Resolve controller Service
+  Controller->>Controller: Retry discovery until reachable
+
+  API-->>Handler: Observe plugin registration
+  Handler->>Runtime: Connect through UNIX socket
+  Handler->>Runtime: GetNodeLabels()
+  Runtime-->>Handler: Return stack capability labels
+  Handler->>API: Apply labels and set kubevirt.io/schedulable=true
+
+  Note over Controller,Handler: Stack can serve VMIs when the controller plugin is reachable and compatible nodes advertise its runtime
+```
+
+When multiple stacks can be independently available on the same node, stack-specific availability labels will supplement `kubevirt.io/schedulable`. Failure of one runtime will then prevent scheduling only VMIs that select that stack, rather than making the node unavailable to every stack.
 
 ## Open Questions
 
