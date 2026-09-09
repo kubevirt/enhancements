@@ -147,10 +147,8 @@ and config blob structure.
 
 The import controller uses the `artifactType` field on the OCI manifest to
 auto-detect the target kind (`VirtualMachine` or `VirtualMachineTemplate`).
-It reads `io.kubevirt.disk.names` and `io.kubevirt.disk.size` from layer
-annotations to correlate layers to volumes and to size DataVolumes. The
-plural `io.kubevirt.disk.names` is corrected in VEP #256 by
-[#446](https://github.com/kubevirt/enhancements/pull/446).
+It reads `io.kubevirt.disk.name` and `io.kubevirt.disk.size` from layer
+annotations to correlate layers to volumes and to size DataVolumes.
 
 **Not in the artifact:** `volumeMode` and `accessModes` are not stored in
 the OCI artifact. CDI applies cluster-appropriate defaults via
@@ -203,9 +201,7 @@ type LayerSelector struct {
     // MatchAnnotations selects a layer by annotations on the
     // OCI manifest's layer descriptors. Every entry must be present
     // on the same descriptor and match exactly, for example
-    // "io.kubevirt.disk.names": "rootdisk", or
-    // "io.kubevirt.disk.names": "datadisk,shareddisk" for a layer
-    // backing more than one volume.
+    // "io.kubevirt.disk.name": "rootdisk".
     MatchAnnotations map[string]string `json:"matchAnnotations,omitempty"`
 }
 ```
@@ -386,9 +382,9 @@ type ArtifactInfo struct {
 }
 
 type DiskImportStatus struct {
-    // Names are the volume names backed by this layer, from the
-    // io.kubevirt.disk.names annotation.
-    Names []string `json:"names"`
+    // Name is the volume name backed by this layer, from the
+    // io.kubevirt.disk.name annotation.
+    Name string `json:"name"`
     // DataVolumeName is the name of the created DataVolume.
     DataVolumeName string `json:"dataVolumeName"`
     // Phase mirrors cdiv1.DataVolumePhase values (e.g. "Succeeded",
@@ -434,7 +430,7 @@ flowchart TD
     subgraph CDI ["CDI, per DataVolume"]
         direction TB
         C1["Resolve manifest by platform"]
-        C2["Find layer matching the<br/>io.kubevirt.disk.names annotation"]
+        C2["Find layer matching the<br/>io.kubevirt.disk.name annotation"]
         C3["Fetch blob by digest,<br/>detect zstd via magic bytes"]
         C4["Stream raw disk to PVC<br/>(raw blob path, no tar extraction)"]
         C1 --> C2 --> C3 --> C4
@@ -463,13 +459,13 @@ The fetcher requires that:
 - `artifactType` is a known KubeVirt type
   (`application/vnd.kubevirt.virtualmachine.v1` or
   `application/vnd.kubevirt.virtualmachinetemplate.v1`)
-- Each disk layer carries the `io.kubevirt.disk.names` and
+- Each disk layer carries the `io.kubevirt.disk.name` and
   `io.kubevirt.disk.size` annotations
 - Layer media types are supported
 - No volume name appears in more than one layer
 - `io.kubevirt.disk.size` is a valid Kubernetes resource quantity
 - Every PVC volume in the config blob is named by exactly one disk layer's
-  `io.kubevirt.disk.names`, and every disk layer names at least one PVC volume
+  `io.kubevirt.disk.name`, and every disk layer names a PVC volume
 
 All fetcher messages other than the stdout JSON are emitted to stderr.
 
@@ -483,7 +479,7 @@ source:
       architecture: <resolved-arch>
     layer:
       matchAnnotations:
-        io.kubevirt.disk.names: <annotation value, passed through verbatim>
+        io.kubevirt.disk.name: <annotation value, passed through verbatim>
     secretRef: <from spec, if set>
     certConfigMap: <from spec, if set>
 storage:
@@ -503,10 +499,8 @@ the CR.
 
 **PVC naming convention:** `${RESOURCE_NAME}-${DISK_NAME}` (e.g.,
 `fedora-vm-rootdisk`), where `RESOURCE_NAME` is the `targetName` if set,
-otherwise the `VirtualMachineImport` CR name. `DISK_NAME` is the first name in
-the layer's `io.kubevirt.disk.names` list, which is lexically sorted. A layer
-backing several volumes yields one PVC, and the config blob rewrite points
-every one of those volumes at it.
+otherwise the `VirtualMachineImport` CR name. `DISK_NAME` is the layer's
+`io.kubevirt.disk.name`.
 
 **Namespace scoping:** All resources created during import (metadata-fetch
 Job, ConfigMap, DataVolumes, PVCs, target VM or VMTemplate) are created in
@@ -697,7 +691,7 @@ spec:
         architecture: amd64
       layer:
         matchAnnotations:
-          io.kubevirt.disk.names: rootdisk
+          io.kubevirt.disk.name: rootdisk
   storage:
     storageClassName: ceph-block
     resources:
