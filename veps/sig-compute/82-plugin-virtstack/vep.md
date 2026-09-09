@@ -1,4 +1,4 @@
-# VEP 82: Plugin-based generalization of KubeVirt's virtualization stack #83
+# VEP 82: Plugin-based generalization of KubeVirt's virtualization stack #82
 
 ## Release Signoff Checklist
 
