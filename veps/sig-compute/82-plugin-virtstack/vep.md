@@ -328,7 +328,7 @@ A cluster administrator creates the `VirtualizationStackPlugin` resource after d
 
 ### Deployment and Readiness Lifecycle
 
-During the alpha stage, this architecture is enabled through the `PluggableVirtualizationStacks` feature gate. The deployment proceeds as follows:
+During the alpha stage, this architecture is enabled through the `PluggableVirtualizationStack` feature gate. The deployment proceeds as follows:
 
 1. The cluster administrator deploys KubeVirt with the feature gate enabled. Core components start and remain ready while waiting for a virtualization stack to be registered.
 2. The administrator deploys the stack-provided components: the controller plugin Deployment and Service, the `virt-runtime` DaemonSet, the launcher image, and any optional admission webhooks.
@@ -425,14 +425,70 @@ We choose Design 1, making the entire `virt-launcher` pluggable. The principal r
 
 The main cost of Design 1 is that functionality currently supplied by Libvirt, most notably lifecycle event handling and live migration execution, cannot automatically be reused by every stack. Each plugin must implement those semantics using the facilities of its VMM, and conformance tests will be needed to ensure consistent behavior at the command API boundary. This is considered an acceptable tradeoff: stacks differ in migration capabilities and operational models, so a common KubeVirt contract should define the required behavior while allowing each plugin to implement it natively. The existing Libvirt/QEMU launcher can continue to use Libvirt internally and reuse its current migration path, preserving backward compatibility without imposing Libvirt on other plugins.
 
+## Testing Strategy
+
+### Conformance Test Suite
+
+A standalone conformance test suite will validate a plugin's gRPC surface directly without requiring a live KubeVirt cluster. It will verify schema compliance, error codes for invalid input, operation idempotency, and behavioral invariants. For example, calling `AdjustVMIResources` twice for the same VMI must be safe, and `GetNodeLabels()` must return key-value pairs in the expected format.
+
+Following precedents such as CSI Sanity and CNI conformance testing, this suite will allow third-party plugin authors to self-certify implementations before integrating with a cluster, without requiring KubeVirt core team involvement or CI access.
+
+### End-to-End and Functional CI
+
+The main KubeVirt functional and end-to-end regression suite will continue to run against the default Libvirt/QEMU plugin. That is to say that KubeVirt will continue to treat LibVirt/QEMU/KVM as the primary virtualization stack and upstream releases will contain components that work with it. 
+
+### Mock Plugin
+
+Unit and controller-level tests will use a mock plugin only to verify that `virt-controller` and `virt-handler` invoke the expected RPC, such as `GetLauncherOverhead` or `AdjustVMIResources`, at the correct point and with the correct arguments. These tests verify dispatch, not realistic alternate behavior or behavioral divergence between stacks.
+
+## Backward Compatibility
+
+The design must preserve two invariants:
+
+1. With the `PluggableVirtualizationStack` feature gate disabled, KubeVirt behavior must be identical to pre-VEP KubeVirt.
+2. Upgrades must not disrupt already-running VMs.
+
+`virt-operator` upgrades the `virt-handler` DaemonSet and `virt-controller` Deployment but does not recreate existing `virt-launcher` pods. A VM started before an upgrade may therefore continue running its original, pre-plugin-architecture `virt-launcher` until it stops, restarts, or migrates. A new `virt-handler` must continue to manage such launchers. This is an existing KubeVirt version-skew concern, but the plugin refactor must explicitly preserve it.
+
+The Command and Notify APIs remain the stable, unchanged wire boundary between `virt-handler` and `virt-launcher`, whether the launcher is the pre-plugin implementation or a stack-specific image. Plugin dispatch in `virt-handler` is a control-plane decision and does not change communication with an already-running launcher.
+
+This VEP introduces one additional rollout risk: a node may receive a new `virt-handler` before its `virt-runtime`, or a selected stack's plugin, is ready. During Alpha, if the feature gate is enabled but no plugin is registered or ready for a stack, `virt-handler` falls back to the internal default function. This provides graceful degradation during rollout windows.
+
+Required compatibility coverage includes:
+
+- A mixed-version test in which a new `virt-handler` manages a pre-plugin-refactor `virt-launcher`, verifying unchanged Command and Notify API behavior.
+- A migration test in which a VM with a pre-plugin `virt-launcher` migrates to a node running the new `virt-handler`, verifying that the target uses the same stack and image as the source.
+- A rolling-upgrade test that upgrades the `virt-handler` DaemonSet while live VMs run on old and new nodes, verifying that no VM is disrupted.
+
+## Graduation Requirements
+
+### Alpha
+
+- [ ] Refactor the default Libvirt/QEMU/KVM logic in `virt-controller` and `virt-handler` into self-contained internal functions, one per capability that will become a plugin RPC, without changing behavior. Existing end-to-end tests must pass unmodified before introducing dispatch.
+- [ ] Introduce the `PluggableVirtualizationStack` feature gate and guard all plugin-dispatch paths with it.
+- [ ] Define and register the `VirtualizationStackPlugin` CRD.
+- [ ] Implement conditional dispatch in `virt-controller` and `virt-handler`: invoke the internal default function when the feature gate is disabled or no matching plugin is registered, and otherwise route the call to the plugin.
+- [ ] Verify through an explicit regression test that disabling the feature gate preserves pre-VEP behavior.
+- [ ] Verify that enabling the feature gate without registering a plugin continues to resolve VMIs through the default-function fallback.
+- [ ] Implement a second virtualization stack plugin, such as Cloud Hypervisor, including its controller plugin, `virt-runtime`, and stack-specific `virt-launcher`. Verify end-to-end functionality.
+- [ ] Add mock-plugin call-verification tests for `virt-controller` and `virt-handler` as described in the Testing Strategy.
+- [ ] Provide a conformance test suite and ensure the new plugin passes it.
+- [ ] Continue running end-to-end CI against the default virtualization stack with the feature gate both enabled and disabled, with no regressions.
+
+### Beta
+
+To be defined in a follow-up revision.
+
+### GA
+
+To be defined in a follow-up revision.
+
 ## Open Questions
-
-- What API should `virt-handler` use to invoke `virt-runtime`, and which privileged stack-specific operations belong to that component beyond setting `memlock` limits?
-
-- What node-local registration and communication protocol should node labeler plugins use, and how should plugin lifecycle and failures be reconciled by `virt-handler`?
-
-- Should dynamic node label updates be event-driven, periodically polled, or use a combination of both approaches?
 
 - How should registration be authenticated or restricted so that only plugins deployed by authorized cluster administrators can advertise labels for a virtualization-stack ID?
 
-- Should stack-specific logic that maps VMI requirements to plugin-defined node labels run in the virt-controller plugin or in an admission policy?
+- Should we remove LibVirt/QEMU functionality from KubeVirt core and make it a default plugin built and released by KubeVirt upstream? Or should we keep that functionality in-tree, while refactoring KubeVirt to allow invoking an alternate virtualization stack?
+
+- Should admission webhooks be defined separately for each virtualization stack, or should virtualization stacks reuse the existing Structured Plugins mechanism?
+
+- What should happen if `virt-handler` is rolled back to a pre-plugin-architecture version after VMs have been created using a plugin-based virtualization stack? The rolled-back `virt-handler` has no knowledge of plugin dispatch and cannot manage those VMs.
