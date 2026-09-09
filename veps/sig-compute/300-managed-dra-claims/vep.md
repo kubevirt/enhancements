@@ -5,8 +5,6 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.10
-- This VEP targets beta for version: v1.11
-- This VEP targets GA for version: TBD
 
 ### Release Signoff Checklist
 
@@ -60,7 +58,8 @@ declarations for the managed claim and assembles the `ResourceClaim`.
   provisioner CRD
 - Support extensibility via independent provisioner controllers
 - Reuse existing device declaration patterns (`gpus[]`, `hostDevices[]`,
-  `networks[]`, `cpu.dra`) as the source of truth for claim generation
+  `networks[]`, CPU struct defined by VEP-152) as the source of truth
+  for claim generation
 
 ## Non Goals
 
@@ -103,7 +102,7 @@ All changes are gated behind `ManagedDRAClaims` (alpha, off by default).
 ### Responsibility Boundary
 
 - **User owns:** device declarations (`gpus[]`, `hostDevices[]`,
-  `networks[]`, `cpu.dra`)
+  `networks[]`, CPU intent (`cores`, `dedicatedCpuPlacement`))
 - **Admin owns:** `ManagedClaimProvisioner` objects (DeviceClass
   mappings and provisioner controller selection)
 - **Managed-claim framework owns:** provisioner-controller watches,
@@ -116,18 +115,10 @@ All changes are gated behind `ManagedDRAClaims` (alpha, off by default).
 
 ### Scope Boundary with VEP-152
 
-VEP-152 and VEP-300 are developed concurrently:
-
-- **VEP-152 owns:** `cpu.dra` struct (`CPUDRASource`), `deviceClassName`
-  on `CPUDRASource`, CPU consumption (virt-launcher vCPU pinning), CPU
-  accounting formula, `CPUsWithDRA` feature gate, unified `dedicated` API
-- **VEP-300 owns:** `ManagedClaimProvisioner` CRD,
-  `managedClaimProvisionerName` field on
-  `VirtualMachineInstanceResourceClaim`, the managed-claim provisioning
-  framework, and the `ManagedDRAClaims` feature gate
-
-VEP-152's future `autoClaim` path for CPU-only claims is superseded by
-VEP-300's managed claims, which handle CPUs as part of cross-device claims.
+VEP-152 owns the CPU struct, its user-facing field name, the accounting
+formula, and virt-launcher CPU consumption. VEP-300 treats CPU as one
+of its device types and consumes whatever struct VEP-152 defines. See
+[VEP-152 (PR #414)](https://github.com/kubevirt/enhancements/pull/414).
 
 ### External Dependencies
 
@@ -147,10 +138,8 @@ VEP-300's managed claims, which handle CPUs as part of cross-device claims.
   consumable capacity), building on partitionable devices
   [KEP-4815](https://github.com/kubernetes/enhancements/issues/4815):
   `DRAConsumableCapacity` gate, beta and on by default in Kubernetes 1.36.
-  CPU claims use grouped mode: the driver advertises one device per
-  socket or NUMA node with `allowMultipleAllocations: true` and a
-  `dra.cpu/cpu` capacity, and each claim consumes a quantity of it.
-  Individual mode (one device per CPU) is deprecated upstream and not used.
+  CPU claims use DRA consumable capacity in grouped mode (see the CPU
+  section below).
 
 ### API Changes
 
@@ -175,10 +164,6 @@ spec:
   deviceTypes:
   - name: cpu
     deviceClassName: dra.cpu
-    # Capacity key the CPU DRA driver advertises (dra-driver-cpu uses
-    # dra.cpu/cpu). The generated claim consumes the derived vCPU count
-    # from this capacity. Required for the cpu type; ignored otherwise.
-    capacityName: dra.cpu/cpu
   - name: gpu
     deviceClassName: gpu.example.com
     opaque:
@@ -203,14 +188,11 @@ objects. KubeVirt does not expose provisioner-specific constraint or
 pairing policy in `ManagedClaimProvisioner.spec`.
 
 `deviceTypes` is a named list. The name maps VMI device declarations to
-the provisioner configuration: `cpu` maps to `domain.cpu.dra`, `gpu` to
+the provisioner configuration: `cpu` maps to the CPU struct defined by
+VEP-152 (see [PR #414](https://github.com/kubevirt/enhancements/pull/414)), `gpu` to
 `domain.devices.gpus[]`, `hostDevice` to `domain.devices.hostDevices[]`,
 and `network` to `spec.networks[].resourceClaim`. `deviceClassName` names
-the admin-installed DeviceClass. `capacityName` is required for the `cpu`
-type and ignored for the whole-device types (`gpu`, `hostDevice`,
-`network`): CPUs allocate by consumable capacity rather than by whole
-device, so the generated request must name the capacity key the driver
-advertises (see the CPU generation section below).
+the admin-installed DeviceClass.
 
 `opaque` is optional driver-specific configuration. When present, the
 provisioner renders a Kubernetes `DeviceClaimConfiguration` in
@@ -237,7 +219,10 @@ type ManagedClaimDeviceType struct {
 
 The YAML fields map directly to this spec: `provisioner` identifies the
 controller, and each `deviceTypes[]` entry maps to
-`ManagedClaimDeviceType`.
+`ManagedClaimDeviceType`. `ManagedClaimProvisioner` objects are
+cluster-scoped and discoverable via `kubectl get
+managedclaimprovisioners`, similar to how users discover StorageClass
+names for PVCs.
 
 #### Modified: `VirtualMachineInstanceResourceClaim`
 
@@ -278,48 +263,20 @@ No new fields added to `GPU` or `HostDevice` by this VEP. The existing
 structs are used as-is with their `ClaimRequest` fields (`claimName`,
 `requestName`).
 
-#### CPU (`CPUDRASource`, defined by VEP-152)
+#### CPU (defined by VEP-152)
 
-VEP-152 adds the following structure (shown here for reference):
+The CPU struct shape and field name are defined by VEP-152 and may be
+renamed to avoid exposing DRA vocabulary in the user API. VEP-300
+consumes whatever CPU struct VEP-152 defines. See
+[VEP-152 (PR #414)](https://github.com/kubevirt/enhancements/pull/414)
+for the struct definition and accounting formula.
 
-```go
-type CPU struct {
-	// ... existing fields (Cores, Sockets, Threads, etc.) ...
-
-	// DRA enables Dynamic Resource Allocation for CPU resources.
-	// +optional
-	DRA *CPUDRASource `json:"dra,omitempty"`
-}
-
-type CPUDRASource struct {
-	// ClaimRequest references a specific request from a ResourceClaim
-	// listed in vmi.spec.resourceClaims[].
-	*ClaimRequest `json:",inline"`
-}
-```
-
-VEP-300 scans `cpu.dra` during claim generation alongside the other
-device types. The DeviceClassName is resolved from the provisioner CRD's
-`cpu.deviceClassName` field.
-
-CPUs allocate through DRA consumable capacity in grouped mode, not as
-whole devices. The CPU DRA driver advertises one device per socket or NUMA
-node with a consumable CPU capacity (dra-driver-cpu publishes it under the
-key `dra.cpu/cpu`); a claim consumes a quantity of that capacity, and
-several claims can share one device until it is exhausted. The generated
-CPU request therefore leaves `count` at its default of 1 (one grouped
-device) and places the consumed quantity in `capacity.requests`, keyed by
-the provisioner's `cpu.capacityName`. Unlike the whole-device types, the
-CPU request is driven by capacity rather than count, so `count` is omitted.
-The quantity is derived from VEP-152's accounting formula
-(`cores x sockets x threads + emulatorThreadCPUs + supplementalPoolThreadCount`),
-so the user expresses guest topology and never writes a DRA quantity
-directly. The quantity is always populated: an unset `capacity` would
-default to consuming the entire grouped device (all CPUs on the socket or
-NUMA node). Individual mode (one device per CPU) is deprecated upstream and
-is not used. See
-[VEP-152 (PR #414)](https://github.com/kubevirt/enhancements/pull/414) for
-the accounting formula.
+VEP-300's only CPU-specific behavior: the generated CPU request uses
+DRA consumable capacity in grouped mode rather than whole-device count.
+The CPU DRA driver advertises one device per socket or NUMA node with a
+consumable capacity; a claim consumes a quantity of it. The generated
+request leaves `count` at its default of 1 and places the consumed
+quantity in `capacity.requests`.
 
 ### DeviceClassName Resolution
 
@@ -330,7 +287,7 @@ appears in:
 - `domain.devices.gpus[]` -> `deviceTypes[name=gpu]`
 - `domain.devices.hostDevices[]` -> `deviceTypes[name=hostDevice]`
 - `spec.networks[].resourceClaim` -> `deviceTypes[name=network]`
-- `domain.cpu.dra` -> `deviceTypes[name=cpu]`
+- CPU struct (VEP-152) -> `deviceTypes[name=cpu]`
 
 ### Claim Generation Algorithm
 
@@ -349,14 +306,12 @@ GenerateClaim(managedClaimContext) -> ResourceClaimSpec:
         resourceClaim.claimName == claimEntry.Name, look up
         DeviceClassName from deviceTypes[name=network],
         create a DeviceRequest.
-     d. Scan domain.cpu.dra (VEP-152) - if claimName matches,
-        look up DeviceClassName and capacityName from
-        deviceTypes[name=cpu], and create one DeviceRequest with
-        Capacity.Requests[capacityName]=quantity (Count defaults
-        to 1), where quantity is VEP-152's accounting formula
-        (cores x sockets x threads + emulator + IOThreads).
-        CPUs use DRA consumable capacity (grouped mode); the
-        whole-device types above keep Count=1 with no capacity.
+     d. Scan CPU struct (VEP-152) - if claimName matches,
+        look up DeviceClassName from deviceTypes[name=cpu],
+        and create one DeviceRequest. CPUs use DRA consumable
+        capacity (grouped mode, Count defaults to 1); the
+        capacity quantity is derived from VEP-152's accounting
+        formula (see VEP-152).
 
   2. Validate:
      - At least one device must reference the claim.
@@ -378,7 +333,9 @@ GenerateClaim(managedClaimContext) -> ResourceClaimSpec:
      - Name: <vmi-name>-<claim-name>
      - Namespace: vmi.Namespace
      - OwnerReference: VMI (controller=true, for GC)
-     - Labels: kubevirt.io/managed-claim: <claim-name>
+     - Labels: kubevirt.io/managed-claim: <claim-name>,
+       kubevirt.io/managed-claim-provisioner: <provisioner-name>,
+       kubevirt.io/managed-claim-vmi: <vmi-name>
      - Spec.Devices.Requests: collected requests
      - Spec.Devices.Config: generated device configurations
      - Spec.Devices.Constraints: collected constraints
@@ -422,7 +379,7 @@ type ManagedClaimDevices struct {
 	GPUs        []v1.GPU
 	HostDevices []v1.HostDevice
 	Networks    []ManagedClaimNetwork
-	CPU         *v1.CPUDRASource
+	CPU         *CPUDRASource // struct name defined by VEP-152, may change
 }
 
 type ManagedClaimNetwork struct {
@@ -441,10 +398,14 @@ The framework is initialized with the provisioner name that its
 controller serves. The built-in topology-aligner controller uses:
 
 ```go
-managedclaim.NewController(
+reconciler := managedclaim.NewReconciler(
     "policy.kubevirt.io/aligner",
-    &TopologyAlignerProvisioner{},
+    &aligner.Provisioner{},
+    client,
+    store,
 )
+managedclaim.NewController(reconciler, recorder,
+    vmiInformer, provisionerInformer, claimInformer)
 ```
 
 For each `spec.resourceClaims[]` entry with
@@ -782,7 +743,6 @@ spec:
   deviceTypes:
   - name: cpu
     deviceClassName: dra.cpu
-    capacityName: dra.cpu/cpu
   - name: gpu
     deviceClassName: gpu.example.com
   - name: network
@@ -803,7 +763,7 @@ spec:
   domain:
     cpu:
       cores: 16
-      dra:
+      dra:  # field name defined by VEP-152, may change
         claimName: all-devices
         requestName: cpus
     devices:
@@ -839,6 +799,12 @@ metadata:
 spec:
   devices:
     requests:
+    - name: cpus
+      exactly:
+        deviceClassName: dra.cpu
+        capacity:
+          requests:
+            dra.cpu/cpu: "16"
     - name: gpu0
       exactly:
         deviceClassName: gpu.example.com
@@ -851,12 +817,6 @@ spec:
       exactly:
         deviceClassName: sriov.example.com
         count: 1
-    - name: cpus
-      exactly:
-        deviceClassName: dra.cpu
-        capacity:
-          requests:
-            dra.cpu/cpu: "16"
     constraints:
     - matchAttribute: resource.kubernetes.io/pcieRoot
       requests: [gpu0, gpu1, nic]
@@ -868,18 +828,12 @@ implementation behavior, not part of the `ManagedClaimProvisioner` API.
 The CPU DRA driver publishes `pcieRoot` as a list attribute (KEP-5491);
 `matchAttribute` uses set intersection.
 
-In alpha, the built-in provisioner emits only the PCIe-root constraint.
-NUMA alignment (`matchAttribute: resource.kubernetes.io/numaNode`) is
-not emitted until a memory DRA driver is available, because NUMA
-alignment without co-located memory misrepresents the system's
-guarantees. The API and provisioner framework already support NUMA
-constraints; enabling them requires no API changes.
+In alpha, only the PCIe-root constraint is emitted (see Future
+Extensions for NUMA alignment).
 
-The `cpus` request omits `count` (it defaults to 1) and consumes 16 units of
-the grouped device's capacity through `capacity.requests` (DRA consumable
-capacity), rather than allocating 16 devices. The 16 is the guest vCPU count
-derived from `domain.cpu` (here `cores: 16`), so the user never writes the
-DRA quantity.
+The `cpus` request uses consumable capacity (see the CPU section above).
+The quantity (16) is derived from the guest vCPU count; the user never
+writes it directly.
 
 ## Alternatives
 
@@ -997,7 +951,7 @@ Rejected because:
 - 2026-08-11: Redesigned with ManagedClaimProvisioner CRD based on
   feedback from Alay Patel (VEP owner)
 - 2026-08-12: Added controller-based generation
-- 2026-08-13: Aligned CPUDRASource with VEP-152
+- 2026-08-13: Aligned CPU struct with VEP-152
 
 ## Scalability
 
