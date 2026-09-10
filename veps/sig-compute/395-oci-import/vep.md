@@ -37,7 +37,7 @@ hyperconverged-cluster-operator (HCO).
 
 Importing disk data is delegated to CDI via `DataVolumes`. This requires
 extending CDI's `DataVolumeSourceRegistry` with a `Layer` field to
-support selecting OCI artifact layers by annotation, and handling raw
+support selecting OCI artifact layers by annotations, and handling raw
 (non-tar) layer blobs.
 
 A proof-of-concept shell script exists at `kubevirt/kubevirt/hack/oci-import.sh`
@@ -83,7 +83,7 @@ By completing the import side of the OCI artifact workflow, we get:
 * Support multi-architecture OCI artifacts via optional
   `platform.architecture` selection
 * Extend CDI's `DataVolumeSourceRegistry` with a `Layer` field for
-  annotation-based layer selection and raw blob handling
+  layer selection by annotations and raw blob handling
 * Publish a manifest bundle that installs the controller standalone, and
   make the component deployable through HCO
 * Provide a `virtimportctl` CLI
@@ -124,7 +124,7 @@ By completing the import side of the OCI artifact workflow, we get:
 ## Repos
 
 * (Phase 1) [kubevirt/containerized-data-importer](https://github.com/kubevirt/containerized-data-importer) -
-  `Layer` on `DataVolumeSourceRegistry` with annotation-based selection,
+  `Layer` on `DataVolumeSourceRegistry` with selection by annotations,
   raw blob handling in importer
 * (Phase 2) [kubevirt/virt-import](https://github.com/kubevirt/virt-import)
   (new) - import API, controller, metadata-fetch binary, CLI and manifest
@@ -147,10 +147,8 @@ and config blob structure.
 
 The import controller uses the `artifactType` field on the OCI manifest to
 auto-detect the target kind (`VirtualMachine` or `VirtualMachineTemplate`).
-It reads `io.kubevirt.disk.names` and `io.kubevirt.disk.size` from layer
-annotations to correlate layers to volumes and to size DataVolumes. The
-plural `io.kubevirt.disk.names` is corrected in VEP #256 by
-[#446](https://github.com/kubevirt/enhancements/pull/446).
+It reads `io.kubevirt.disk.name` and `io.kubevirt.disk.size` from layer
+annotations to correlate layers to volumes and to size DataVolumes.
 
 **Not in the artifact:** `volumeMode` and `accessModes` are not stored in
 the OCI artifact. CDI applies cluster-appropriate defaults via
@@ -160,7 +158,7 @@ clusters with different storage backends.
 ### Phase 1: CDI - OCI Artifact Layer Support
 
 This phase extends CDI's `DataVolumeSourceRegistry` to support selecting
-individual layers from OCI artifacts by annotation and importing raw
+individual layers from OCI artifacts by annotations and importing raw
 (non-tar) blobs. All changes are in
 [kubevirt/containerized-data-importer](https://github.com/kubevirt/containerized-data-importer).
 
@@ -190,39 +188,37 @@ type DataVolumeSourceRegistry struct {
     // +optional
     Platform *PlatformOptions `json:"platform,omitempty"`
     // Layer selects a specific layer from an OCI artifact manifest
-    // by matching an annotation on the manifest's layer descriptors.
+    // by matching annotations on the manifest's layer descriptors.
     // The importer resolves the manifest (using Platform to select
     // from an image index or verify a plain manifest), finds the
     // matching layer, and treats its blob as raw data.
     // Incompatible with pullMethod: node.
     // +optional
-    Layer *LayerDescriptor `json:"layer,omitempty"`
+    Layer *LayerSelector `json:"layer,omitempty"`
 }
 
-type LayerDescriptor struct {
-    // Annotation selects a layer by matching an annotation on the
-    // OCI manifest's layer descriptors.
-    Annotation LayerAnnotationSelector `json:"annotation"`
-}
-
-type LayerAnnotationSelector struct {
-    // Key is the annotation key to match on the layer descriptor
-    // (e.g. "io.kubevirt.disk.names").
-    Key string `json:"key"`
-    // Value is the expected annotation value, matched exactly
-    // (e.g. "rootdisk", or "datadisk,shareddisk" for a layer backing
-    // more than one volume).
-    Value string `json:"value"`
+type LayerSelector struct {
+    // MatchAnnotations selects a layer by annotations on the
+    // OCI manifest's layer descriptors. Every entry must be present
+    // on the same descriptor and match exactly, for example
+    // "io.kubevirt.disk.name": "rootdisk".
+    MatchAnnotations map[string]string `json:"matchAnnotations,omitempty"`
 }
 ```
 
-This follows a similar convention to podman's
-[artifact extract](https://docs.podman.io/en/latest/markdown/podman-artifact-extract.1.html)
-annotation-based layer selection. A `Digest` field for direct
-content-addressable selection could be added to `LayerDescriptor` in
-the future if needed. CDI could also infer the storage size from the
-layer's `io.kubevirt.disk.size` annotation when resolving the manifest,
-removing the need for the controller to set it on the DataVolume.
+Selection must resolve to exactly one layer. The import fails if no
+layer carries all the annotations in `matchAnnotations`, or if more
+than one does. An empty or absent `matchAnnotations` is rejected by the
+webhook.
+
+The `matchAnnotations` map follows the convention of Kubernetes label
+selectors, and the selection by annotations itself follows podman's
+[artifact extract](https://docs.podman.io/en/latest/markdown/podman-artifact-extract.1.html).
+A `Digest` field for direct content-addressable selection could be added
+to `LayerSelector` in the future if needed. CDI could also infer the
+storage size from the layer's `io.kubevirt.disk.size` annotation when
+resolving the manifest, removing the need for the controller to set it
+on the DataVolume.
 
 When `Layer` is set, `pullMethod` must be `pod` (or unset, defaulting
 to `pod`). Node pull is incompatible with `Layer` because the container
@@ -235,7 +231,7 @@ CDI's registry import behavior changes as follows:
 | Step | Normal (container image) | With Layer (OCI artifact) |
 |------|--------------------------|---------------------------|
 | Manifest parsing | `image.FromSource()` | Fetch manifest; if image index, select by `Platform`; if plain manifest, verify `Platform` matches (fail on mismatch) |
-| Layer selection | All layers, match by tar path | Match layer by annotation key-value |
+| Layer selection | All layers, match by tar path | Match layer by annotations |
 | Blob fetch | Via layer iteration | `GetBlob()` by matched layer's digest |
 | Layer processing | `tar.NewReader()`, extract `disk/` files | Raw blob path: stream decompressed blob directly |
 | Post-import inspection | `Inspect()` for labels | Skipped |
@@ -386,9 +382,9 @@ type ArtifactInfo struct {
 }
 
 type DiskImportStatus struct {
-    // Names are the volume names backed by this layer, from the
-    // io.kubevirt.disk.names annotation.
-    Names []string `json:"names"`
+    // Name is the volume name backed by this layer, from the
+    // io.kubevirt.disk.name annotation.
+    Name string `json:"name"`
     // DataVolumeName is the name of the created DataVolume.
     DataVolumeName string `json:"dataVolumeName"`
     // Phase mirrors cdiv1.DataVolumePhase values (e.g. "Succeeded",
@@ -434,7 +430,7 @@ flowchart TD
     subgraph CDI ["CDI, per DataVolume"]
         direction TB
         C1["Resolve manifest by platform"]
-        C2["Find layer matching the<br/>io.kubevirt.disk.names annotation"]
+        C2["Find layer matching the<br/>io.kubevirt.disk.name annotation"]
         C3["Fetch blob by digest,<br/>detect zstd via magic bytes"]
         C4["Stream raw disk to PVC<br/>(raw blob path, no tar extraction)"]
         C1 --> C2 --> C3 --> C4
@@ -463,13 +459,13 @@ The fetcher requires that:
 - `artifactType` is a known KubeVirt type
   (`application/vnd.kubevirt.virtualmachine.v1` or
   `application/vnd.kubevirt.virtualmachinetemplate.v1`)
-- Each disk layer carries the `io.kubevirt.disk.names` and
+- Each disk layer carries the `io.kubevirt.disk.name` and
   `io.kubevirt.disk.size` annotations
 - Layer media types are supported
 - No volume name appears in more than one layer
 - `io.kubevirt.disk.size` is a valid Kubernetes resource quantity
 - Every PVC volume in the config blob is named by exactly one disk layer's
-  `io.kubevirt.disk.names`, and every disk layer names at least one PVC volume
+  `io.kubevirt.disk.name`, and every disk layer names a PVC volume
 
 All fetcher messages other than the stdout JSON are emitted to stderr.
 
@@ -482,9 +478,8 @@ source:
     platform:
       architecture: <resolved-arch>
     layer:
-      annotation:
-        key: io.kubevirt.disk.names
-        value: <annotation value, passed through verbatim>
+      matchAnnotations:
+        io.kubevirt.disk.name: <annotation value, passed through verbatim>
     secretRef: <from spec, if set>
     certConfigMap: <from spec, if set>
 storage:
@@ -504,10 +499,8 @@ the CR.
 
 **PVC naming convention:** `${RESOURCE_NAME}-${DISK_NAME}` (e.g.,
 `fedora-vm-rootdisk`), where `RESOURCE_NAME` is the `targetName` if set,
-otherwise the `VirtualMachineImport` CR name. `DISK_NAME` is the first name in
-the layer's `io.kubevirt.disk.names` list, which is lexically sorted. A layer
-backing several volumes yields one PVC, and the config blob rewrite points
-every one of those volumes at it.
+otherwise the `VirtualMachineImport` CR name. `DISK_NAME` is the layer's
+`io.kubevirt.disk.name`.
 
 **Namespace scoping:** All resources created during import (metadata-fetch
 Job, ConfigMap, DataVolumes, PVCs, target VM or VMTemplate) are created in
@@ -697,9 +690,8 @@ spec:
       platform:
         architecture: amd64
       layer:
-        annotation:
-          key: io.kubevirt.disk.names
-          value: rootdisk
+        matchAnnotations:
+          io.kubevirt.disk.name: rootdisk
   storage:
     storageClassName: ceph-block
     resources:
@@ -865,7 +857,7 @@ versions it works with:
 **Functional tests:**
 
 * DataVolume with Layer + Platform imports a single layer blob selected
-  by annotation from a multi-layer OCI artifact pushed to a test registry
+  by annotations from a multi-layer OCI artifact pushed to a test registry
 
 ### Phase 2: virt-import
 
