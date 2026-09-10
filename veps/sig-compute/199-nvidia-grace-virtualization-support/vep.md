@@ -64,6 +64,7 @@ Grace GPUs expose large 64-bit prefetchable PCI BARs that can exceed the default
 - Reuse existing KubeVirt building blocks (VEP 115 NUMA-aware PCI placement, VEP 266 IOMMUFD) instead of duplicating them.
 - Derive Grace-specific guest topology (GI NUMA cells, NUMA distances, MMIO aperture) from host ACPI/sysfs at domain conversion time.
 - Reject statically invalid Grace VMI configurations at admission time, and fail fast with actionable errors for node-local discovery or runtime failures.
+- Allow cluster administrators to configure additional Grace PCI vendor/device IDs via the KubeVirt CR (`spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs`) to accommodate pre-production, unreleased, or variant hardware SKUs without requiring KubeVirt code modifications.
 
 ## Non Goals
 
@@ -142,6 +143,13 @@ Dependency status at the time of this VEP:
 A **Grace-class GPU host device** is a PCI host device whose KubeVirt `permittedHostDevices` entry maps the requested `deviceName` to a known NVIDIA Grace GPU PCI vendor/device ID. Resource names such as `nvidia.com/GB100_*` are operator-facing handles, but the classification is based on the underlying PCI vendor/device IDs, not on the resource name string alone.
 
 Admission may use the KubeVirt host-device configuration to determine whether a requested `spec.domain.devices.hostDevices[].deviceName` is Grace-class. During domain conversion, `virt-launcher` must verify the assigned BDF through sysfs, for example `/sys/bus/pci/devices/<bdf>/vendor` and `/sys/bus/pci/devices/<bdf>/device`, before applying Grace-specific topology.
+
+KubeVirt maintains a built-in table of recognized Grace GPU PCI vendor/device IDs. In addition, cluster administrators can configure extra PCI vendor/device IDs via the KubeVirt CR using `spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs`. This provides an extension mechanism to support:
+- Pre-production engineering samples and unannounced/confidential hardware whose PCI IDs cannot be published upstream in advance.
+- Partner- or OEM-specific SKUs and firmware variants (for example, differences in reported device IDs between physical functions and virtual functions or firmware revisions).
+- Immediate testing and validation of new hardware iterations without requiring an upstream KubeVirt code change or release cycle.
+
+Devices matching IDs in `spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs` are treated identically to built-in Grace devices across admission validation, `virt-handler` classification, and `virt-launcher` domain generation.
 
 Node labels are not the classification mechanism. They may help scheduling, but Grace activation depends on the feature gate, the requested host-device resource, and runtime verification of the assigned PCI device.
 
@@ -283,7 +291,7 @@ VEP 199 does not define or require a fixed list of `deviceName` strings. `device
 
 KubeVirt's generic PCI device plugin can provide these resources. An external provider, such as NVIDIA's KubeVirt GPU device plugin, may also be used, but VEP-199 does not classify Grace devices from NVIDIA resource-name patterns such as `nvidia.com/GB100_*`. The source of truth is the PCI vendor/device ID.
 
-Admission classifies a requested `spec.domain.devices.hostDevices[].deviceName` as Grace-class only when KubeVirt host-device configuration maps that resource name to a known Grace GPU PCI vendor/device ID, for example through `permittedHostDevices.pciHostDevices[].resourceName` and `pciVendorSelector`. Admission does not classify Grace devices from resource-name patterns or node labels. After scheduling, `virt-launcher` must verify the allocated BDF through sysfs `vendor`/`device` before applying Grace-specific topology. If the allocated device does not match the expected Grace PCI ID, KubeVirt must fail closed with an actionable error. Node labels may be used only for scheduling or operator policy.
+Admission classifies a requested `spec.domain.devices.hostDevices[].deviceName` as Grace-class only when KubeVirt host-device configuration maps that resource name to a known Grace GPU PCI vendor/device ID—either from KubeVirt's built-in table or configured via `spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs`—for example through `permittedHostDevices.pciHostDevices[].resourceName` and `pciVendorSelector`. Admission does not classify Grace devices from resource-name patterns or node labels. After scheduling, `virt-launcher` must verify the allocated BDF through sysfs `vendor`/`device` before applying Grace-specific topology. If the allocated device does not match the expected Grace PCI ID (built-in or configured), KubeVirt must fail closed with an actionable error. Node labels may be used only for scheduling or operator policy.
 
 Future features (EGM, vCMDQ, mixed GPU+NIC topology, etc.) are not part of this VEP and have no admission rules here.
 
@@ -311,6 +319,12 @@ spec:
         - PCINUMAAwareTopology
         # IOMMUFD enablement follows VEP 266 (cluster-side device plugin
         # and any associated feature gate it introduces).
+    # Optional: configure additional Grace-compatible PCI device IDs
+    # (e.g. unreleased, pre-production, or variant SKUs)
+    graceIOVirtualization:
+      additionalPCIDeviceIDs:
+        - "10DE:3041"
+        - "10DE:307F"
 ```
 
 ### Grace Baseline VMI (single representative example)
