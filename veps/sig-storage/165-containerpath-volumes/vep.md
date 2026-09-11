@@ -5,16 +5,16 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.8
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.10
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -30,8 +30,9 @@ The primary motivation is to support data that is **implicitly injected into pod
 This limitation creates challenges in several scenarios:
 
 - **Cloud Provider Service Account Tokens**: AWS IAM Roles for Service Accounts (IRSA) injects credentials at `/var/run/secrets/eks.amazonaws.com/serviceaccount` via a mutating webhook, requiring additional webhooks like [irsa-mutation-webhook](https://github.com/kubevirt/irsa-mutation-webhook) to make these available to VMs
-- **GKE Workload Identity**: Similar to IRSA, GKE injects service account credentials into pods at specific paths via mutating webhooks
-- **Azure Workload Identity**: Azure AD pod identity tokens are mounted at standard paths in pods via mutating webhooks
+- **Azure Workload Identity**: Azure AD Workload Identity injects a federated identity token at `/var/run/secrets/azure/tokens` via a mutating webhook, requiring the pod to carry the `azure.workload.identity/use: "true"` label and a ServiceAccount annotated with the managed identity's client ID. As with IRSA, there is no way to expose this token to the VM guest without additional custom tooling
+
+> **Note:** GKE Workload Identity does not require this mechanism. GKE runs a node-level metadata server proxy (a DaemonSet) that intercepts pod requests to the metadata server and transparently exchanges the pod's Kubernetes ServiceAccount identity for GCP credentials. No token file is ever mounted into the pod, so there is nothing for a `containerPath` volume to expose.
 - **Trusted Execution Environments (TEE)**: Confidential computing scenarios often require attestation tokens and runtime-injected secrets that are mounted into pods by platform infrastructure via CSI drivers or init containers
 
 Currently, these scenarios require custom solutions, typically involving mutating webhooks that transform pod specifications or duplicate volume mounts. A general-purpose escape hatch for exposing implicitly-injected pod paths to VMs would eliminate this complexity.
@@ -57,14 +58,14 @@ Currently, these scenarios require custom solutions, typically involving mutatin
 
 ## Definition of Users
 
-- **Platform Engineers**: Infrastructure teams deploying KubeVirt in cloud environments with managed identity services (AWS IRSA, GKE Workload Identity, Azure Workload Identity)
+- **Platform Engineers**: Infrastructure teams deploying KubeVirt in cloud environments with managed identity services (AWS IRSA, Azure Workload Identity)
 - **Application Developers**: Developers building cloud-native applications that need to access cloud provider SDKs and services from within VMs
 - **Security Teams**: Teams implementing confidential computing and TEE-based workloads requiring attestation tokens
 
 ## User Stories
 
 - As a platform engineer deploying KubeVirt on EKS, I want my VirtualMachines to automatically have access to AWS credentials injected via IRSA without maintaining a separate mutating webhook
-- As a platform engineer on GKE, I want my VirtualMachines to seamlessly access GCP services using Workload Identity credentials mounted in the pod
+- As a platform engineer on Azure, I want my VirtualMachines to seamlessly access Azure services using Workload Identity credentials mounted in the pod
 - As an application developer, I want my VM-based application to use the AWS SDK with IRSA credentials that are automatically mounted at the expected path
 - As a security team member implementing confidential computing, I want to expose attestation tokens and runtime secrets that are injected into my pod to the trusted VM guest
 
@@ -122,15 +123,17 @@ type VolumeSource struct {
    - The path is normalized (resolving any `.` or `..` components)
    - The normalized path must exactly match a volumeMount's mountPath, OR
    - The normalized path must be a subpath of a volumeMount's mountPath (for nested directories within a mount)
-   - Paths containing `..` components that would escape the volumeMount boundary are rejected (e.g., `/mnt/secret/../../etc/passwd`)
+   - Paths containing `..` components, or symlinks, that would escape the volumeMount boundary are rejected (e.g., `/mnt/secret/../../etc/passwd`)
    - This ensures only explicitly declared volumes can be exposed, providing a clear security boundary
-2. **Volume Resolution**: The virt-launcher pod will validate that the specified path exists and is accessible at runtime
-3. **Virtiofs Integration**: The path will be exposed to the VM using the existing virtiofs infrastructure, similar to how Secret volumes are handled
-4. **Mount Options**: The volume will be mounted read-only by default, with the read-only constraint enforced at both the virtiofs and libvirt domain levels
-5. **Additional Validation**: API validation will also ensure:
+2. **Backing Volume Type Restriction**: The volumeMount referenced by a containerPath volume must be backed by one of a limited set of Kubernetes volume types: `ConfigMap`, `Secret`, `Projected`, `DownwardAPI`, or `EmptyDir`. PVCs and HostPath volumes are explicitly not supported, since these are already addressable via existing KubeVirt volume types or are out of scope for the pod-local, credential/config-oriented use cases this feature targets
+3. **Volume Resolution**: The virt-launcher pod will validate that the specified path exists and is accessible at runtime
+4. **Virtiofs Integration**: The path will be exposed to the VM using the existing virtiofs infrastructure, similar to how Secret volumes are handled
+5. **Mount Options**: The volume will be mounted read-only by default, with the read-only constraint enforced at both the virtiofs and libvirt domain levels
+6. **Additional Validation**: API validation will also ensure:
    - Path is an absolute path
    - Volume name is unique within the VM spec
-6. **Security**: Access is limited to volumeMounts in the virt-launcher pod, preventing exposure of arbitrary filesystem paths or host filesystem access
+7. **Security**: Access is limited to volumeMounts backed by the supported volume types in the virt-launcher pod, preventing exposure of arbitrary filesystem paths or host filesystem access
+8. **Feature Gate**: `ContainerPathVolumes` is enabled via `spec.configuration.developerConfiguration.featureGates` on the KubeVirt CR
 
 ### Relationship to Existing Features
 
@@ -189,31 +192,54 @@ spec:
 
 When the virt-launcher pod is created, the EKS Pod Identity Webhook will inject AWS credentials at `/var/run/secrets/eks.amazonaws.com/serviceaccount`, which the ContainerPath volume then exposes to the VM guest.
 
-### GKE Workload Identity Example
+### Azure Workload Identity Example
+
+Azure Workload Identity requires the virt-launcher pod to carry the `azure.workload.identity/use: "true"` label and use a ServiceAccount annotated with the managed identity's client ID. The Azure Workload Identity mutating webhook then injects a federated identity token at `/var/run/secrets/azure/tokens`:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: azure-wi-sa
+  namespace: default
+  annotations:
+    azure.workload.identity/client-id: <AZURE_CLIENT_ID>
+```
 
 ```yaml
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: gke-vm
+  name: azure-vm
+  namespace: default
 spec:
   running: true
   template:
+    metadata:
+      labels:
+        azure.workload.identity/use: "true"
     spec:
       domain:
         devices:
           filesystems:
-          - name: gcp-token
+          - name: azure-wi-sa
+            virtiofs: {}
+          - name: azure-token
             virtiofs: {}
         resources:
           requests:
             memory: 1Gi
       volumes:
-      - name: gcp-token
+      - name: azure-wi-sa
+        serviceAccount:
+          serviceAccountName: azure-wi-sa
+      - name: azure-token
         containerPath:
-          path: /var/run/secrets/tokens/gcp-ksa
+          path: /var/run/secrets/azure/tokens
           readOnly: true
 ```
+
+Inside the guest, the application sets `AZURE_FEDERATED_TOKEN_FILE` and `AZURE_CLIENT_ID` to use the exposed token with the Azure SDK.
 
 ### Confidential Computing / TEE Example
 
@@ -359,8 +385,10 @@ The primary scalability consideration is the number of virtiofs mounts per VM, w
 - Users must remove containerPath volumes from VM specs before rollback to ensure VM lifecycle operations work
 
 **VM Migration:**
-- ContainerPath volumes will migrate normally as they reference pod-local paths
 - Both source and destination pods must support containerPath volumes
+- Behavior depends on the backing volume type of the referenced volumeMount:
+  - Secret, ConfigMap, Projected, and DownwardAPI (including ServiceAccount tokens) volumes are re-projected on the target node by Kubernetes, so containerPath volumes backed by these types continue to work transparently after migration
+  - EmptyDir volumes are not automatically repopulated on the target node. If an EmptyDir path is populated by a sidecar (e.g., the HashiCorp Vault Agent Injector), the sidecar starts on the target pod and repopulates the data; a plain EmptyDir with no such sidecar will be empty after migration
 
 ## Functional Testing Approach
 
@@ -407,21 +435,21 @@ The primary scalability consideration is the number of virtiofs mounts per VM, w
 
 ## Implementation History
 
-_To be filled in as implementation progresses_
+- 2026-02-24: [kubevirt/kubevirt#16662](https://github.com/kubevirt/kubevirt/pull/16662) merged, implementing ContainerPath volumes behind the `ContainerPathVolumes` feature gate (alpha, v1.8)
 
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] Feature gate `ContainerPathVolumes` guards all functionality
-- [ ] API validation ensures:
+- [x] Feature gate `ContainerPathVolumes` guards all functionality
+- [x] API validation ensures:
   - Absolute paths only
   - Paths correspond to volumeMounts in the virt-launcher compute container
   - Unique volume names
-- [ ] Basic implementation supporting read-only access via virtiofs
-- [ ] Unit tests covering API validation, volumeMount validation, and core logic
-- [ ] Functional tests covering basic use cases
-- [ ] Documentation for API fields and basic usage examples, including the volumeMount constraint
+- [x] Basic implementation supporting read-only access via virtiofs
+- [x] Unit tests covering API validation, volumeMount validation, and core logic
+- [x] Functional tests covering basic use cases
+- [x] Documentation for API fields and basic usage examples, including the volumeMount constraint
 
 ### Beta
 
@@ -431,11 +459,9 @@ _To be filled in as implementation progresses_
   - Service account token access
   - Multiple containerPath volumes per VM
   - Dynamic file updates visible in VM (token rotation scenarios)
-- [ ] Migration support validated
-- [ ] Performance testing shows acceptable overhead
-- [ ] User documentation with real-world examples for AWS IRSA, GKE Workload Identity, and Azure scenarios
-- [ ] At least 2 releases of alpha testing with user feedback incorporated
-- [ ] Security review completed
+- [x] Migration support validated
+- [x] User documentation with real-world examples for AWS IRSA and Azure Workload Identity scenarios
+- [x] At least 2 releases of alpha testing with user feedback incorporated
 - [ ] (Optional) Community validation of IRSA/Workload Identity patterns by users with cloud provider access
 
 ### GA
@@ -444,6 +470,7 @@ _To be filled in as implementation progresses_
 - [ ] Production usage by at least 3 organizations
 - [ ] No critical bugs reported in beta phase for at least 2 releases
 - [ ] Comprehensive user guide and troubleshooting documentation
+- [ ] Performance testing shows acceptable overhead
 - [ ] (Optional) Write support added if user demand and security review support it
 - [ ] (Optional) Hotplug support if there is demonstrated need
 
@@ -465,8 +492,9 @@ ContainerPath volumes have additional restrictions:
 
 1. **Pod-Scoped Only**: Paths are resolved within the virt-launcher pod container, not the host
 2. **Absolute Paths Required**: Relative paths are rejected to prevent confusion
-3. **VolumeMount Validation**: Paths must correspond to a volumeMount in the compute container (exact match or subpath)
-4. **Path Traversal Prevention**: Paths are normalized to resolve `.` and `..` components, and the normalized path must remain within the volumeMount boundary. Attempts to escape via `..` are rejected (e.g., `/mnt/secret/../../etc/passwd` is invalid even if `/mnt/secret` is a valid volumeMount)
+3. **VolumeMount Validation**: Paths must correspond to a volumeMount in the compute container (exact match or subpath), and that volumeMount must be backed by one of the supported volume types (ConfigMap, Secret, Projected, DownwardAPI, EmptyDir)
+4. **Path Traversal Prevention**: Paths are normalized to resolve `.` and `..` components, and the normalized path must remain within the volumeMount boundary. Attempts to escape via `..` components or symlinks are rejected (e.g., `/mnt/secret/../../etc/passwd` is invalid even if `/mnt/secret` is a valid volumeMount)
+5. **Coarse-Grained Exposure**: A containerPath volume exposes **all files** under the referenced path to the guest, not individual files. Cluster administrators should use RBAC and admission policy to control which ServiceAccounts and identities are paired with which VMs, since anything mounted under the exposed path becomes visible to the guest
 
 ### Read-Only Default
 
@@ -516,13 +544,27 @@ If write support is added in the future, additional protections will be required
 
 **Benefit**: Removes need for custom mutating webhooks, simplifies deployment, and provides a declarative configuration
 
-### GKE Workload Identity
-
-Similar to AWS IRSA, GKE's Workload Identity feature injects GCP service account credentials into pods at `/var/run/secrets/tokens/gcp-ksa`. ContainerPath volumes enable VMs to access these credentials without custom solutions.
-
 ### Azure Workload Identity
 
-Azure AD pod-managed identity injects tokens into pods. ContainerPath volumes provide a generic mechanism for VMs to access these tokens.
+**Background**: Azure AD Workload Identity allows pods to authenticate to Azure AD without long-lived credentials. The workflow:
+1. Administrator creates a Kubernetes ServiceAccount annotated with `azure.workload.identity/client-id: <AZURE_CLIENT_ID>`
+2. The pod is labeled `azure.workload.identity/use: "true"`
+3. When such a pod is created, the **Azure Workload Identity mutating webhook** intercepts pod creation
+4. The webhook automatically injects into the pod:
+   - Environment variables: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`
+   - A projected volume mounted at `/var/run/secrets/azure/tokens` containing a federated identity token
+5. Azure SDKs automatically detect these environment variables and exchange the token for an Azure AD access token
+
+**Current Problem**: The webhook injects credentials into the virt-launcher pod, but the VM guest has no visibility into the environment variables or the mounted token directory, so applications running in VMs cannot authenticate to Azure services without custom tooling.
+
+**Solution with ContainerPath**:
+1. The virt-launcher pod gets a federated identity token injected at `/var/run/secrets/azure/tokens`
+2. A ContainerPath volume exposes this path to the VM guest via virtiofs
+3. Applications in the VM can read the token from the mounted filesystem, and set `AZURE_FEDERATED_TOKEN_FILE` and `AZURE_CLIENT_ID` to use it with the Azure SDK
+
+**Benefit**: Removes need for custom mutating webhooks, simplifies deployment, and provides a declarative configuration
+
+**Note on GKE**: GKE Workload Identity does not need ContainerPath support. Rather than mounting a token file into the pod, GKE runs a node-level metadata server proxy that intercepts pod requests to the metadata server and transparently exchanges the pod's Kubernetes ServiceAccount identity for GCP credentials. Since no token is ever written to the pod filesystem, there is nothing for a ContainerPath volume to expose.
 
 ### Confidential Computing / TEE
 
