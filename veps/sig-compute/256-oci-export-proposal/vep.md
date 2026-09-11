@@ -76,6 +76,7 @@ By packaging VMs and VM templates as OCI artifacts, we get:
 * Direct registry push from the export pod (deferred to a future version)
 * Import of OCI artifacts into the cluster (deferred to a follow-up design)
 * Support for multi-VM appliances (single VM or template per artifact)
+* Carrying the contents of PVCs other than disk images and persistent state
 * Guest-level operations such as sysprep or sealing during export
 * Live export of running VMs
 * Cross-hypervisor portability (the OCI format is KubeVirt-native)
@@ -191,6 +192,15 @@ Each manifest in the index describes one architecture variant:
         "io.kubevirt.disk.size": "5Gi",
         "org.opencontainers.image.title": "datadisk.raw.zst"
       }
+    },
+    {
+      "mediaType": "application/vnd.kubevirt.persistentstate.tar+zstd",
+      "digest": "sha256:333...",
+      "size": 65536,
+      "annotations": {
+        "io.kubevirt.persistentstate.size": "11Mi",
+        "org.opencontainers.image.title": "persistentstate.tar.zst"
+      }
     }
   ]
 }
@@ -212,7 +222,12 @@ referenced image is not re-packaged into the artifact.
 #### Disk Layers
 
 Each PVC-backed disk image is stored as a separate layer (blob) in the
-manifest. Layers are raw OCI blobs - not tar-wrapped.
+manifest. Disk layers are raw OCI blobs - not tar-wrapped.
+
+Only a PVC holding a disk image becomes a disk layer. Any other PVC volume
+keeps its claim reference in the config blob the way a ContainerDisk keeps
+its image reference, and the importer has to provide the claim on the
+target cluster.
 
 For `VirtualMachine` exports, `dataVolumeTemplates` are stripped from the
 spec and DataVolume volume sources in `spec.template.spec.volumes` are
@@ -229,6 +244,27 @@ Layers are keyed by PersistentVolumeClaim. A source referencing the same
 claim from several volumes has no single name for its layer and is rejected
 on export, so every layer belongs to exactly one volume.
 
+#### Persistent State Layer
+
+A VM can have a backend storage PVC, holding state that has to outlive the
+VM it belongs to, such as persistent TPM or EFI state. It is a directory of
+files rather than a disk image, so it is exported as a single tar layer
+with its own media type instead of a raw blob. It is exported whenever it
+exists.
+
+The backend PVC is not a volume in the VM spec. KubeVirt creates and names
+it on the target cluster, so no volume is added to the config blob and the
+layer names none.
+
+An artifact carries at most one persistent state layer. It is identified by
+its media type rather than an annotation, so an importer that does not
+understand it can skip it and still restore every disk.
+
+Omitting the layer is not the same as exporting a VM that never had
+persistent state. The imported VM would come up with empty NVRAM, losing
+its boot entries and enrolled secure boot keys, and with a fresh TPM,
+losing anything sealed to the old one.
+
 #### Media Types
 
 | Media Type                                                       | Usage                                    |
@@ -238,8 +274,10 @@ on export, so every layer belongs to exactly one volume.
 | `application/vnd.kubevirt.virtualmachinetemplate.v1`             | `artifactType`: `VirtualMachineTemplate` |
 | `application/vnd.kubevirt.virtualmachinetemplate.config.v1+json` | Config blob: VM template definition      |
 | `application/vnd.kubevirt.disk.raw+zstd`                         | Layer: zstd-compressed raw disk          |
+| `application/vnd.kubevirt.persistentstate.tar+zstd`              | Layer: zstd-compressed persistent state  |
 
-Raw disks are always compressed with zstd during export. Zstd is provided
+Raw disks and the persistent state tar are always compressed with zstd
+during export. Zstd is provided
 by the external Go library
 [`github.com/klauspost/compress/zstd`](https://github.com/klauspost/compress).
 
@@ -259,6 +297,14 @@ regenerates on the target cluster.
 The descriptor `size` field is the compressed blob size, so
 `io.kubevirt.disk.size` is what an importer needs to size the target PVC
 without decompressing the layer first.
+
+The table above applies to disk layers. The persistent state layer maps to
+no volume in the VM spec, so `io.kubevirt.disk.name` does not apply. It
+carries `org.opencontainers.image.title`, `persistentstate.tar.zst`, and
+`io.kubevirt.persistentstate.size`, the capacity of the exported backend
+PVC. KubeVirt sizes backend storage itself, so an importer has no use for
+the size today, but recording it keeps the artifact self-describing should
+that sizing change.
 
 ### OCI Layout Streaming Endpoint (export server)
 
@@ -584,6 +630,7 @@ This phase works entirely within the existing `VirtualMachine` source kind.
 - [ ] Artifact type `application/vnd.kubevirt.virtualmachine.v1` set correctly
 - [ ] Disk images stored as individual layers with correct media types and
   annotations
+- [ ] Backend storage exported as a persistent state layer
 - [ ] `virtctl vmexport download --format=oci` functional
 - [ ] Downloaded archives can be pushed to a registry with common tools
 - [ ] Unit and functional tests pass
