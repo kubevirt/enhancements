@@ -493,6 +493,8 @@ To be defined in a follow-up revision.
 
 ## Open Questions
 
+- How will we enable users of alternate virt-stacks to create VMs with custom features not offered by KubeVirt API today? For example, OpenVMM (Rust-based VMM from MSFT) supports `vmbus` para-virtualized transport. How will users of that stack instruct KubeVirt to create an OpenVMM/MSHV VM with devices using `vmbus` transport?
+
 - How should registration be authenticated or restricted so that only plugins deployed by authorized cluster administrators can advertise labels for a virtualization-stack ID?
 
 - Should we remove LibVirt/QEMU functionality from KubeVirt core and make it a default plugin built and released by KubeVirt upstream? Or should we keep that functionality in-tree, while refactoring KubeVirt to allow invoking an alternate virtualization stack?
