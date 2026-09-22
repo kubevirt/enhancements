@@ -306,7 +306,27 @@ The `virt-launcher` plugin will run the Command API server listening on a UNIX s
 
 ### Pluggable Admission Webhooks
 
-Stack-specific mutating and validating webhooks will be deployed as independent Kubernetes Services and selected through the `VirtualizationStackPlugin` CRD. The `virt-operator` will register and reconcile their webhook configurations with the Kubernetes API server.
+The design for virtualization-stack-specific admission webhooks remains to be determined. Three options are under consideration:
+
+#### Option 1: Reuse Structured Plugins
+
+Use the admission policies and webhooks already defined by the [KubeVirt Structured Plugins VEP](https://github.com/kubevirt/enhancements/blob/main/veps/sig-compute/190-kubevirt-structured-plugins/vep.md#admission-policies-and-webhooks). A virtualization stack provider would register its mutating and validating admission policies or webhooks through the existing `Plugin` CR. The Structured Plugins mechanism would track the referenced resources and include their readiness when determining whether the plugin is ready, while the stack provider remains responsible for deploying them.
+
+This option reuses an existing extension mechanism and avoids introducing a separate admission contract for virtualization stacks. It requires defining how a `VirtualizationStackPlugin` is associated with the corresponding Structured Plugin and ensuring that its admission logic applies only to VMIs that select that stack.
+
+#### Option 2: Extend the Core Webhooks Through RPC
+
+Keep the core mutating and validating webhook logic in the existing `virt-api` component and move only virtualization-stack-specific logic into an RPC service. This service could be part of the same cluster-wide Service used by the `virt-controller` plugin. For both mutation and validation, `virt-api` would first run the default core logic and then invoke the plugin RPC for the selected virtualization stack.
+
+This option preserves KubeVirt's core admission behavior for every stack and limits the plugin contract to stack-specific extensions, but it requires defining how core and plugin mutations, validation failures, timeouts, and availability errors are composed.
+
+#### Option 3: Make Webhooks Fully Pluggable per CRD
+
+Allow a cluster administrator to choose, for selected CRDs, between KubeVirt's default webhook and an alternate stack-provided webhook. For example, a virtualization stack could replace the complete validating webhook, mutating webhook, or both for `VirtualMachineInstance` resources.
+
+This option gives plugin authors full control over admission behavior and avoids constraining them to extensions supported by the core webhook. However, it also requires a stronger compatibility contract so that alternate webhooks preserve KubeVirt API invariants, upgrade behavior, and interactions with other admission integrations.
+
+A follow-up design decision will select one of these models and define registration, ordering, and failure handling.
 
 ## VirtualizationStackPlugin CRD
 
@@ -498,8 +518,6 @@ To be defined in a follow-up revision.
 - How should registration be authenticated or restricted so that only plugins deployed by authorized cluster administrators can advertise labels for a virtualization-stack ID?
 
 - Should we remove LibVirt/QEMU functionality from KubeVirt core and make it a default plugin built and released by KubeVirt upstream? Or should we keep that functionality in-tree, while refactoring KubeVirt to allow invoking an alternate virtualization stack?
-
-- Should admission webhooks be defined separately for each virtualization stack, or should virtualization stacks reuse the existing Structured Plugins mechanism?
 
 - What should happen if `virt-handler` is rolled back to a pre-plugin-architecture version after VMs have been created using a plugin-based virtualization stack? The rolled-back `virt-handler` has no knowledge of plugin dispatch and cannot manage those VMs.
 
