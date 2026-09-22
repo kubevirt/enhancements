@@ -30,6 +30,8 @@ Additionally, KubeVirt only utilizes around 20% (~57/292) of all the Libvirt API
 
 ### Areas of Tight Coupling Between KubeVirt and Libvirt/QEMU/KVM
 
+- Libvirt/QEMU semantics are embedded throughout KubeVirt's CRDs and cluster configuration. For example, `Machine.Type` is documented as a "QEMU machine type", `CPU.Model` refers to the Libvirt CPU model map, `CPUFeature.Policy` uses Libvirt policy names verbatim, and `Disk.IO` specifies which QEMU disk I/O mode should be used. Cluster configuration also exposes `OVMFPath`, `EmulatedMachines`, and `MachineType` as first-class fields. Consequently, the KubeVirt v1 API is effectively a Libvirt/QEMU abstraction in several areas, rather than a virtualization-stack-neutral API.
+
 - KubeVirt’s virt-launcher is built for Libvirt/QEMU: Although interaction with virt-launcher takes place through well-defined interfaces (CmdServer and NotifyServer), it is not possible to build a virt-launcher component wherein the implementation of those interfaces can be backed by an alternative virtualization stack.
 
 - Libvirt domain XML’s mirror `api.Domain` data structure: KubeVirt thoroughly uses the api.Domain data structure to internally represent a virtual machine instance. This definition is meant to mirror Libvirt’s domain definition.
@@ -107,6 +109,8 @@ This VEP defines the top-level design direction for introducing a plugin-based v
 Therefore, this VEP serves as a tracking VEP for a set of smaller, focused VEPs. Each of those VEPs will propose and document the detailed design for one specific area of tight coupling in KubeVirt (for example, virt-launcher pod rendering, privileged operations against the VM, discovering node capabilities for label generation.).
 
 The intent is to keep this document focused on overall architecture and coordination, while delegating implementation-level design details to targeted follow-up VEPs.
+
+This proposed design does not alter the KubeVirt v1 API to remove its embedded Libvirt/QEMU semantics. Alternative virtualization stacks must interpret the existing fields where possible and define their behavior for unsupported or inapplicable values. Making the API virtualization-stack-neutral, or adding stack-specific API extensions, is deferred to future design work.
 
 This section will walk through each key component of KubeVirt that performs virtualization stack related functions - listing the areas of tight-coupling with the traditional stack and proposing plugin API for extension.
 
@@ -512,6 +516,8 @@ To be defined in a follow-up revision.
 To be defined in a follow-up revision.
 
 ## Open Questions
+
+- How should KubeVirt evolve API fields whose definitions encode Libvirt/QEMU semantics, such as machine types, CPU models and feature policies, disk I/O modes, and firmware or emulated-machine configuration? Should these fields gain stack-neutral semantics, be translated by each plugin, or be supplemented by stack-specific API extensions, and how should unsupported values be reported?
 
 - How will we enable users of alternate virt-stacks to create VMs with custom features not offered by KubeVirt API today? For example, OpenVMM (Rust-based VMM from MSFT) supports `vmbus` para-virtualized transport. How will users of that stack instruct KubeVirt to create an OpenVMM/MSHV VM with devices using `vmbus` transport?
 
