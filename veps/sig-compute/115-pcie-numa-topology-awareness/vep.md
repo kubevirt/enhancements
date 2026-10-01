@@ -6,6 +6,7 @@
 
 - This VEP targets alpha for version: v1.8
 - This VEP targets beta for version: v1.9
+- This VEP targets the DRA metadata topology and PCIe root grouping extension for version: v1.10
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -54,7 +55,8 @@ Current limitations:
 ## Goals
 
 - Support VM creation with NUMA-aware PCIe device topologies that map directly
-  to the underlying host topology.
+  to the underlying host topology, including PCIe root complex mirroring for
+  accurate peer-to-peer DMA locality.
 
 ## Non Goals
 
@@ -82,6 +84,7 @@ Current limitations:
 - **Device Support**: PCIe devices only, configured with VFIO passthrough.
 - **NUMA Inheritance**: VFs and mdevs inherit NUMA affinity from parent devices.
 - **Platform**: Requires QEMU 2.6 version that includes support for `pcie-expander-bus` controllers.
+- **CPU Manager**: Required for the sysfs/cpuset discovery path (non-DRA). Not required when DRA allocates resources — guest NUMA cells can be built from DRA device metadata instead of kubelet cpuset.
 
 ## Definition of Users
 
@@ -120,13 +123,13 @@ or before being moved to another node.
 ### Core Approach
 
 KubeVirt creates a NUMA-aware PCIe topology using:
-- one `pcie-expander-bus` (pxb-pcie) controller per NUMA node.
+- one `pcie-expander-bus` (pxb-pcie) controller per PCIe root complex (with NUMA node fallback when `pcieRoot` metadata is unavailable).
 - one `pcie-root-port` controller per device.
-- device placement based on host NUMA affinity.
+- device placement based on host PCIe root complex affinity and NUMA affinity.
 
 This approach ensures each passthrough device appears on a guest PCIe bus that corresponds to
-its actual host NUMA node, enabling AI frameworks to make optimal communication and memory access
-decisions.
+its actual host PCIe root complex and NUMA node, enabling AI frameworks to make optimal
+communication, peer-to-peer DMA, and memory access decisions.
 
 A non NUMA-aware PCIe topology of a VM looks like this:
 
@@ -140,7 +143,7 @@ A non NUMA-aware PCIe topology of a VM looks like this:
    ---------------                          ---------------    ---------------
 ```
 
-While a NUMA-aware PCIe topology will look like this:
+A NUMA-only PCIe topology (NUMA node fallback, no `pcieRoot` metadata):
 
 ```
    pcie.0
@@ -161,6 +164,34 @@ While a NUMA-aware PCIe topology will look like this:
                                             ---------------           ---------------
 ```
 
+A PCIe root complex-aware topology (with `pcieRoot` metadata available):
+
+```
+   pcie.0
+   --------------------------------------------------------------------------------------
+         |                   |                     |                         |
+   --------------     ------------------    ----------------          ----------------
+   | PCIe Device |    | pcie-root-port |    |  pxb-pcie    |          |  pxb-pcie    |
+   --------------     ------------------    | (pcieRoot A) |          | (pcieRoot B) |
+                                            | NUMA node 0  |          | NUMA node 0  |
+                                            ----------------          ----------------
+                                                   |                         |
+                                          --------------------      --------------------
+                                          |  pcie-root-port  |      |  pcie-root-port  |
+                                          --------------------      --------------------
+                                                   |                         |
+                                            ---------------           ---------------
+                                            | PCIe Device |           | PCIe Device |
+                                            |  (GPU/NIC)  |           |  (GPU/NIC)  |
+                                            ---------------           ---------------
+```
+
+In the PCIe root complex-aware topology, devices on the same NUMA node but
+different PCIe root complexes are placed on separate `pxb-pcie` controllers,
+enabling AI frameworks to detect peer-to-peer DMA locality. This is critical
+on modern AI server hardware where a single NUMA node has multiple PCIe root
+complexes (e.g., AMD NPS1 mode, Intel with SNC off).
+
 ### Scope
 
 - This feature is enabled only when the virtual machine's `spec.domain.cpu.numa.guestMappingPassthrough` is set.
@@ -168,6 +199,38 @@ While a NUMA-aware PCIe topology will look like this:
 - Mediated devices (mdevs) follow the parent physical PCI device's NUMA node when available. Mediated devices
   should be backed by Virtual Functions (VFs) using VFIO passthrough.
 - Devices without NUMA affinity are placed on the default `pci.0` bus and report NUMA node `-1` (absent).
+- The DRA path allows `cpuManagerPolicy=none`. When cpuset is unavailable, NUMA cells are built from DRA device metadata (see [Guest NUMA Cell Construction](#guest-numa-cell-construction)).
+
+### Architecture
+
+The topology-aware device placement design has two layers — a producer/consumer
+architecture that decouples metadata creation from consumption:
+
+**Consumer (virt-launcher converter):** Reads KEP-5304 metadata files at
+`/var/run/kubernetes.io/dra-device-attributes/` to discover device topology.
+The converter only reads metadata — it never reads sysfs for topology. It
+is agnostic to whether metadata was produced by a DRA driver or the topology
+shim. It reads `numaNode` and `pcieRoot` per device, builds guest NUMA
+cells, injects SLIT distances, and places devices on NUMA-aligned `pxb-pcie`
+expander buses grouped by PCIe root complex.
+
+**Producer (who writes the metadata):**
+- **DRA devices:** The DRA driver writes KEP-5304 metadata as part of
+  `PrepareResourceClaims`. KubeVirt reads `resource.kubernetes.io/numaNode`,
+  `resource.kubernetes.io/pcieRoot`, and `resource.kubernetes.io/pciBusID`
+  from these files.
+- **Topology shim:** A shim in virt-launcher runs before domain conversion
+  and writes KEP-5304-format metadata for any passthrough device that does
+  not already have a metadata file — whether the device came from a device
+  plugin or a DRA driver that did not publish topology attributes. It
+  discovers `numaNode`, `pcieRoot`, and `pciBusID` from sysfs using the
+  upstream
+  [`k8s.io/dynamic-resource-allocation/deviceattribute`](https://github.com/kubernetes/dynamic-resource-allocation)
+  library — the same functions that DRA drivers use.
+
+This ensures sysfs is read in exactly one place (the shim), metadata files
+are the single source of truth for the converter, and all devices — DRA or
+device plugin — flow through the same consumer code path.
 
 ### Device NUMA Affinity Discovery
 
@@ -190,6 +253,113 @@ DRA devices: the status controller must include the PCIe address in
 `DeviceResourceClaimStatus.Attributes.PCIAddress`. If DRA drivers cannot provide
 this information, those devices will default to NUMA node `-1`.
 
+#### KEP-5304 Metadata Discovery
+
+The converter reads topology from
+[KEP-5304](https://github.com/kubernetes/enhancements/issues/5304) metadata
+files mounted at `/var/run/kubernetes.io/dra-device-attributes/`. Three
+standardized attributes are read per device:
+
+- `resource.kubernetes.io/pciBusID` — the PCI bus address in BDF notation (StringValue, already read on main for DRA device creation)
+- `resource.kubernetes.io/numaNode` — the NUMA node ID (IntValue, with raw
+  JSON list fallback for [KEP-5491](https://github.com/kubernetes/enhancements/issues/5491)
+  IntValues)
+- `resource.kubernetes.io/pcieRoot` — the PCIe root complex identifier (StringValue)
+
+A `DevicePlacementOverride` struct carries the topology attributes per device:
+
+```go
+type DevicePlacementOverride struct {
+    NUMANode uint32
+    PCIeRoot string // empty = group by NUMA only
+}
+```
+
+Devices without metadata (or without `numaNode` in their metadata) are
+placed on the default `pci.0` bus with NUMA node `-1`. The topology shim
+ensures all passthrough devices have metadata before the converter runs.
+
+#### Device Plugin Metadata Shim
+
+A topology shim in virt-launcher runs before domain conversion and writes
+KEP-5304-format metadata for device-plugin-allocated devices, which never
+have KEP-5304 metadata.
+
+DRA devices are out of scope for the shim. A DRA driver that does not
+publish `numaNode` or `pcieRoot` is treated as a driver-side gap to be
+resolved with that driver upstream, rather than silently backfilled from
+sysfs by KubeVirt. Missing attributes on a DRA device may indicate other
+problems with the driver's device model, so the shim never writes metadata
+for a device that a DRA driver is responsible for.
+
+The shim uses the upstream
+[`k8s.io/dynamic-resource-allocation/deviceattribute`](https://github.com/kubernetes/dynamic-resource-allocation)
+library to discover topology from sysfs:
+
+1. Identify passthrough devices without existing metadata files
+2. Call `deviceattribute.GetPCIBusIDAttribute` for pciBusID
+3. Call `deviceattribute.GetNUMANodeAttributeByPCIBusID` for numaNode
+4. Call `deviceattribute.GetPCIeRootAttributeByPCIBusID` for pcieRoot
+5. Write KEP-5304-format JSON to the metadata directory
+
+This ensures sysfs is read in exactly one place (the shim) and the
+converter only reads metadata. Requires vendoring
+`k8s.io/dynamic-resource-allocation` in KubeVirt.
+
+This works because it is assumed that dra drivers and device plugins will
+not be activated on the same node for the same devices. If this assumption
+is broken then the paths for dra devices could collide with device plugins.
+
+#### Shim Metadata File Layout
+
+Device-plugin devices have no `ResourceClaim`, so they cannot use the
+claim-keyed paths that kubelet writes for DRA devices
+(`resourceclaims/{claimName}/...` and
+`resourceclaimtemplates/{podClaimName}/...`). The shim writes topology-only
+metadata to a separate subtree that kubelet never manages:
+
+```
+/var/run/kubernetes.io/dra-device-attributes/
+  resourceclaims/...           # kubelet-owned (DRA direct and managed claims)
+  resourceclaimtemplates/...   # kubelet-owned (DRA template claims)
+  deviceplugin/<id>/topology/kubevirt-shim-metadata.json   # shim-owned
+```
+
+The synthetic identifier `<id>` is `devplugin-<pool>-<bdf>`, where `pool` is
+the device-plugin resource name and `bdf` is the device PCI address. It is
+deterministic, so a shim rerun overwrites the file rather than accumulating
+stale entries, and it is unique per node.
+
+The file is a standard `DeviceMetadata` record with `Namespace` empty and
+`PodClaimName` nil, so it can never be mistaken for a real direct or
+template claim. Its single request is named `topology`, its device `Driver`
+is a shim-specific identity, `Pool` is the resource name, `Name` is the PCI
+address, and its `Attributes` contain only `numaNode` and `pcieRoot`. The
+file deliberately omits `pciBusID` and `mdevUUID`.
+
+Disambiguation between a topology-only file and a real device-allocation
+record is structural, not a runtime flag. The builders that turn metadata
+into `<hostdev>` entries, `CreateDRAHostDevices` and
+`CreateDRAGPUHostDevices`, only iterate VMI-spec entries that satisfy
+`IsHostDeviceDRA` / `IsGPUDRA` (`DeviceName == "" && ClaimRequest != nil`).
+Device-plugin devices set `DeviceName` and have no `ClaimRequest`, so they
+never reach a metadata lookup. `resolveClaimMetadata` only builds paths
+under `resourceclaims/` and `resourceclaimtemplates/` from claim names in
+the VMI spec, so it has no code path that can construct a path into
+`deviceplugin/`. The builders therefore cannot read a shim file, regardless
+of its contents.
+
+As a second, independent safeguard, if a future change ever did point a
+builder at a shim file, `createHostDeviceForGPU` and its host-device
+counterpart require `pciBusID` or `mdevUUID` and fail loudly rather than
+render a phantom device. A topology-only file carries neither, so it can
+never produce a guest device.
+
+Only the topology consumer added by this proposal enumerates all three
+subtrees, reusing the existing metadata decode logic unchanged. It is the
+sole reader that needs a directory-wide view, because device-plugin devices
+have no claim name to look up by.
+
 ### Domain Generation
 
 We propose a new PCI NUMA-aware assigner (in addition to the existing PCI root
@@ -199,11 +369,76 @@ topology for the devices with NUMA affinity information:
 
 1. Discovers the NUMA node for each passthrough PCIe device and if it matches any of the guest's NUMA nodes.
 2. Filters out devices without NUMA alignment to be placed on the default `pci.0` bus using the existing root slot assigner.
-3. Groups devices by NUMA node: `numaNode -> []api.HostDevice`.
-4. Creates `pcie-expander-bus` controllers with `<target busNr="X"><node>Y</node></target>` elements for each NUMA node.
+3. Groups devices by PCIe root complex (primary) or NUMA node (fallback): `pcieRoot -> []HostDevice` or `__numa:<N> -> []HostDevice`. When `pcieRoot` metadata is available from KEP-5304, devices sharing the same PCIe root complex are grouped together regardless of NUMA node. When `pcieRoot` is unavailable, the existing NUMA-only grouping is used as a fallback. If two devices share a `pcieRoot` but report different NUMA nodes (conflict), the device with the lowest PCI address determines the NUMA target for that group (deterministic resolution with a warning logged).
+4. Creates `pcie-expander-bus` controllers with `<target busNr="X"><node>Y</node></target>` elements for each topology group (PCIe root complex or NUMA node).
 5. Creates one `pcie-root-port` controller per device under the respective `pcie-expander-bus` controller.
-6. Assigns device addresses to the `pcie-root-port` aligned with its NUMA node.
+6. Assigns device addresses to the `pcie-root-port` aligned with its topology group.
 7. Inserts the controllers created into the domain before adding the host devices.
+
+### Guest NUMA Cell Construction
+
+When `guestMappingPassthrough` is set and DRA resource claims are present,
+`buildDRANUMACells` constructs guest NUMA cells by:
+
+1. Scanning all KEP-5304 metadata files for NUMA nodes (CPU, GPU, NIC —
+   all device types contribute)
+2. Distributing vCPUs and memory evenly across discovered NUMA nodes
+3. Creating guest NUMA cells with sorted, deterministic IDs
+
+This replaces the cpuset-based path when the kubelet CPU manager is
+unavailable. When cpuset-based NUMA construction fails, the DRA metadata
+path serves as a fallback.
+
+Three code paths are gated by `hasDRAGuestMapping` (guestMappingPassthrough +
+DRA resource claims):
+
+| Condition | Behavior |
+|-----------|----------|
+| `IsCPUDedicated() && hasDRAGuestMapping` | Build NUMA cells from DRA metadata; fallback to cpuset. Place devices via metadata overrides. |
+| `IsCPUDedicated() && !hasDRAGuestMapping` | Existing cpuset path (unchanged) |
+| `!IsCPUDedicated() && hasDRAGuestMapping` | Build NUMA cells from DRA metadata only |
+
+### SLIT Distance Injection
+
+After NUMA cells are built, `injectGuestSLITDistances` reads the host ACPI
+SLIT (System Locality Information Table) matrix from
+`/sys/devices/system/node/node*/distance` and injects `<distances><sibling>`
+elements into guest NUMA cells. This enables AI frameworks to detect
+inter-NUMA distances (e.g., 10 self, 12 same-socket, 32 cross-socket) for
+optimal multi-GPU communication path selection.
+
+SLIT injection is best-effort: if the sysfs distance files are unreadable,
+malformed, or absent (e.g., single-NUMA systems), injection is silently
+skipped and QEMU generates default distances (10 local, 20 remote). This
+does not affect device placement — only the inter-NUMA distance values
+visible to the guest.
+
+### VEP-152 Interaction
+
+[VEP-152](../152-cpu-dra/vep.md) adds CPU DRA support through the `CPUsWithDRA`
+feature gate. It adds no VMI API field. When the gate is enabled and a VMI sets
+`dedicatedCpuPlacement`, virt-controller synthesizes a grouped-mode CPU
+`ResourceClaim` from the existing CPU topology fields and attaches it to the
+virt-launcher pod. The allocated cpuset reaches virt-launcher as a CDI-injected
+`DRA_CPUSET_<claimUID>` environment variable, and VEP-152 parses that variable
+to write libvirt `<vcpupin>` entries. It does not read KEP-5304 metadata files
+for pinning.
+
+Separately, the CPU driver publishes topology attributes on the CPU devices it
+exposes, and KEP-5304 materializes the allocated device's attributes into the
+shared metadata directory. In grouped mode (the mode VEP-152 uses) the driver
+publishes one group device per NUMA node carrying
+`resource.kubernetes.io/numaNode`, and, when the driver runs with
+`--expose-pcie-roots`, `resource.kubernetes.io/pcieRoot`. This proposal reads
+those attributes for NUMA-aware device placement, on the same footing as the
+`numaNode` and `pcieRoot` published by GPU and NIC drivers. Per-CPU attributes
+such as `dra.cpu/cpuID` exist only in the driver's deprecated individual mode,
+which VEP-152 does not use, so this proposal does not depend on them.
+
+VEP-152 currently declares CPU DRA and `numa.guestMappingPassthrough` mutually
+exclusive and rejects the combination at admission. How guest NUMA topology
+construction interacts with the CPU DRA path is left to a later revision of this
+proposal.
 
 ### Schema Changes
 
@@ -304,6 +539,10 @@ func LookupDeviceVCPUNumaNode(pciAddress *api.Address, domainSpec *api.DomainSpe
 }
 ```
 
+When DRA metadata is available, the `GetNUMANodeForClaim` utility reads
+NUMA node information directly from KEP-5304 metadata files, bypassing
+the sysfs path. This is the preferred path for DRA-allocated devices.
+
 ### Open Questions / Follow-Ups
 
 - Mediated devices / VFs:
@@ -321,8 +560,6 @@ func LookupDeviceVCPUNumaNode(pciAddress *api.Address, domainSpec *api.DomainSpe
 - PCI 64-bit MMIO Window Limit. The default Q35 machine’s 64-bit PCI hole is insufficient for configurations with multiple
   GPUs attached to pcie-expander-bus controllers. When firmware or the guest OS attempts to map very large 64-bit BARs (Base Address Registers)
   from these devices, address space exhaustion can prevent successful system initialization, causing early boot failures.
-- Mirror PCIe topology: ensure that devices are aligned to the same PCIe root (in addition to NUMA node aligment) as on the host.
-  This will help frameworks that rely on PCIe hierarchy for locality detection. 
 - Opt-out mechanism: when this feature graduates from Alpha and becomes enabled by default, users might need a way to preserve
   legacy PCI topology for existing VMs. We can consider implementing an annotation-based system where existing VMs are automatically
   marked with legacy topology mode, while users can explicitly opt-in to NUMA-aware topology through user-facing annotations.
@@ -610,6 +847,45 @@ KubeVirt creates:
 </devices>
 ```
 
+## Failure Modes and Fallback Behavior
+
+| Metadata available after shim | Behavior |
+|-------------------|----------|
+| `numaNode` + `pcieRoot` | Full topology: group by pcieRoot, NUMA target from numaNode |
+| `numaNode` only | NUMA-only grouping (one expander bus per NUMA node) |
+| `pciBusID` only (shim could not determine `numaNode` from sysfs) | Device gets NUMA -1, placed on default `pci.0` bus |
+| Two devices share `pcieRoot` but have different `numaNode` | Warning logged, lowest PCI address determines NUMA target (deterministic) |
+
+The topology shim runs before the converter and fills in missing attributes
+from sysfs. If sysfs cannot determine a device's NUMA node (e.g.,
+`numa_node = -1`), the device is left without a `numaNode` attribute and
+falls back to the default `pci.0` bus. All fallbacks are logged. No
+placement failure is fatal.
+
+## External Dependencies
+
+- [KEP-5304: DRA Device Attributes Downward API](https://github.com/kubernetes/enhancements/issues/5304) — metadata file format
+- [KEP-6072](https://github.com/kubernetes/enhancements/issues/6072) — standardization of `resource.kubernetes.io/numaNode`
+- [KEP-5491](https://github.com/kubernetes/enhancements/issues/5491) — list-type device attributes (IntValues for numaNode)
+- [dra-driver-cpu #265](https://github.com/kubernetes-sigs/dra-driver-cpu/pull/265) (merged) — KEP-5304 metadata publishing
+- [dra-driver-cpu #286](https://github.com/kubernetes-sigs/dra-driver-cpu/pull/286) — per-allocated-CPU metadata entries
+- [VEP-152](../152-cpu-dra/vep.md) — CPU DRA support (defers NUMA passthrough to this proposal)
+- [`k8s.io/dynamic-resource-allocation/deviceattribute`](https://github.com/kubernetes/dynamic-resource-allocation) — sysfs topology discovery library for device plugin shim (must be vendored)
+
+## Driver Requirements
+
+KubeVirt reads `resource.kubernetes.io/numaNode` and
+`resource.kubernetes.io/pcieRoot` from KEP-5304 metadata files. DRA drivers
+that publish these standardized attributes (defined in
+[`k8s.io/dynamic-resource-allocation/deviceattribute`](https://github.com/kubernetes/dynamic-resource-allocation))
+get accurate guest PCIe topology. Drivers that only publish `pciBusID` fall
+back to sysfs for NUMA discovery. Drivers that publish no KEP-5304 metadata
+at all rely entirely on the device plugin shim or the existing sysfs path.
+
+For device plugin devices, the metadata shim discovers these attributes from
+sysfs using the same upstream library and writes KEP-5304 metadata files
+before domain conversion.
+
 ## Scalability
 
 The solution should scale to:
@@ -618,6 +894,10 @@ The solution should scale to:
 - Multiple PCIe devices per NUMA node.
 - Complex multi-socket systems with more than 4 NUMA nodes.
 - Efficient controller allocation avoiding resource conflicts.
+
+No additional API server load for the DRA metadata path. All metadata is read
+locally from files mounted into the virt-launcher pod. Sysfs reads are
+per-device (O(n) where n = number of passthrough devices, typically < 16).
 
 ## Update/Rollback Compatibility
 
@@ -639,6 +919,7 @@ The solution should scale to:
 <!--
 This section will be filled as implementation progresses
 -->
+- v1.10: Extended for DRA metadata topology reading, PCIe root complex grouping, SLIT distance injection, and device plugin metadata shim
 
 ## Graduation Requirements
 
@@ -655,6 +936,11 @@ This section will be filled as implementation progresses
 - Evaluate user experience and gather feedback.
 - Turn on feature gate by default.
 - Increase testing coverage if needed.
+- DRA metadata reading functional with NVIDIA GPU driver.
+- PCIe root grouping validated on multi-root-complex NUMA systems.
+- Device plugin shim tested with SR-IOV device plugin.
+- SLIT injection validated on multi-NUMA hardware.
+- `k8s.io/dynamic-resource-allocation` vendored.
 
 ### GA
 
