@@ -1,30 +1,35 @@
+---
+title: Your short, descriptive title
+vep-number: NNNN          # equals the tracking issue number; set on issue creation
+creation-date: "YYYY-MM-DD"
+status: provisional       # provisional | implementable | implemented |
+                          # deferred | rejected | withdrawn | replaced
+
+authors:
+  - "@github-handle"
+
+owning-sig: sig-compute   # sig-compute | sig-network | sig-storage
+participating-sigs: []    # other SIGs that must LGTM before merge
+
+reviewers:
+  - TBD                   # replaced by real handles after SIG triage;
+                          # no TBD allowed when transitioning to implementable
+approvers:
+  - TBD                   # SIG chairs/leads who commit to approving the design;
+                          # no TBD allowed when transitioning to implementable
+
+feature-gate: FeatureName # omit field only if VEP body contains explicit opt-out justification
+stage: alpha              # alpha | beta | ga — current implementation stage
+milestone:
+  alpha: "v1.x"
+  beta: "v1.x"            # omit until planned
+  ga: "v1.x"              # omit until planned
+
+replaces: ""              # VEP number this supersedes, if any
+superseded-by: ""         # VEP number that supersedes this, if any
+---
+
 # VEP #NNNN: Your short, descriptive title
-
-## VEP Status Metadata
-
-### Target releases
-
-<!--
-A PR must update this section during the planning phase of a given release in order to track it.
-PRs that will not update the VEP during the planning phase will not be able to graduate the
-VEP by creating a code PR to kubevirt/kubevirt to bump the phase in-code.
-
-Please avoid targeting future releases in this section. Only capture the upcoming release.
-For example, during the planning phase for version v1.123, do **not** target beta for v.124 in advance.
--->
-
-- This VEP targets alpha for version: 
-- This VEP targets beta for version:
-- This VEP targets GA for version:
-
-### Release Signoff Checklist
-
-Items marked with (R) are required *prior to targeting to a milestone / release*.
-
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
-- [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
