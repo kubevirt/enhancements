@@ -5,14 +5,17 @@
 ### Target releases
 
 <!--
-This VEP targets GA for v1.9 so that the new governance model is fully in place
-before the v1.10 VEP season (design phase) begins. The intent is for all v1.10 VEPs
-to be authored, reviewed, and tracked under the new process from the start.
+This VEP originally targeted GA for v1.9, so that the governance model would be fully in
+place before the v1.10 VEP season (design phase) began. Implementation (WI-1 through WI-8)
+did not complete before the v1.10 VEP season began, so that goal was missed. The target is
+now v1.10, so that the governance model is fully in place before the v1.11 VEP season
+(design phase) begins. The intent is for all v1.11 VEPs to be authored, reviewed, and
+tracked under the new process from the start.
 -->
 
 - This VEP targets alpha for version: N/A
 - This VEP targets beta for version: N/A
-- This VEP targets GA for version: v1.9
+- This VEP targets GA for version: v1.10
 
 ### Release Signoff Checklist
 
