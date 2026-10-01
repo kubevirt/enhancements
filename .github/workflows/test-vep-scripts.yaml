@@ -1,0 +1,25 @@
+name: Test VEP CI scripts
+
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/validate-vep.yaml'
+      - '.github/workflows/enforce-vep-freeze.yaml'
+      - '.github/workflows/test-vep-scripts.yaml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
