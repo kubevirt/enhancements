@@ -23,6 +23,8 @@ The native THP size is architecture-dependent (2M on x86_64, 1M on s390x, etc. �
 
 The VM retains its hugepages declaration in the spec (preserving NUMA topology and domain XML generation), but the pod is built with regular memory resources. virt-handler raises `RLIMIT_MEMLOCK` on virtqemud and a collapse call promotes pages to THP after preallocation completes.
 
+THP can selected via a per-VMI API (`hugepages.mode` / `hugepages.policy`). An optional KubeVirt CR cluster default can apply transparent mode with `policy: guaranteed` to hugepage VMIs that omit `mode` as well, so administrators can opt the whole cluster into THP without rewriting every workload. When that cluster configuration is unset, behavior matches today: static hugepages unless the VMI explicitly sets `mode: transparent`.
+
 ## Motivation
 
 Static hugepages require cluster-level pre-allocation: administrators must configure nodes with a fixed number of reserved hugepages at boot or runtime. This creates operational burdens:
@@ -32,6 +34,8 @@ Static hugepages require cluster-level pre-allocation: administrators must confi
 3. **NUMA fragmentation** — hugepages must be allocated on the correct NUMA node; imbalanced allocation leads to scheduling failures.
 4. **Cluster heterogeneity** — different VM sizes need different hugepage reservations, complicating node profiles.
 5. **Operational toil** — changing hugepage reservations requires node reboots or careful runtime tuning with risk of allocation failure.
+
+To simplify operations, an administrator can move the whole cluster to THP with a KubeVirt CR default instead of rewriting every hugepage VMI. Per-VMI `mode` remains for mixed clusters and overrides.
 
 Modern kernels (RHEL 9.2+, upstream 6.1+) support `MADV_COLLAPSE`, which synchronously collapses regular pages into THPs. Combined with `mlock` and immediate preallocation, high THP coverage can deliver TLB performance close to static hugepages without any pre-allocation.
 
@@ -47,11 +51,13 @@ An out-of-tree addon ([kubevirt-hugepages-addon](https://github.com/michalskriva
 - Use the standard KubeVirt memory overhead calculation — no special buffer hacks.
 - Require no changes to libvirt or QEMU.
 - Support two collapse policies via `policy`: `bestEffort` (opportunistic collapse) and `guaranteed` (VM fails if collapse does not reach 95% coverage).
+- Provide a per-VMI API as the user opt-in, with a cluster-level opt-in for administrators who want THP without rewriting every hugepage VMI.
 
 ## Non Goals
 
-- Replacing static hugepages — both modes coexist; THP mode is opt-in.
-- Guaranteeing 100% THP coverage — `policy: guaranteed` enforces a 95% threshold on a cgroup-based estimate, not a per-page guest-RAM guarantee.
+- Replacing static hugepages by default — both modes coexist; without an explicit VMI `mode` or an explicit cluster default, behavior remains static hugepages.
+- Guaranteeing 100% THP coverage — `policy: guaranteed` enforces a 95% threshold on each guest-RAM VMA from smaps (one VMA per NUMA cell), not a per-page guarantee.
+- memfd-backed VMs in Alpha (virtiofs, passt, and other shared-memory paths).
 - Supporting 1G hugepages dynamically — `MADV_COLLAPSE` targets the architecture's native THP size, not arbitrary sizes.
 - Overcommitting guest memory — `<locked/>` prevents swapping; this is a performance feature, not an overcommit feature.
 - Modifying the kernel's THP subsystem behavior (defrag, khugepaged tuning).
@@ -66,7 +72,8 @@ An out-of-tree addon ([kubevirt-hugepages-addon](https://github.com/michalskriva
 ## User Stories
 
 - As a user, I want my VM to get THP performance without requiring hugepages to be pre-allocated on the node.
-- As a cluster admin, I want to stop managing hugepage reservations across heterogeneous nodes.
+- As a user, I want to opt a single VMI into THP via `hugepages.mode` without changing cluster-wide defaults.
+- As a cluster admin, I want an optional KubeVirt CR default so existing hugepage workloads can use THP without rewriting every VMI.
 - As a user, I want my VM to be schedulable on any node with sufficient free memory, not only nodes with hugepages available.
 - As a user deploying latency-sensitive workloads, I want guaranteed THP backing with a clear failure signal if the node cannot provide it.
 - As a user deploying general-purpose VMs, I want best-effort THP with visibility into actual coverage.
@@ -95,29 +102,40 @@ spec:
 |-------|--------|---------|------------|
 | `mode` | `static`, `transparent` | `static` | always |
 | `pageSize` | e.g. `"2Mi"` | required when hugepages set | always |
-| `policy` | `bestEffort`, `guaranteed` | `bestEffort` | `mode: transparent` only |
+| `policy` | `bestEffort`, `guaranteed` | `bestEffort` | THP mode only |
 
 `mode` accepts two values:
 - `static` (default, current behavior) — pod requests hugepages resources, node must have pre-allocated hugepages.
 - `transparent` — pod requests regular memory, pages are collapsed to THP at runtime.
 
-Absence of the `mode` field preserves current behavior (`static`).
+Absence of the `mode` field preserves current behavior (`static`), unless cluster `defaultMode` is set.
 
-When `mode` is `transparent`, `pageSize` is retained for NUMA topology and domain XML generation but does **not** control the THP size — the architecture's native THP size applies (see Architecture Considerations).
+When THP mode is selected, `pageSize` is retained for NUMA topology and domain XML generation but does **not** control the THP size — the architecture's native THP size applies (see Architecture Considerations).
 
-`policy` controls collapse strictness (only valid when `mode` is `transparent`):
+`policy` controls collapse strictness (only valid when THP mode is selected):
 - `bestEffort` (default) — virt-handler runs `MADV_COLLAPSE` once after preallocation. Partial collapse is acceptable; uncovered regions may be promoted later by `khugepaged`. The VMI reaches `Running` regardless of coverage. Pre-copy and post-copy live migration are supported.
 - `guaranteed` — same collapse pass, but if coverage falls below 95% the VMI transitions to `Failed` with reason `THPCollapseFailed` and a Kubernetes event with details. The 95% threshold is fixed. Post-copy live migration is not supported because the coverage check requires full preallocation at domain start. A future enhancement may provide a better threshold or improve the accuracy of coverage calculation.
 
-**Known limitation (`policy: guaranteed`):** The coverage check runs after scheduling. `MADV_COLLAPSE` triggers compaction and mitigates fragmentation at the cost of startup latency, but cannot guarantee order-9 blocks if the node genuinely lacks sufficient movable memory. The scheduler is fragmentation-blind, so a failed VMI may reschedule to another unsuitable node and fail again. A future enhancement may integrate fragmentation awareness or per-VMA guest-RAM coverage measurement.
+**Known limitation (`policy: guaranteed`):** The coverage check runs after scheduling. `MADV_COLLAPSE` triggers compaction and mitigates fragmentation at the cost of startup latency, but cannot guarantee order-9 blocks if the node genuinely lacks sufficient movable memory. The scheduler is fragmentation-blind, so a failed VMI may reschedule to another unsuitable node and fail again. A future enhancement may integrate fragmentation awareness.
 
-Admission rejects `policy` when `mode` is not `transparent`, and rejects post-copy live migration when `policy` is `guaranteed`.
+Admission rejects `policy` unless THP mode is selected (VMI `mode: transparent` or cluster `defaultMode: transparent`), and rejects post-copy live migration when `policy` is `guaranteed`.
+
+Administrators can set a cluster default on the KubeVirt CR so hugepage VMIs that omit `mode` use THP without rewriting every workload. That path uses `policy: guaranteed`, matching static hugepages (the VM gets huge pages or it fails).
+
+```yaml
+spec:
+  configuration:
+    hugepages:
+      defaultMode: transparent       # static | transparent
+```
+
+If cluster `hugepages` is unset, omitted `mode` remains `static` and omitted `policy` remains `bestEffort`. The feature gate alone does not change existing hugepage VMIs.
 
 ### Component Changes
 
 #### virt-controller (pod template generation)
 
-When THP mode is selected:
+When THP mode is selected (VMI `mode: transparent` or cluster `defaultMode: transparent`):
 
 1. **Do not add `hugepages-*` resources** to the compute container. Instead, set `resources.requests.memory` and `resources.limits.memory` to `guest_memory + GetMemoryOverhead()` using the standard overhead formula (same path as non-hugepages VMs).
 2. **Do not create the `hugepages` emptyDir volume** with `medium: HugePages`.
@@ -131,12 +149,12 @@ When a VMI uses THP mode:
 1. **Memory lock**: Call `prlimit64` on the virt-launcher/virtqemud process to set `RLIMIT_MEMLOCK = RLIM_INFINITY`. This is the same mechanism already used for VFIO passthrough VMs. When libvirt later processes `<locked/>` in the domain XML and calls `setrlimit`, the limit is already high enough and libvirt's check (`current >= limit`) passes — making it a no-op.
 
 2. **THP collapse**: After QEMU preallocates memory (detected by monitoring `VmLck` stabilization in `/proc/<pid>/status`):
-   - Parse `/proc/<pid>/maps` for large anonymous RW regions.
+   - Parse QEMU smaps for guest-RAM VMAs (one per NUMA cell).
    - Call `process_madvise(pidfd, iov, MADV_COLLAPSE)` to synchronously collapse pages into THPs.
    - For `policy: guaranteed`: if coverage < 95%, transition VMI to `Failed` with reason `THPCollapseFailed` and emit Kubernetes event.
    - For `policy: bestEffort`: fall back to `khugepaged` for regions that cannot be immediately collapsed. Log result, continue.
 
-Coverage is estimated from the virt-launcher pod cgroup (`anon_thp / anon`), not a per-VMA walk of guest RAM only. Launcher and sidecar overhead are included; for typical VM sizes guest RAM dominates, so the ratio approximates guest THP backing.
+Coverage is measured from QEMU smaps per guest-RAM VMA (`AnonHugePages / Size`; typically one VMA per NUMA cell).
 
 `MADV_COLLAPSE` runs once per domain start, after QEMU immediate preallocation completes — including on the destination node after a pre-copy live migration, once the target QEMU process has faulted in guest memory. Migrated pages arrive as regular 4K pages regardless of source THP backing; THP is re-established on the destination by the same collapse sequence. With `policy: bestEffort`, post-copy migration is supported: memory faults in incrementally on the destination and uncollapsed regions may be promoted by `khugepaged`. With `policy: guaranteed`, post-copy is rejected at admission because the 95% coverage check cannot run until all guest memory is preallocated.
 
@@ -151,6 +169,7 @@ When THP mode is selected, the converter generates:
   <source type="anonymous"/>
   <locked/>
   <allocation mode="immediate"/>
+  <nosharepages/>
 </memoryBacking>
 ```
 
@@ -172,6 +191,7 @@ Key differences:
 - `<source type="anonymous"/>` — regular anonymous mmap, eligible for THP collapse.
 - `<locked/>` — mlocks all QEMU memory, preventing swapping. Same semantics as static hugepages.
 - `<allocation mode="immediate"/>` — preallocates and faults all memory at VM start, consistent with static hugepages VMs. A future investigation may tune the libvirt `threads` attribute if benchmarks show a measurable benefit for large THP-mode VMs.
+- `<nosharepages/>` — disables KSM page merging for guest RAM (same effect as `kubevirt.io/mergeable-memory=false`). Applied implicitly to avoid KSM collapsing pages we want promoted (KSM ignores the mlock).
 
 NUMA topology (`<numatune>`, `<cpu><numa>`) is generated identically to static hugepages — the kernel's NUMA policy applies to anonymous pages the same way.
 
@@ -239,6 +259,20 @@ A Kubernetes event with reason `THPCollapseFailed` carries coverage details (e.g
 - No preallocation — page faults during VM runtime cause jitter.
 - Cannot guarantee NUMA locality of promotions.
 
+### API-less cluster-only conversion
+
+**Description**: No VMI `mode`/`policy` fields at all. Enabling a KubeVirt CR flag converts every hugepage VMI to transparent THP (typically `guaranteed`).
+
+**Pros**:
+- Zero user YAML change once the admin enables the feature.
+- Smaller API surface.
+
+**Cons**:
+- Breaks existing hugepage scheduling semantics for all workloads when enabled (resources flip from `hugepages-*` to ordinary memory).
+- No per-VMI `bestEffort` vs `guaranteed` without extra escape hatches.
+- Risky rollback: disabling the flag returns VMIs to static hugepages that may no longer schedule if nodes have no `nr_hugepages`.
+- Poor fit for mixed clusters that still need real hugetlb (e.g. `pageSize: 1Gi`).
+
 ## Scalability
 
 The THP collapse does a one-shot operation at VM startup (1-3 seconds for 18 GiB of guest memory). This may be noticeable for large VMs, however there is no ongoing CPU or memory overhead after collapse completes.
@@ -247,7 +281,7 @@ Node scheduling capacity improves compared to static hugepages: VMs compete for 
 
 ## Update/Rollback Compatibility
 
-- New fields are optional; omission or a rollback without `THPMemoryBacking` preserves static hugepages behavior.
+- New fields are optional; omission or a rollback without `THPMemoryBacking` preserves static hugepages behavior when cluster `configuration.hugepages` is also unset.
 - Running VMs are unaffected until restart or migration.
 
 ## Functional Testing Approach
@@ -259,15 +293,17 @@ Node scheduling capacity improves compared to static hugepages: VMs compete for 
 - Memory overhead calculation matches the standard non-hugepages path.
 - NUMA topology generation is identical for both static and THP modes.
 - virt-handler sets RLIMIT_MEMLOCK for THP-mode VMs.
-- Admission rejects `policy` when `mode` is not `transparent` and rejects post-copy migration when `policy` is `guaranteed`.
+- Admission rejects `policy` unless THP mode is selected and rejects post-copy migration when `policy` is `guaranteed`.
+- Mode/policy resolution: VMI fields override cluster defaults; cluster `defaultMode: transparent` implies `guaranteed` unless the VMI sets `policy`; unset cluster config yields `static` / `bestEffort`.
 
 ### E2E Tests
 
 **Alpha:**
 
 - VM with THP mode starts successfully on a node with zero pre-allocated hugepages.
-- VM with THP mode achieves >95% THP coverage (`anon_thp / anon` from cgroup memory stats).
+- VM with THP mode achieves >95% THP coverage on each guest-RAM VMA in QEMU smaps (`AnonHugePages / Size`).
 - VM with `policy: guaranteed` and insufficient node memory fails with `THPCollapseFailed`.
+- With `defaultMode: transparent`, a hugepage VMI omitting `mode` uses THP with `policy: guaranteed`.
 
 **Beta:**
 
@@ -289,14 +325,13 @@ Node scheduling capacity improves compared to static hugepages: VMs compete for 
 - Domain converter: generate anonymous/locked/immediate XML.
 - virt-handler: set `RLIMIT_MEMLOCK`, run `MADV_COLLAPSE`, support both `bestEffort` and `guaranteed` policies.
 - Unit tests for all components.
-- E2E tests: startup without pre-allocated hugepages, >95% coverage, guaranteed-policy failure path.
+- E2E tests: startup without pre-allocated hugepages, >95% coverage, guaranteed-policy failure path, cluster `defaultMode` applies THP with `guaranteed`.
 
 ### Beta
 
 - E2E tests: NUMA binding, pre-copy migration.
 - Documentation.
 - Revisit `policy: guaranteed`, especially how to improve startup failures(fragmentation-blind scheduler, reschedule loops).
-- Revisit whether THP policy belongs at cluster level (e.g. KubeVirt CR) or VMI API level.
 
 ### GA
 
