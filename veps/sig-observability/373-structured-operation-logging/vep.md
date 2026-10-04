@@ -137,7 +137,7 @@ Alpha instruments the migration controller's status-update reconcile path. The t
 
 This VEP introduces two distinct layers:
 
-1. **General mechanism** — A shared Go package (e.g., `pkg/log/structuredlog`) providing typed field/enum constants and contextual logger builders. This layer is domain-agnostic and reusable by any future instrumentation domain.
+1. **General mechanism** — A shared Go package (e.g., `pkg/log/structuredlog`) providing typed field/enum constants and private record-construction helpers. This layer is domain-agnostic and reusable by operation-specific builders; it does not expose an unrestricted canonical-record logger to call sites.
 
 2. **VM operations domain** — The first domain-specific taxonomy built on the mechanism. Defines the generic `kubevirt.operation.*` fields and operation type mappings, plus the VM-operations-specific `kubevirt.vmi.*`, `kubevirt.vm.*`, and `kubevirt.migration.*` field extensions used to validate the contract in Alpha. This VEP defines and validates the mechanism's contract through the VM operations domain, with migration as the Alpha vertical slice, only; it does not itself specify schemas for future domains. Future domains (device health, operator lifecycle, scheduling infrastructure) can define their own field extensions (e.g., `kubevirt.device.*`, `kubevirt.operator.*`) using the same mechanism — see [Schema Stability](#schema-stability) for when that requires further review.
 
@@ -208,7 +208,7 @@ The helper API must expose duration as a computed optional value (see [API Examp
 
 `kubevirt.vmi.name` identifies the affected VMI, independent of whether it has an owning `VirtualMachine` — this is what answers "which VMI was migrated" for *every* migration record, standalone or VM-backed. It is sourced from the migration operation identity itself (`VirtualMachineInstanceMigration.Spec.VMIName`, a required field on the VMIM).
 
-`kubevirt.vmi.uid` is required on every Alpha migration record. The controller fetches the VMI before entering the status-update path that emits these records; if the VMI is absent, it deletes or skips the VMIM and does not enter that path. The helper takes the fetched VMI's UID as a required argument and skips an invalid record with a non-canonical warning if it is empty. Alpha does not add an API lookup or status write to create a `failed` record for the missing-VMI path.
+`kubevirt.vmi.uid` is required on every Alpha migration record. The controller fetches the VMI before entering the status-update path that emits these records; if the VMI is absent, it deletes or skips the VMIM and does not enter that path. The migration builder requires the fetched VMI as a constructor argument, derives its UID, and skips an invalid record with a non-canonical warning if that UID is empty. Alpha does not add an API lookup or status write to create a `failed` record for the missing-VMI path.
 
 #### VM context: `kubevirt.vm.name` / `kubevirt.vm.uid` (conditional pair)
 
@@ -297,26 +297,26 @@ This VEP does not attribute concurrent operations to different users. Two users 
 
 ### Implementation Safety
 
-Taxonomy keys and enum values are typed and centrally defined in a shared package (`pkg/log/structuredlog/`) imported by all components — call sites are expected to reference named constants (e.g. `structuredlog.OperationMigration`, `structuredlog.PhaseCompleted`), not ad hoc strings. Component identity (`component`) is set once at binary startup and cannot be overridden at call sites.
+Taxonomy keys and enum values are typed and centrally defined in a shared package (`pkg/log/structuredlog/`) imported by all components — call sites use named phase constants (e.g. `structuredlog.PhaseCompleted`) and operation-specific builder methods, not ad hoc keys or values. The migration builder sets `structuredlog.OperationMigration` internally. Component identity (`component`) is set once at binary startup and cannot be overridden at call sites.
 
 Two distinct guarantees apply here, and this VEP does not blur them into one blanket "compile-time" claim:
 
 - Misspelling a **constant's identifier** (e.g. `structuredlog.PhaseCompletd`, which does not exist) is a genuine Go compiler error.
-- A **raw string literal** standing in for a constant (e.g. passing `"completd"` as the phase argument to `ForOperation`) is not rejected by the Go compiler by itself — Go allows an untyped string constant to be implicitly converted to any named string-based type, so a misspelled raw literal compiles silently. To close this gap, Alpha extends the required **static check** (custom `golangci-lint` analyzer or `go vet` pass in the kubevirt repo) to forbid raw string literals in taxonomy **key** positions (e.g. `"kubevirt.operation.type"`) *and* in taxonomy **enum-value** positions (e.g. `"completed"` in place of `structuredlog.PhaseCompleted`) outside the shared package. Developers must use the typed constants; raw string keys or enum values fail CI.
+- A **raw string literal** standing in for a constant (e.g. passing `"completd"` as the phase argument to `Migration`) is not rejected by the Go compiler by itself — Go allows an untyped string constant to be implicitly converted to any named string-based type, so a misspelled raw literal compiles silently. To close this gap, Alpha extends the required **static check** (custom `golangci-lint` analyzer or `go vet` pass in the kubevirt repo) to forbid raw string literals in taxonomy **key** positions (e.g. `"kubevirt.operation.type"`) *and* in taxonomy **enum-value** positions (e.g. `"completed"` in place of `structuredlog.PhaseCompleted`) outside the shared package. Developers must use the typed constants; raw string keys or enum values fail CI.
 
-**Constructor (required fields vs options):** Alpha must not use a flat `structuredlog.Operation{...}` struct literal for call sites. Go zero-values make omitting `VMIName` (or `Type`/`Phase`) compile cleanly, which is the same silent-omission class the linter exists to close. The helper takes required arguments as function parameters and conditional fields as options:
+**Typed per-operation builder:** Alpha exposes `structuredlog.Migration(migration, vmi, phase)`, taking a `*virtv1.VirtualMachineInstanceMigration`, a `*virtv1.VirtualMachineInstance`, and a typed phase as required positional arguments. It returns a migration-specific builder, not a `*log.FilteredLogger`. The builder sets the operation type to `migration`, binds its private logger to the VMIM, and derives the required affected-workload fields from `migration.Spec.VMIName` and `vmi.UID`. It ensures the subject `kind` is `VirtualMachineInstanceMigration` even when the input object's GVK is unset. Call sites cannot choose another operation type or bind the record to the VMI by mistake.
 
-- Required (positional): VMIM-bound logger, operation type, phase, `vmiName`, and `vmiUID` for the Alpha VM-operation builder. Future domains can add their own builders over the same shared constants without requiring a VMI identity.
-- Conditional (options): `WithOwningVM(name, uid)` as a single pair (both set or both omitted), plus operation-specific `With` keys such as migration nodes.
-- Duration is not a call-site literal: the helper accepts persisted start/end timestamps (or a small `DurationMillis(start, end) (ms int, ok bool)` helper) and attaches `kubevirt.operation.duration_ms` only when `ok` is true.
+- Conditional fields use named methods: `WithOwningVM(name, uid)` emits both owning-VM fields together or neither; `WithNodes(source, target)` emits each migration node only when its value is nonempty.
+- `WithDurationBetween(start, end)` accepts persisted VMIM phase-transition timestamps, never a duration literal. It attaches duration only on `completed`/`failed` when both bounds exist and `end >= start`; otherwise it omits the field. Equal bounds produce a measured duration of zero. It must omit duration on `started` even if bounds are supplied.
+- The underlying logger, builder state, and common record construction stay private; call sites cannot initialize builder fields through struct literals. The public builder exposes only schema-approved methods and emission methods such as `Info`/`Error`; it has no generic `With(key, value)`, logger accessor, or embedded logger that would allow arbitrary fields or identity overrides. Future operation builders expose only their own approved context methods, so a non-migration builder cannot attach migration nodes. Alpha implements only the migration builder.
 
-An empty required `vmiName` or `vmiUID` (or a zero operation-type / phase value) is a programming error: `ForOperation` must **not** emit a partial canonical record. It returns a no-op logger for that emission (the subsequent `Info`/`Error` of the canonical record is dropped) so a missing identity cannot ship as a taxonomy-violating line. On that skip path the helper **must** emit one **non-canonical** warning on the *input* logger (the VMIM-bound logger, without `kubevirt.operation.*` / `kubevirt.vmi.*` keys) stating that the canonical record was skipped and why (empty `vmiName`/`vmiUID`, zero type, or zero phase). That warning is discoverable in dev/test and is not a lifecycle record: consumers must not treat it as `started`/`completed`/`failed`. Unit tests cover both the skip and the warning. The linter still forbids raw string literals for type/phase/keys; it does not need to prove the identity arguments are non-empty at compile time once they are positional.
+The constructor still validates runtime inputs: neither object may be nil; the VMIM's name, namespace, UID, and `Spec.VMIName` and the VMI's UID must be nonempty; the VMI's name/namespace must match the VMIM's target name/namespace; and the phase must be one of Alpha's `started`/`completed`/`failed` values. These conditions cannot be guaranteed by Go argument types. On invalid input, the builder must **not** emit a partial canonical record: subsequent emission calls are no-ops, and the constructor emits exactly one **non-canonical** warning explaining the skip on a fresh VMIM-bound logger (or the base logger when the VMIM is nil), without operation/workload taxonomy keys. Consumers must not treat that warning as a lifecycle record. This validation does not add API reads or prove that the supplied phase transition persisted; the caller still constructs the builder only after a successful status persist, per [Alpha Migration Phase Mapping](#alpha-migration-phase-mapping).
 
-Exact names may change during implementation; the required-vs-optional split may not. See [API Examples](#api-examples).
+Types restrict available fields and constructor arguments; runtime validation and contract tests establish value correctness and field presence. The static check remains required for raw taxonomy keys and enum values outside the shared package, including phase literals. Exact method names may change during implementation; operation-specific field access, private logger ownership, and the required-vs-conditional split may not. See [API Examples](#api-examples).
 
 ### Contextual Logging
 
-For Alpha, the structured-operation logger is constructed specifically for the canonical lifecycle record at its emission point, using the VMIM-bound KubeVirt `*log.FilteredLogger` (`log.Log.Object(migration)`) and its go-kit-backed `With` method to add the operation and workload context defined in [Field Taxonomy](#field-taxonomy-otel-aligned) — see [Example Log Output](#example-log-output) for a worked example. It is built and used once, at the point where a canonical lifecycle record is emitted, and then discarded — it is **not** propagated broadly through the existing reconcile call chain. Alpha does not require a `logr` adapter or a global logging implementation change.
+For Alpha, the structured-operation logger is constructed specifically for the canonical lifecycle record at its emission point, using the migration builder's private VMIM-bound KubeVirt `*log.FilteredLogger` (`log.Log.Object(migration)`) and its go-kit-backed `With` method internally to add the operation and workload context defined in [Field Taxonomy](#field-taxonomy-otel-aligned) — see [Example Log Output](#example-log-output) for a worked example. It is built and used once, at the point where a canonical lifecycle record is emitted, and then discarded — it is **not** propagated broadly through the existing reconcile call chain. Alpha does not require a `logr` adapter or a global logging implementation change.
 
 Existing log calls elsewhere in the reconcile continue using their own existing loggers and do **not** inherit the operation taxonomy fields. This is what keeps every pre-existing log line unchanged and is required by the feature-gate/compatibility guarantee (see [Feature Gate Mechanism](#feature-gate-mechanism)): if the canonical operation logger were propagated down the call chain, existing log lines would start carrying new structured fields, which this VEP explicitly does not allow.
 
@@ -391,36 +391,24 @@ KubeVirt's migration controller already builds a logger bound to the migration o
 
 ```go
 // Illustrative API. Exact helper names may change during implementation.
-// Required fields are function arguments so omitting them is a compile error.
-// VM name and UID are required for Alpha migration. Conditional fields are
-// options. Duration is attached only when both
-// VMIM phaseTransitionTimestamps bounds are present (ok == true).
-// startTS = MigrationRunning, endTS = MigrationSucceeded/MigrationFailed.
+// Construct only after the completed transition has persisted successfully.
+// Required VMIM/VMI identity is derived and validated by the constructor.
+// Owning-VM identity and migration nodes are conditional.
+startTS := phaseTime(migration, virtv1.MigrationRunning) // nil if absent
+endTS := phaseTime(migration, virtv1.MigrationSucceeded) // terminal phase
 
-logger := structuredlog.ForOperation(
-    log.Log.Object(migration),
-    structuredlog.OperationMigration,
-    structuredlog.PhaseCompleted,
-    migration.Spec.VMIName, // required positional; sourced from the VMIM spec
-    vmi.UID,                 // required positional; VMI was fetched before updateStatus
-    structuredlog.WithOwningVM(vmName, vmUID), // pair: both set or both omitted
-)
+record := structuredlog.Migration(migration, vmi, structuredlog.PhaseCompleted).
+    WithOwningVM(vmName, vmUID).
+    WithDurationBetween(startTS, endTS)
 
-startTS := phaseTime(migration, virtv1.MigrationRunning)     // nil if absent
-endTS := phaseTime(migration, virtv1.MigrationSucceeded)     // terminal phase for this example
-if durationMS, ok := structuredlog.DurationMillis(startTS, endTS); ok {
-    logger = logger.With(structuredlog.OperationDurationMS, durationMS)
+if state := vmi.Status.MigrationState; state != nil {
+    record = record.WithNodes(state.SourceNode, state.TargetNode)
 }
 
-logger = logger.With(
-    structuredlog.MigrationSourceNode, vmi.Status.MigrationState.SourceNode,
-    structuredlog.MigrationTargetNode, vmi.Status.MigrationState.TargetNode,
-)
-
-logger.Info("Migration completed successfully")
+record.Info("Migration completed successfully")
 ```
 
-`migration.Spec.VMIName` identifies the affected VMI and comes from the `VirtualMachineInstanceMigration` object itself (a required field on the VMIM spec). `vmi.UID` comes from the VMI fetched before `updateStatus`; the controller returns before that path if the VMI is absent. Passing both as function arguments means a call site cannot compile if either argument is forgotten; an empty value still compiles, but `ForOperation` must then return a no-op logger, emit a non-canonical warning on the input logger, and must not emit a partial canonical record (see [Implementation Safety](#implementation-safety)). `vmName`/`vmUID` are sourced from the VMI's controller `OwnerReference` when it reliably identifies a `VirtualMachine` (both populated together in that case, both omitted together otherwise); `WithOwningVM` is the pair option so a call site cannot set one without the other. There is no namespace argument because `log.Log.Object(migration)` already supplies the VMIM's namespace as an existing subject-object-context field. `startTS` / `endTS` come from the VMIM `status.phaseTransitionTimestamps` for `MigrationRunning` and the terminal phase ([Duration computation](#duration-computation-alpha-migration)); `phaseTime` in the snippet is an illustrative local lookup, not a second public API. When `ok` is false the duration key is omitted.
+`Migration` requires both typed objects and a phase argument, binds the private logger to the VMIM, and sets the operation type internally. `migration.Spec.VMIName` identifies the affected VMI; `vmi.UID` comes from the VMI fetched before `updateStatus`, which the controller does not reach when the VMI is absent. Runtime validation rejects missing or mismatched identity with a non-canonical warning and no canonical record (see [Implementation Safety](#implementation-safety)). `vmName`/`vmUID` come from the VMI's controller `OwnerReference` when it reliably identifies a `VirtualMachine`; `WithOwningVM` emits the pair together or omits both. Subject namespace and UID come from the VMIM, not the VMI. `WithNodes` omits unknown nodes; a nil migration state simply leaves both fields absent. `startTS` / `endTS` come from the VMIM `status.phaseTransitionTimestamps` for `MigrationRunning` and the terminal phase ([Duration computation](#duration-computation-alpha-migration)); `phaseTime` is an illustrative local lookup, not a second public API. `WithDurationBetween` omits duration when either bound is missing or reversed, and on nonterminal records. Call sites cannot bypass these rules with generic `.With(...)` or access the underlying logger.
 
 The resulting log (conceptual/illustrative output, not a wire-format guarantee):
 
@@ -534,8 +522,8 @@ Record the per-migration canonical byte counts and total-log byte counts/percent
 ## Functional Testing Approach
 
 1. **Unit tests (structured-operation contract)**: verify records expose `kubevirt.vmi.name` (required, always present — the affected VMI, sourced from `migration.Spec.VMIName`), `kubevirt.vmi.uid` (required, always present — sourced from the fetched VMI), `kubevirt.vm.name`/`kubevirt.vm.uid` (conditional pair — present only when the owning `VirtualMachine`'s identity is reliably known from the VMI's controller `OwnerReference`), `kubevirt.operation.type`/`phase`, the bound-object `uid` (asserted to be the VMIM's UID specifically because the instrumented emission point explicitly binds the logger to the migration object), and, where applicable per their conditional semantics, `duration_ms` and `kubevirt.migration.source_node`/`target_node`. Alpha records **must not** contain `error.type`.
-2. **Constructor / required-field skip**: calling `ForOperation` without either the `vmiName` or `vmiUID` argument does not compile. An empty value for either argument does not emit a canonical record (no-op logger) **and** emits exactly one non-canonical warning on the input logger (no `kubevirt.operation.*` keys). `WithOwningVM` with only one of name/UID set emits neither VM field. Verify the helper uses KubeVirt's `With` API without changing pre-existing log lines.
-3. **Duration omit-if-incomplete**: `DurationMillis` / equivalent returns `ok=false` (and the record omits `duration_ms`) when start is missing, when end is missing, or when `end < start` — including a VMIM whose `phaseTransitionTimestamps` lack `MigrationRunning` (pre-upgrade / in-flight object). When both persisted timestamps are equal, `ok=true` and `duration_ms=0`. No test may pass a reconcile-now value as a substitute end bound.
+2. **Typed builder / runtime validation**: compile-check that `Migration` requires both typed objects and a phase and that its public API has no generic `With`, logger accessor, or embedded logger. Future builders must not expose migration-only methods. Verify the constructor sets type `migration`, binds subject identity to the VMIM (including kind when GVK is unset), and derives VMI identity. Nil objects, missing required identity, a mismatched VMI name/namespace, or an unsupported phase emit no canonical record and exactly one non-canonical warning without operation/workload taxonomy keys. `WithOwningVM` with only one of name/UID set emits neither VM field; `WithNodes` omits each empty node independently. Verify internal use of KubeVirt's `With` API leaves pre-existing log lines unchanged.
+3. **Duration omit-if-incomplete**: `WithDurationBetween` omits `duration_ms` when start is missing, when end is missing, or when `end < start` — including a VMIM whose `phaseTransitionTimestamps` lack `MigrationRunning` (pre-upgrade / in-flight object). On terminal records, equal persisted bounds produce `duration_ms=0`. A `started` record omits duration even when both bounds are supplied. No test may pass a reconcile-now value as a substitute end bound.
 4. **Identity distinctness**: for a VM-backed migration, assert the bound-object `uid`, `kubevirt.vmi.uid`, and `kubevirt.vm.uid` are three distinct values on the same record, not merely three present keys. When the VMI is absent, assert the current reconcile returns before status persistence and emits no canonical `failed` record; do not model this as a failed transition with an omitted VMI UID.
 5. **Integration tests, split by outcome** — one migration operation follows exactly one of these paths, never a mix:
    - **Successful migration**: expect canonical `started` and `completed` records; no `failed` record; `duration_ms` present on `completed` when both persisted bounds exist.
@@ -577,6 +565,7 @@ Each domain would define its own field taxonomy using the shared package and con
 - 2026-09: VEP revised — template sections (`API Examples`, `Does it belong to core KubeVirt?`, Beta `On-By-Default Readiness`, signoff checklist); constructor with required positional args; duration omit-if-incomplete; log-volume measurement gate; explicit `kubevirt.operation.*` namespace and additive-without-VEP policy; Alpha retargeted from v1.10 to v1.11
 - 2026-09: VEP revised — operation-instance correlation via bound `uid`; consumer guidance for lost `started` records; upgrade-window duration omission; `error.type` deferred to Beta; non-canonical warning on `ForOperation` skip; verbosity-pinned plus per-migration byte log-volume bound; field-presence contract
 - 2026-09: VEP revised — Alpha logger API aligned with KubeVirt's `With` method; VMI UID required for emitted migration records; missing-VMI path documented; log-volume gate measures collector-visible container logs and treats the relative percentage as review evidence
+- 2026-10: VEP revised — typed per-operation migration builder with private logger ownership, named context methods, runtime identity validation, and terminal-only duration attachment
 
 ## Graduation Requirements
 
@@ -584,8 +573,8 @@ Each domain would define its own field taxonomy using the shared package and con
 
 Alpha is intentionally a **narrow vertical slice** so it does not depend on broad reconcile/`ctx` refactors. It is one Alpha release (migration only), not two.
 
-- [ ] Shared `pkg/log/structuredlog` package with typed field/enum constants and operation logger builder
-- [ ] `ForOperation` constructor: required fields as function arguments; conditional fields as options; empty `vmiName` or `vmiUID` does not emit a partial record and emits a non-canonical warning
+- [ ] Shared `pkg/log/structuredlog` package with typed field/enum constants, private construction helpers, and a typed migration builder
+- [ ] `Migration(migration, vmi, phase)` constructor derives and validates required identity and fixes type/object binding; invalid input skips the canonical record with one non-canonical warning; named methods enforce conditional fields; no public generic `With` or underlying logger access
 - [ ] Feature gate `StructuredOperationLogging` checked once per canonical-record emission point (preserve every existing `msg`/severity unchanged; add new canonical records only)
 - [ ] Structured fields emitted for **migration** operations in virt-controller Migration controller, per [Alpha Migration Phase Mapping](#alpha-migration-phase-mapping) (`started`/`completed`/`failed`; `in_progress` deferred)
 - [ ] `duration_ms` omit-if-incomplete: never substitute reconcile time for a missing end (or start) timestamp; no `error.type` on Alpha records
