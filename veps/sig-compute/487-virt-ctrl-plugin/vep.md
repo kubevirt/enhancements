@@ -194,12 +194,17 @@ This VEP and [VEP 359](../359-public-pod-render-api/vep.md) refactor the same
 `TemplateService.RenderLaunchManifest` pipeline. The work must be sequenced as
 follows:
 
-1. Wire VEP 359's `RenderConfig` and `ManifestRenderer` interfaces into the
-   real `virt-controller` rendering path.
-2. Add a `kubevirt.io/render` subpackage function such as `BasePodFromVMI` and
-   use it to split stack-neutral base-Pod construction from the in-tree
-   Libvirt-specific renderer.
-3. Add CEL and RPC dispatch on top of that split.
+1. VEP 359 implements the default `ManifestRenderer` in a way that it segregates
+   base pod rendering from Libvirt/QEMU-specific rendering.
+
+2. Virt-Controller starts using VEP 359's `RenderConfig` and `ManifestRenderer`
+   to build default Libvirt/QEMU-based `virt-launcher` pods.
+
+3. Virt-Controller creates a new `PluginAugmentedLauncherRenderer` implementation
+   of the `ManifestRenderer` that uses the base pod rendering of the default impl
+   and replaces Libvirt/QEMU-specific rendering with an invocation of the plugin.
+
+3. Expand the plugin invocation to cover both CEL and RPC scenarios.
 
 ### Pre-render Resolution and Base Pod Construction
 
