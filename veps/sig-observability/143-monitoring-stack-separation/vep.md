@@ -14,7 +14,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 -->
 
 - This VEP targets alpha for version: v1.9
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
