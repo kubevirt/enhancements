@@ -68,12 +68,13 @@ No API change
 There are two points to consider about current implementation.
 
 1. The usages of DataVolumes (standalone and template-based) can be distinguished by their `ownerReferences` which is set to `nil` for standalone DataVolume and to its managing VM for template-based DataVolume.
-   For template-based DataVolumes, `ownerReferences` field is populated when the DataVolume is adopted via `ClaimMatchedDataVolumes()` in the VM reconciliation loop.
-   This function lacks checking whether a given DataVolume is standalone or template-based, so the standalone DataVolume with conflicting name can be wrongly adopted by the claiming VM, which is the root cause of the issue.
+   While the normal `CreateDataVolumeManifest()` path sets the VM controller reference at creation time, ownership is not established exclusively through that path; DataVolumes can also be adopted via `ClaimMatchedDataVolumes()` in the VM reconciliation loop.
+   In addition, the snapshot/restore path (`vmRestoreTarget.createDataVolume()`) behaves differently and does not set the controller reference at creation time, relying instead on subsequent adoption.
+   `ClaimMatchedDataVolumes()` lacks checking whether a given DataVolume is standalone or template-based, so a standalone DataVolume with a conflicting name can be wrongly adopted by the claiming VM, which is the root cause of the issue.
 
 2. Reconciliation loop of VM controller also lacks the check to detect the name collisions of DataVolume, so no one prevents the VM from starting and initializing.
 
-In this VEP, we introduce a conditional logic to address these points: preventing adoption for standalone DataVolumes (for point 1), and making `handleDataVolumes()` fail with a new status message indicating that the VM is not able to startup due to DV name collision with a preexisting DV in the cluster (for point 2).
+In this VEP, we introduce a conditional logic to address these points: preventing adoption for standalone DataVolumes while ensuring proper ownership establishment for both template-based creation and snapshot/restore paths (for point 1), and making `handleDataVolumes()` fail with a new status message indicating that the VM is not able to startup due to DV name collision with a preexisting DV in the cluster (for point 2).
 The additional logic for 2 can work reliabily by adding logic for 1 together.
 
 This updated ownership semantics enables reliable, owner-based validation, effectively identifying conflicts with both standalone DataVolumes and template-based DataVolumes owned by other VMs.
@@ -120,12 +121,13 @@ E2E tests covering the following scenarios to ensure the feature gate functions 
 
 ### Alpha
 - [ ] DataVolume checking logic for ownership protection.
+- [ ] Snapshot/restore support establishing creator identification on restored DataVolumes.
 - [ ] Unit tests for the changed code
+- [ ] e2e tests for the new logic.
 - [ ] Feature gate `DataVolumeOwnershipProtection` guards all code changes (disabled by default)
 
 ### Beta
 - [ ] Set feature gate `DataVolumeOwnershipProtection` enabled by default.
-- [ ] e2e tests for the new logic.
 
 ### GA
 - [ ] Feature gate removed.
