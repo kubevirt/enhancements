@@ -137,6 +137,26 @@ All VEP updates and implementation work are tied to the [KubeVirt release cycle]
    Implement the agreed changes during the implementation phase.
    After all implementation PRs are merged, submit a PR to bump the version from Beta to GA.
 
+#### Graduation target discipline
+
+A VEP may declare only one incomplete graduation target at a time. The target
+must be the current release cycle or the immediately upcoming release. A VEP
+must not pre-declare a sequence of future graduations, such as Alpha in one
+release, Beta in the next release, and GA in a later release.
+
+Before each graduation phase, the author must submit a VEP update during the
+design phase for that cycle. The update proposes the next stage and release,
+giving maintainers an opportunity to discuss whether the feature is ready for
+graduation. For example, a feature that reached Alpha in v1.8 may later use a
+VEP update to propose Beta in v1.10; it should not have declared the Beta and GA
+targets in advance in the original VEP.
+
+Target-release information should preserve completed graduation history as well
+as the single active target. When a stage is completed, retain its release in
+the target information and move the active target to the next incomplete stage.
+The VEP's Implementation History section can provide additional detail, but is
+not a substitute for recording the completed stage and release.
+
 [Removal](#removal) of features is widely discussed later
 in this document.
 
