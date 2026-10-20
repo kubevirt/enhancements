@@ -283,14 +283,11 @@ The proposed modification poses no scalability problems: it can actually make fo
 ### Functional Tests
 
 - PortRanges validation errors are properly reported
+- Forwarding of both the range delimiting ports and of at least one inner port is verified against a running cluster.
 
 ### Integration Tests
 
 - Invalid or not correct fields in the templates are rejected with appropriate errors.
-
-### End-to-End Tests
-
-- Forwarding of both the range delimiting ports and of at least one inner one is tested.
 
 ## Implementation History
 
