@@ -624,7 +624,6 @@ Alpha implementation is split into three components spanning three PRs:
 ### Beta
 * Stall-detector E2E tests (see **Functional Testing Approach**).
 * Revisit hyper-parameter fine-tuning and how trade-offs should be exposed to users (since users should not be expected to manually configure knobs like "stallMargin").
-* QEMU **11.1+** with full VFIO remaining-bytes support so switchover decisions account for VFIO device state (removes alpha VFIO warning and post-copy skip).
 * Investigate how feature works with high memory VMs (~1000GB) especially in the context of "Limitation" #5.
 
 ### GA
