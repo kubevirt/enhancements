@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.10
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,17 +14,20 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements](https://github.com/kubevirt/enhancements/issues/210)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
-This VEP proposes transitioning KubeVirt from CentOS Stream 9 to CentOS Stream 10. The transition covers two distinct areas:
+This VEP proposes transitioning KubeVirt from CentOS Stream 9 to CentOS Stream 10. The transition covers three related areas:
 
 1. **Userspace**: The container images (virt-handler, virt-launcher, virt-operator, virt-controller, virt-api, etc.) and the builder image used to compile KubeVirt binaries.
 2. **Host OS**: The kubevirtci cluster providers used for development and CI testing.
+3. **Nightly & Released Artifacts**: The container images published to container registries (quay.io) for community consumption and downstream integration.
 
-Rather than a big-bang switchover, the transition follows a per-lane model: from v1.10, new Kubernetes version lanes are introduced on CentOS Stream 10 for both userspace and host OS, while existing older lanes remain on CentOS Stream 9 until those Kubernetes versions naturally reach end of life and are dropped from CI. CentOS Stream 9 is supported during v1.8, v1.9, v1.10, and v1.11, with support removed in v1.12 once all remaining CS9 lanes have aged out. This avoids doubling CI capacity and provides a gradual, low-risk migration path.
+Rather than a big-bang switchover, the transition follows a per-lane model in CI: from v1.10, new Kubernetes version lanes are introduced on CentOS Stream 10 for both userspace and host OS, while existing older lanes remain on CentOS Stream 9 until those Kubernetes versions naturally reach end of life and are dropped from CI. CentOS Stream 9 is supported during v1.8, v1.9, v1.10, and v1.11, with support removed in v1.12 once all remaining CS9 lanes have aged out. This avoids doubling CI capacity and provides a gradual, low-risk migration path.
+
+Published artifacts follow a phased rollout: Alpha (v1.10) maintains all nightly and released container artifacts on CentOS Stream 9; Beta (v1.11) begins dual-publishing CentOS Stream 10 artifacts alongside the default CentOS Stream 9 artifacts (under `-cs10` variant tags); and GA (v1.12) makes CentOS Stream 10 the default base OS for all published artifacts while dropping CentOS Stream 9 artifacts entirely.
 
 CentOS Stream 9 reaches end of life on 2027-05-31, requiring a planned migration well before that date.
 
@@ -46,6 +49,8 @@ CentOS Stream 10 is already generally available and provides a stable foundation
 - Deprecate CentOS Stream 9 userspace with clear communication to the community
 - Complete the userspace switchover to CentOS Stream 10 as the sole base OS
 - Transition kubevirtci providers to CentOS Stream 10 alongside the userspace transition on a per-lane basis
+- Publish CentOS Stream 10 nightly and release container artifacts starting in Beta (v1.11) as secondary tagged variants
+- Switch default published nightly and release artifacts to CentOS Stream 10 in GA (v1.12)
 
 ## Non Goals
 
@@ -54,6 +59,7 @@ CentOS Stream 10 is already generally available and provides a stable foundation
 - Migrating away from bazeldnf for RPM dependency management
 - Addressing CentOS Stream 10 specific package changes beyond what is required to build and run KubeVirt (e.g. new libvirt/QEMU features enabled by CS10)
 - Maintaining CentOS Stream 9 lanes for Kubernetes versions that have already been dropped from CI
+- Publishing CentOS Stream 10 nightly or release artifacts during Alpha (v1.10)
 
 ## Definition of Users
 
@@ -71,6 +77,8 @@ CentOS Stream 10 is already generally available and provides a stable foundation
 3. As a downstream consumer, I want a deprecation notice for CentOS Stream 9 at least one release before removal so that I can plan my transition.
 
 4. As a cluster administrator, I want to know which base OS my KubeVirt images use so that I can maintain accurate vulnerability scanning and compliance records.
+
+5. As a downstream consumer or cluster administrator, I want access to CentOS Stream 10 nightly and release container images during the Beta phase (v1.11) so that I can validate workloads and integrations before CentOS Stream 10 becomes the default in GA (v1.12).
 
 ## Repos
 
@@ -109,6 +117,29 @@ A separate builder image (`kubevirt-builder-cs10`) is maintained alongside the e
 All RPMs referenced in the WORKSPACE file are mirrored to a GCS bucket (`storage.googleapis.com/builddeps/`) by the `periodic-kubevirt-mirror-uploader` job. This ensures build reproducibility and avoids reliance on upstream mirrors during builds. CentOS Stream 10 RPMs follow the same caching mechanism.
 
 Dedicated periodic jobs bump RPM dependencies for CentOS Stream 10 (`bump-kubevirt-rpms-cs10-weekly`) and verify them in presubmit (`pull-kubevirt-verify-rpms-cs10`).
+
+### Nightly and Released Container Artifacts
+
+While CI lanes dynamically resolve the base OS version from the active provider lane (`detect_centos_stream_version`), automated image publishing pipelines (postsubmit and release jobs) run outside a cluster provider context and currently default to CentOS Stream 9 (`KUBEVIRT_CENTOS_STREAM_VERSION=9`).
+
+To allow users and downstream consumers to consume and validate CentOS Stream 10 images ahead of the default switchover, artifact publishing will follow a three-phase schedule:
+
+1. **Alpha (v1.10)**:
+   - **No change to published artifacts.**
+   - All published nightly images (postsubmit) and official release images (`quay.io/kubevirt/virt-*:v1.10.0`) remain built on CentOS Stream 9 (`KUBEVIRT_CENTOS_STREAM_VERSION=9`).
+   - CentOS Stream 10 container builds are restricted to CI lanes and builder image verification.
+
+2. **Beta (v1.11)**:
+   - **Dual publishing begins.**
+   - Release automation (`automation/release.sh`) and postsubmit nightly jobs are updated to build and push both CentOS Stream 9 and CentOS Stream 10 images.
+   - **Primary tags** (e.g., `quay.io/kubevirt/virt-launcher:v1.11.0` and standard date-stamped nightly tags) remain based on CentOS Stream 9 to ensure non-disruptive upgrades for existing clusters.
+   - **CS10 variant tags** (e.g., `quay.io/kubevirt/virt-launcher:v1.11.0-cs10` and `<nightly-tag>-cs10`) are published concurrently for all core container images.
+   - Users can opt into CentOS Stream 10 by specifying `spec.imageTag: v1.11.0-cs10` in their KubeVirt custom resource.
+
+3. **GA (v1.12)**:
+   - **CentOS Stream 10 becomes the default.**
+   - All standard release tags (`quay.io/kubevirt/virt-*:v1.12.0`) and nightly images default to CentOS Stream 10.
+   - CentOS Stream 9 artifact publishing is fully retired.
 
 ### kubevirtci Providers
 
@@ -175,6 +206,7 @@ gantt
 - k8s-1.37 `always_run` lanes use CentOS Stream 10 userspace
 - Older lanes (k8s-1.35, k8s-1.36) remain on CentOS Stream 9
 - CentOS Stream 9 userspace formally deprecated in release notes
+- Nightly and released container artifacts remain on CentOS Stream 9
 
 #### Phase 2: CS10 Lanes Expand (v1.11)
 
@@ -182,6 +214,8 @@ gantt
 - k8s-1.37 (CS10) becomes a `run_before_merge` lane
 - k8s-1.36 (CS9) remains as a `run_before_merge` lane
 - k8s-1.35 (CS9) dropped from CI
+- Postsubmit and release pipelines updated to dual-publish container images
+- Publish CentOS Stream 10 nightly and release artifacts (`-cs10` tagged variants) alongside default CS9 artifacts
 
 #### Phase 3: Full Switchover (v1.12)
 
@@ -189,6 +223,8 @@ gantt
 - k8s-1.36 (last CS9 lane) dropped from CI
 - All remaining lanes run on CentOS Stream 10
 - CentOS Stream 9 build support removed
+- Default published release artifacts (`v1.12.0`) and nightlies switch to CentOS Stream 10
+- CentOS Stream 9 artifact publishing discontinued
 - `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed
 
 ### CI Capacity Constraints
@@ -289,17 +325,20 @@ Cluster administrators should verify that any security scanning or compliance to
 - 2025-02: CS10 build presubmit jobs ([kubevirt/project-infra#4745](https://github.com/kubevirt/project-infra/pull/4745), [kubevirt/project-infra#4746](https://github.com/kubevirt/project-infra/pull/4746))
 - 2025-02: Fix arm64 and s390x CS10 builds ([kubevirt/kubevirt#16938](https://github.com/kubevirt/kubevirt/pull/16938))
 - 2026-03: CS10 RPM dependency jobs ([kubevirt/project-infra#4854](https://github.com/kubevirt/project-infra/pull/4854))
+- 2026-08: k8s-1.37 provider on CentOS Stream 10 added to kubevirtci ([kubevirt/kubevirtci#1828](https://github.com/kubevirt/kubevirtci/pull/1828))
+- 2026-08: Auto-detect CentOS Stream 10 for k8s-1.37+ providers ([kubevirt/kubevirt#18846](https://github.com/kubevirt/kubevirt/pull/18846))
+- 2026-08: Add k8s-1.37 SIG lanes for kubevirt ([kubevirt/project-infra#5370](https://github.com/kubevirt/project-infra/pull/5370))
 
 ## Graduation Requirements
 
 ### Alpha (v1.10)
 
-- [ ] CentOS Stream 10 builder image available
-- [ ] CentOS Stream 10 RPM dependency sync and verification jobs
-- [ ] RPM mirror uploader caches CentOS Stream 10 dependencies
-- [ ] k8s-1.37 kubevirtci provider on CentOS Stream 10
-- [ ] k8s-1.37 `always_run` lanes using CentOS Stream 10 userspace
-- [ ] No CentOS Stream 10 specific test failures on k8s-1.37 lanes
+- [x] CentOS Stream 10 builder image available
+- [x] CentOS Stream 10 RPM dependency sync and verification jobs
+- [x] RPM mirror uploader caches CentOS Stream 10 dependencies
+- [x] k8s-1.37 kubevirtci provider on CentOS Stream 10
+- [x] k8s-1.37 `always_run` lanes using CentOS Stream 10 userspace
+- [x] No CentOS Stream 10 specific test failures on k8s-1.37 lanes
 - [ ] CentOS Stream 9 userspace deprecated in release notes
 
 ### Beta (v1.11)
@@ -307,6 +346,8 @@ Cluster administrators should verify that any security scanning or compliance to
 - [ ] k8s-1.38 lane introduced on CentOS Stream 10
 - [ ] Majority of `always_run` lanes running on CentOS Stream 10
 - [ ] No CentOS Stream 10 specific test failures
+- [ ] Release automation updated to publish CentOS Stream 10 release artifacts (`v1.11.0-cs10`)
+- [ ] Postsubmit automation updated to publish CentOS Stream 10 nightly artifacts
 
 ### GA (v1.12)
 
@@ -314,4 +355,6 @@ Cluster administrators should verify that any security scanning or compliance to
 - [ ] All lanes running on CentOS Stream 10
 - [ ] CentOS Stream 9 build support removed
 - [ ] All container images based on CentOS Stream 10
+- [ ] Default published release artifacts (`v1.12.0`) and nightlies built on CentOS Stream 10
+- [ ] CentOS Stream 9 artifact publishing retired
 - [ ] `KUBEVIRT_CENTOS_STREAM_VERSION` defaults to `10`, CentOS Stream 9 option removed
