@@ -1,3 +1,6 @@
 # See the OWNERS docs at https://go.k8s.io/owners
+reviewers:
+  - iholder101
+  - jean-edouard
 labels:
   - sig/compute

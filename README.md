@@ -25,7 +25,9 @@ a common process to ensure synchronization between SIGs and uniformity of the pr
 
 2. **VEP Creation**: VEP authors will initiate proposals via PRs to the `kubevirt/enhancements` repository.
    See the [VEP template](https://github.com/kubevirt/enhancements/blob/main/veps/NNNN-vep-template/vep.md),
-   each section needs to be filled even if the section doesn't apply to the VEP. The Issue's ID is used to for the VEP ID, title of the PR should start with "VEP-<ID>"
+   each section needs to be filled even if the section doesn't apply to the VEP. The Issue's ID is used to for the VEP ID, title of the PR should start with "VEP-<ID>".
+   The template's front matter block tracks the VEP's proposal governance state; see [VEP Proposal Governance](docs/vep-governance.md)
+   for the full schema and the valid states a VEP can be in.
 
 3. **SIG Review and Collaboration**: Although each VEP can have multiple target SIGs, it needs to have a single owning SIG.
    In case of a cross SIG feature, the most relevant SIG should be chosen.
