@@ -28,17 +28,18 @@ pod UIDs of all launcher pods for that VMI, and virt-handler already derives soc
 is a redundant, error-prone cache of information that is already available through the API server. On startup, virt-handler's VMI informers perform a full
 list, giving it every VMI on the node, including ones that appeared while it was down. The on-disk checkpoint files are removed entirely.
 
-This VEP depends on [VEP-491](../491-launcher-socket-authentication/vep.md) (feature gate `LauncherSocketAuthentication`). Without authentication, dynamic
-discovery could allow a malicious pod to be trusted.
+This VEP depends on [VEP-491](../491-launcher-socket-authentication/vep.md) (feature gate `LauncherSocketAuthentication`). Without authentication, a rogue
+pod could spoof a launcher socket and be trusted.
 
 ## Motivation
 
-virt-handler's ghost record cache is an on-disk checkpoint store (`GhostRecordStore`) that maps VMI namespace/name to socket file paths and pod UIDs. It is
+virt-handler's ghost record cache is an on-disk checkpoint store (`GhostRecordStore`) that maps VMI namespace/name to socket file paths and VMI UIDs. It is
 populated when virt-handler first connects to a launcher and persists across restarts. The cache has three fundamental problems:
 
 1. **Stale on restart.** A virt-launcher that starts while virt-handler is down (during upgrade, crash, or DaemonSet rollout) is not in the cache.
-   virt-handler does not discover it, the VMI has no domain, and virt-handler marks it as Failed. Multiple bugs have been filed where running VMs are killed
-   during upgrades because of this.
+   The domain-watcher's `handleResync` loop uses ghost records to enumerate sockets for domain state polling. A launcher with no ghost record is invisible
+   to this loop: its domain is never polled, the domain informer has no entry, and the VMI reconcile loop sees no domain and marks the VMI as Failed.
+   Multiple bugs have been filed where running VMs are killed during upgrades because of this.
 
 2. **Stale on cleanup failure.** If virt-handler crashes between deleting a VMI and cleaning up the ghost record, the stale record persists. On restart,
    virt-handler may try to connect to a socket that no longer exists, or worse, to one that has been reused by a different pod.
@@ -113,7 +114,39 @@ For each discovered socket:
 3. Call `Cmd.GetDomain` to retrieve the domain state.
 4. Emit the domain event into the domain informer's event channel.
 
-This replaces `listSockets(GhostRecordGlobalStore.list())` in `handleResync`.
+This replaces `listSockets(GhostRecordGlobalStore.list())` in both `handleResync` and `handleStaleSocketConnections`.
+
+### API server dependency
+
+Ghost records gave virt-handler a node-local path to discover sockets without the API server. This VEP replaces that with VMI informers, which depend on
+the API server.
+
+In practice, this is not a new dependency. virt-handler already blocks on
+[`cache.WaitForCacheSync`](https://github.com/kubevirt/kubevirt/blob/main/cmd/virt-handler/virt-handler.go) at startup, which waits for all informers
+(including `vmiSourceInformer`, `vmiTargetInformer`, `nodeInformer`, and others) to complete their initial list. If the API server is unreachable,
+virt-handler never proceeds past this point, regardless of whether ghost records exist on disk. Ghost records let the domain-watcher detect domains, but
+the VMI reconcile loop cannot function without the VMI informer, so the detected domains cannot be acted upon.
+
+After startup, the VMI informer cache is local. `handleResync` reads from the in-memory VMI store, not from the API server. An API server outage after
+startup does not affect socket discovery. The only API call per socket is the TokenReview from [VEP-491](../491-launcher-socket-authentication/vep.md),
+which is covered by that VEP's caching and error handling (see below).
+
+### Error handling and recoverability
+
+Authentication failures (TokenReview timeout, API server blip, token not yet projected) are treated as recoverable. A failed authentication leaves the
+socket in the same state as a failed dial today: the domain is not polled, and it is retried on the next resync cycle. Authentication failures never
+trigger VMI teardown or mark a VMI as Failed. This is critical because a transient API server outage during TokenReview must not kill running VMs.
+
+If a socket is not yet ready (the launcher process has not started listening), the dial fails and the socket is skipped, same as today.
+
+### TokenReview caching
+
+To avoid serial TokenReview calls on every resync cycle, virt-handler caches authentication results keyed by pod UID. A cached result is reused as long as
+the pod UID is unchanged and the cached token has not expired. On a node with N VMs, only the first resync after startup pays the full N TokenReview calls.
+Subsequent resyncs reuse cached results and only call TokenReview for newly discovered sockets.
+
+The `LauncherClientInfoByVMI` cache already holds open gRPC connections per VMI. The authentication cache is a natural extension: once a socket is
+authenticated and its client is cached, subsequent resyncs skip both authentication and connection setup for that socket.
 
 ### Removing the ghost record store
 
@@ -126,6 +159,10 @@ The following are removed:
 - The `IterableCheckpointManager` and all on-disk checkpoint read/write for ghost records
 - `listSockets` function (replaced by VMI store iteration)
 
+Both `handleResync` and `handleStaleSocketConnections` currently call `listSockets(GhostRecordGlobalStore.list())`. Both are replaced with VMI store
+iteration over `ActivePods`. For `handleStaleSocketConnections`, the `findBySocket` lookup (used to build a synthetic domain object for deletion events) is
+replaced by looking up the VMI directly from the socket path's pod UID via `ActivePods`.
+
 The `LauncherClientInfoByVMI` in-memory cache is kept. It caches open gRPC connections and is rebuilt from live VMI data on startup.
 
 ### Startup sequence
@@ -134,7 +171,7 @@ The new virt-handler startup sequence:
 
 1. VMI informers sync (already happens today, performs a full list from the API server).
 2. For each VMI with `ActivePods` entries on this node, derive socket paths from pod UIDs.
-3. For each socket: authenticate, connect, retrieve domain state.
+3. For each socket: authenticate (with caching), connect, retrieve domain state.
 4. Start the domain-watcher resync loop.
 5. Begin processing VMI events.
 
@@ -154,11 +191,12 @@ which is the same behavior as today.
 
 ### Handling launcher disappearance
 
-When a VMI is deleted or its `ActivePods` is updated, the VMI informer fires an update/delete event. virt-handler closes the cached client connection and
-cleans up state. This replaces the ghost record deletion path.
+When a VMI is deleted or its `ActivePods` is updated, the VMI informer fires an update/delete event. virt-handler drops the cached launcher client
+connection for the removed pod UID. During migration, the source pod is deleted while the target is still running on another node. The source virt-handler
+only drops its local client. It does not mark the VMI as Failed or tear anything down, because the VMI itself is still alive (just running elsewhere).
 
 The `handleStaleSocketConnections` watchdog remains for detecting sockets that become unresponsive without a corresponding VMI state change (e.g. process
-crash inside the container).
+crash inside the container). It iterates the same VMI store instead of ghost records.
 
 ### Feature gate
 
@@ -208,23 +246,25 @@ Yes. Ghost record management is entirely internal to virt-handler, a core compon
 ## Scalability
 
 No new informers, no new list/watch, no new RBAC. The VMI informers already exist and are already synced on startup. The only added cost per launcher is
-the TokenReview call from [VEP-491](../491-launcher-socket-authentication/vep.md) (~1-5ms per call).
+the TokenReview call from [VEP-491](../491-launcher-socket-authentication/vep.md) (~1-5ms per call), and these are cached after the first successful
+verification (keyed by pod UID).
 
-On a node with N VMs, startup performs N socket connections and N TokenReview calls. This is comparable to the current ghost record startup (N checkpoint
-file reads + N socket connections), with the TokenReview calls being the only new cost.
+On a node with N VMs, the first startup performs N socket connections and N TokenReview calls. Subsequent resyncs reuse cached authentication results and
+only call TokenReview for newly discovered sockets. This is comparable to the current ghost record startup (N checkpoint file reads + N socket
+connections), with the initial TokenReview calls being the only new cost.
 
 No new CRDs, no new controllers.
 
 ## Update/Rollback Compatibility
 
 **Upgrade:** The feature gate is off by default. Upgrading KubeVirt adds the VMI-based discovery code but does not activate it. Ghost records continue to
-work. Enabling the feature gate switches to VMI-based discovery. On the first startup with the gate enabled, ghost record checkpoint files are ignored (not
-read). They can be cleaned up by a one-time migration that removes the checkpoint directory.
+work. Enabling the feature gate switches to VMI-based discovery and deletes the ghost record checkpoint files (they are stale by definition since they
+were not updated while the gate was enabled).
 
-**Rollback:** Disabling the feature gate reverts to ghost record discovery. Since ghost records were not being written while the gate was enabled, the cache
-will be empty on rollback. virt-handler will rebuild it from scratch by connecting to the launchers it discovers through its normal VMI reconciliation loop.
-There is a brief window where virt-handler has no cached state, but this is equivalent to a fresh virt-handler start on a node, which is already a
-supported scenario.
+**Rollback:** Disabling the feature gate reverts to ghost record discovery. The checkpoint files were deleted when the gate was enabled, so the cache is
+empty. virt-handler will rebuild it from scratch by connecting to the launchers it discovers through its normal VMI reconciliation loop. There is a brief
+window where virt-handler has no cached state, but this is equivalent to a fresh virt-handler start on a node, which is already a supported scenario.
+Ghost record code is retained through Beta for this fallback path and removed at GA when the gate is locked on.
 
 ## Functional Testing Approach
 
@@ -233,8 +273,10 @@ supported scenario.
 - VMI store iteration discovers all launcher sockets on the node via `ActivePods`.
 - Socket path is correctly derived from pod UID.
 - Launcher that started while virt-handler was down is discovered on startup (VMI informer initial list catches it).
-- VMI deletion triggers client cleanup.
+- VMI deletion triggers client cleanup (drop local client, not VMI teardown).
 - `handleResync` uses VMI store iteration, not ghost records.
+- `handleStaleSocketConnections` uses VMI store iteration, not ghost records.
+- Authentication failure is recoverable (retried on next resync, does not trigger VMI teardown).
 
 ### Functional / e2e
 
@@ -242,6 +284,7 @@ supported scenario.
 - Start a VMI while virt-handler is down. When virt-handler starts, the VMI must be discovered and reported as Running.
 - Upgrade KubeVirt (which restarts virt-handler). All running VMIs must survive with no disruption.
 - No ghost record checkpoint files are written to disk when the feature gate is enabled.
+- Enable then disable the feature gate. virt-handler rebuilds ghost records from scratch without killing VMs.
 
 ## Implementation History
 
@@ -252,17 +295,17 @@ N/A
 ### Alpha
 
 - [ ] Changes guarded by `LauncherSocketAuthentication` feature gate (shared with [VEP-491](../491-launcher-socket-authentication/vep.md))
-- [ ] `handleResync` discovers launchers from VMI store's `ActivePods` instead of ghost records
-- [ ] Ghost record store is not read or written when gate is enabled
+- [ ] `handleResync` and `handleStaleSocketConnections` discover launchers from VMI store's `ActivePods` instead of ghost records
+- [ ] Ghost record checkpoint files are deleted when gate is enabled
 - [ ] Startup discovers launchers that started while virt-handler was down
+- [ ] TokenReview results cached by pod UID
 - [ ] Unit tests listed above pass
 - [ ] Functional tests listed above pass
 
 ### Beta
 
-- [ ] Ghost record checkpoint files are cleaned up on first startup with gate enabled
 - [ ] No VMI disruptions reported in alpha
-- [ ] `GhostRecordStore` code removed (not just bypassed)
+- [ ] Ghost record code retained for fallback when gate is disabled
 
 #### On-By-Default Readiness
 
@@ -273,4 +316,4 @@ N/A
 
 - [ ] No outstanding functional or reliability gaps
 - [ ] Feature has been on-by-default for at least one minor release with no regressions
-- [ ] Ghost record related code fully removed from the codebase
+- [ ] Ghost record code removed from the codebase (gate locked on)
