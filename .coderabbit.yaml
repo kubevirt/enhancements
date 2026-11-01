@@ -3,17 +3,105 @@ language: en-US
 reviews:
   profile: chill
   request_changes_workflow: false
+  review_details: true
   auto_review:
     enabled: false
+  path_instructions:
+    - path: "veps/**/vep.md"
+      instructions: |
+        Review VEP documents against README.md and docs/feature-lifecycle.md.
+        For API-relevant VEPs, use
+        kubevirt/kubevirt/docs/api/design_guidelines.md as the authoritative
+        design guidance.
+  pre_merge_checks:
+    custom_checks:
+      - name: VEP process compliance
+        mode: warning
+        instructions: |
+          Apply this check when the pull request changes a VEP document.
+
+          Evaluate the change against the documented requirements in README.md
+          and docs/feature-lifecycle.md. Use only requirements stated in those
+          documents.
+
+          Return PASS, FAIL, or INCONCLUSIVE with concise evidence and a follow-up action.
+          If a requirement is missing or ambiguous, return INCONCLUSIVE rather than inventing one.
+
+      - name: VEP structure completeness
+        mode: warning
+        instructions: |
+          Compare the changed VEP document with veps/NNNN-vep-template/vep.md.
+
+          Check the documented template requirements without inventing new
+          requirements. Do not accept missing sections unless the VEP explicitly
+          explains why they do not apply. For update or graduation pull requests,
+          evaluate the existing VEP and changed sections rather than requiring
+          unrelated new content.
+
+          Return PASS, FAIL, or INCONCLUSIVE with concise evidence and a follow-up action.
+
+      - name: API design guidelines
+        mode: warning
+        instructions: |
+          Read the current authoritative guidance in
+          kubevirt/kubevirt/docs/api/design_guidelines.md.
+
+          Determine whether the guidance applies to the VEP. If it applies,
+          report only concrete mismatches or missing justification, citing the
+          relevant guideline section.
+
+          If the guidance does not apply, return INCONCLUSIVE with
+          "Not applicable". Otherwise, return PASS, FAIL, or INCONCLUSIVE with
+          concise evidence and a follow-up action.
+
+      - name: Release target and schedule
+        mode: warning
+        instructions: |
+          Evaluate release targets against docs/feature-lifecycle.md. Check
+          that the VEP declares at most one incomplete graduation target, that
+          it is for the current or immediately upcoming release cycle, and that
+          a graduation target is introduced by a VEP update during the design
+          phase. Extract the target release and inspect its schedule at:
+          https://github.com/kubevirt/sig-release/blob/main/releases/<target>/schedule.md
+
+          Distinguish completed graduation history from the active target. If
+          the schedule cannot be found or the target is ambiguous, return
+          INCONCLUSIVE. Return PASS, FAIL, or INCONCLUSIVE with concise date
+          evidence and a follow-up action.
+
+      - name: Tracker and link consistency
+        mode: warning
+        instructions: |
+          Evaluate the VEP tracking issue and references against README.md,
+          docs/feature-lifecycle.md, and the existing issue/PR templates. Check
+          only documented requirements. Do not require implementation or
+          documentation pull requests for an initial VEP.
+
+          Return PASS, FAIL,
+          or INCONCLUSIVE with concise evidence and a follow-up action; do not
+          claim completeness without evidence.
+
   tools:
     trufflehog:
       enabled: true
 
 knowledge_base:
-  opt_out: true
   code_guidelines:
     enabled: true
     filePatterns:
       - README.md
       - veps/NNNN-vep-template/vep.md
-      - docs/feature-lifecycle.md
+      - "docs/**"
+      - .github/ISSUE_TEMPLATE/vep.md
+      - .github/PULL_REQUEST_TEMPLATE.md
+      - "kubevirt/kubevirt:docs/api/design_guidelines.md"
+  learnings:
+    scope: local
+    approval_delay: 30
+  linked_repositories:
+    - repository: kubevirt/kubevirt
+      instructions: |
+        This repository contains KubeVirt implementation code. For VEP reviews,
+        use docs/api/design_guidelines.md as the authoritative guidance for
+        public API, CRD, resource, field, validation, status, defaulting, and
+        lifecycle design. Only use it for API-relevant VEPs.
