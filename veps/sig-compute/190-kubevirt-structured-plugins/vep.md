@@ -631,6 +631,8 @@ Alpha
 - [ ] `preMigrationSource` launcher hook is functional: sidecar can modify migration flags and parameters.
 - [ ] New gRPC service and protobuf messages for `preBoot` and `preMigrationSource` hooks.
 - [ ] Functional tests covering `preBoot` and `preMigrationSource` hook points.
+- [ ] Revisit testing for CRD CEL validation, if we should use unit tests or to address with [VEP-371](https://github.com/kubevirt/enhancements/issues/371)
+(See discussion [here](https://github.com/kubevirt/kubevirt/pull/19160#discussion_r4120505993)).
 
 ### Beta
 
