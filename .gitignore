@@ -23,3 +23,4 @@ manifests/**/*.tmp
 .bazeldnf/
 user.bazelrc
 .vscode/
+__pycache__/
