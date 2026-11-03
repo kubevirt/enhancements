@@ -19,7 +19,7 @@ Items marked with (R) are required _prior to targeting to a milestone / release_
 
 ## Overview
 
-This document tries to make forwarding more efficient when a user wants to forward contiguous port ranges to the VM guests using `masquerade` interfaces. Currently, the only possibility is to specify an attribute in the VM spec for each single port which can be impractical and hard to maintain from a user perspective. Additionally, this situation also translates into numerous separate nftables rules, leaving efficiency on the table. 
+This document tries to make forwarding more efficient when a user wants to forward contiguous port ranges to the VM guests using `masquerade` interfaces, but not all of them. Currently, the only possibility is to specify an attribute in the VM spec for each single port which can be impractical and hard to maintain from a user perspective. Additionally, this situation also translates into numerous separate nftables rules, leaving efficiency on the table. 
 
 ## Motivation
 
@@ -59,14 +59,11 @@ Presently, when using an interface of type `masquerade` all traffic gets forward
 A new `PortRange` type will be added to the KubeVirt API:
 
 ```go
-// PortRange represents a range of ports to expose from the virtual machine.
-// Default protocol TCP.
-// The start and end fields are mandatory
+// PortRange represents a range of ports to forward to the virtual machine.
+// All fields are mandatory.
 type PortRange struct {
-  // Protocol for ports. Must be UDP or TCP.
-  // Defaults to "TCP".
-  // +optional
-  Protocol string `json:"protocol,omitempty"`
+  // Required. Must be UDP or TCP.
+  Protocol string `json:"protocol"`
   // First port of the range to expose for the virtual machine.
   // This must be a valid port number, 0 < x < 65536.
   Start int32 `json:"start"`
@@ -115,11 +112,11 @@ The existing logic for converting ports specified in the VM/I specs to nftables 
 ### Feature Gate
 
 The feature will be guarded by a Feature Gate during Alpha and Beta.
-Proposed Feature Gate name: `MasqueradePortRanges`.
+Proposed Feature Gate name: `PortRangesSpec`.
 
 ## API Examples
 
-The following example demonstrates a configuration using both fields. Note that in the Alpha phase, validation will enforce mutual exclusivity, preventing this specific combination. This example also illustrates that ranges of different protocols (TCP and UDP) are allowed to overlap.
+The following example demonstrates a configuration using the newly defined `portRanges` field. Note how ranges of different protocols (TCP and UDP) are allowed to overlap. Note that in the Alpha phase, validation will enforce mutual exclusivity with the existing `port` field. 
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -132,10 +129,6 @@ spec:
           interfaces:
             - name: red
               masquerade: {}
-              ports:
-                - name: ssh
-                  port: 22
-                  protocol: TCP
               portRanges:
                 - start: 1000
                   end: 8000
@@ -183,7 +176,7 @@ spec:
 Example API server validation output:
 
 ```text
-Error from server (Invalid): error when creating "invalid-vm.yaml": VirtualMachine.kubevirt.io "invalid-vm" is invalid: spec.template.spec.domain.devices.interfaces[0]: Invalid value: interface: "ports" and "portRanges" cannot be used together while the MasqueradePortRanges feature gate enforces mutual exclusivity in Alpha (v1.9)
+Error from server (Invalid): error when creating "invalid-vm.yaml": VirtualMachine.kubevirt.io "invalid-vm" is invalid: spec.template.spec.domain.devices.interfaces[0]: Invalid value: interface: "ports" and "portRanges" cannot be used together
 ```
 
 ## Alternatives
@@ -295,11 +288,16 @@ The proposed modification poses no scalability problems: it can actually make fo
 
 - Invalid or not correct fields in the templates are rejected with appropriate errors.
 
+### End-to-End Tests
+
+- Forwarding of both the range delimiting ports and of at least one inner one is tested.
+
 ## Implementation History
 
 - 2026-01-03: Initial VEP draft created.
 - 2026-04-08: Added explicit validation checks and nftables rules conversion subsection under Design.
 - 2026-04-08: Added Alpha/Beta/GA graduation plan and Feature Gate strategy.
+- 2026-05-10: Minor Fixes, added E2E tests.
 
 ## Graduation Requirements
 
@@ -310,13 +308,13 @@ The proposed modification poses no scalability problems: it can actually make fo
 - [ ] Validation and forwarding of ranges for masquerade pod interface only
 - [ ] Initial feedback collection from users
 
-### Beta (v1.10)
+### Beta
 
 - [ ] Feature remains protected by a feature gate
 - [ ] Extended validation and functional coverage based on Alpha feedback
 - [ ] Decision recorded on whether combined `Ports` + `PortRanges` usage should be introduced in this phase or deferred
 
-### GA (v1.11)
+### GA
 
 - [ ] Feature gate removed and feature enabled by default
 - [ ] Graduation criteria fully met with stable behavior
