@@ -137,6 +137,14 @@ All VEP updates and implementation work are tied to the [KubeVirt release cycle]
    Implement the agreed changes during the implementation phase.
    After all implementation PRs are merged, submit a PR to bump the version from Beta to GA.
 
+> **Note**: Naming a release as the Beta/GA target in an approved VEP records
+> *intent* at design time, it is not a pre-approval of graduation.
+> The version-bump PR (step 7 or 9) is still reviewed against the
+> [Graduation phases](#graduation-phases) bar, and reviewers should push back
+> if the feature isn't actually ready, even if a VEP named that release.
+> If it's not ready, slip the target via a VEP update rather than merging the
+> bump PR anyway.
+
 [Removal](#removal) of features is widely discussed later
 in this document.
 
@@ -194,6 +202,10 @@ for more information.
   Minor changes are acceptable during Beta. However, major changes would possibly
   cause the feature to be removed from the codebase with the need to start with a fresh
   new VEP starting from scratch as alpha.
+
+  This bar applies regardless of what an earlier VEP projected (see
+  [note above](#feature-stages)). The bump PR must still meet it at the time
+  it's opened, per the [API graduation guidelines](https://github.com/kubevirt/community/blob/main/docs/api-graduation-guidelines.md).
 
   The period in which a feature can remain in Beta is limited,
   assuring unfinished features don't start piling up.
