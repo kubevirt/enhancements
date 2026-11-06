@@ -361,6 +361,58 @@ onward, the only source for these metrics, recording rules, and alerts is the
 `kubevirt-observability-controller`. Users who depend on any of these **must**
 install the new controller before upgrading to this release.
 
+### Per-command transition of Guest agent commands
+
+Every category the controller requests turns into a command executed by
+`qemu-guest-agent` inside the guest, at most once per the command's cache TTL.
+KubeVirt's own agent poller in `virt-launcher` is already issuing commands on
+its own schedule. A single cutover would therefore leave two independent
+schedules asking the same guest for the same information, with the cost landing
+inside the user's workload.
+
+Guest agent metrics are consequently migrated **one command at a time**, over
+the course of beta, and the controller only issues a command when a metric
+derived from it is enabled.
+
+VMStats collection will be enabled by default in
+`kubevirt-observability-controller` during beta. The individual guest agent
+data collection will be enabled as needed. `GetVMStats` requests are built
+per VMI from the set of enabled metrics so a category is only included when at
+least one enabled metric is calculated from it. The enabled set comes from the
+metric allowlist supplied by whoever deploys the controller. The consequence is
+that no guest agent command is issued on behalf of a metric that is not exposed,
+and that as KubeVirt gives up responsibility for a metric, enabling its
+replacement becomes an explicit decision by the deploying operator, the tool
+consuming the data, or the cluster administrator.
+
+**Per-command steps**:
+
+1. **Verify consumers.** Identify everything in KubeVirt fed by the guest agent
+   command. Metrics can be moved but `VirtualMachineInstance` status
+   fields and the guest agent subresources (`/guestosinfo`, `/userlist`,
+   `/filesystemlist`) cannot.
+2. **Collect in the controller.** The controller implements the metrics derived
+   from the command. The category is not requested unless an enabled metric
+   needs it.
+3. **Measure.** Compare command execution performance with the
+   `VMStatsCollector` gate off and on.
+4. **Remove from KubeVirt.** `virt-handler` stops scraping the command's data
+   from `virt-launcher` and stops emitting the corresponding metric. If step 1
+   found no other consumer, `virt-launcher` also drops the command from its
+   agent poller. The controller becomes the only caller, and the metric is
+   available only to deployments that enabled it.
+
+**The removals stay behind the feature gate.** During beta, every query removal
+will be guarded by the same `VMStatsCollector` feature gate that guards the rest
+of the KubeVirt-side change, which is still in place for the whole of beta.
+
+With the gate enabled, `GetVMStats` can be served, and the legacy poll and
+`virt-handler` metric for a transitioned command are gone. With
+the gate disabled, `virt-launcher` keeps its original poll and `virt-handler`
+keeps emitting, for every command, transitioned or not. Each removal is
+therefore reversible per cluster without a downgrade, and the duplication is
+bounded at every point in the transition.
+
 ### Timeline summary
 
 | Release | virt-controller metrics | PrometheusRule reconciliation (virt-operator) | kubevirt-observability-controller | Action required |
@@ -376,6 +428,10 @@ install the new controller before upgrading to this release.
   `kubevirt-observability-controller`.
 - Release N+1 release notes will list the removal as a breaking change with
   a link to the installation guide for the new controller.
+- Each guest agent command removed from `virt-handler` will be called out
+  individually in that release's notes, naming the metrics affected and the
+  allowlist entries needed to keep them, so administrators can opt in before
+  upgrading.
 
 ## Functional Testing Approach
 
@@ -530,6 +586,13 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 - [ ] E2E tests covering upgrade/rollback scenarios and gRPC fallback
 - [ ] Legacy individual monitoring RPCs deprecated in documentation
 - [ ] Performance benchmarks comparing per-scrape latency before and after
+- [ ] VMStats collection enabled by default in `kubevirt-observability-controller`
+- [ ] Per-command guest agent transition mechanism in place: `GetVMStats`
+  categories resolved from the set of enabled metrics, driven by the metric
+  allowlist supplied by the deployer
+- [ ] `VMStatsCollector` feature gate graduated to beta and still guarding every
+  guest agent command removed from `virt-handler`, so disabling it restores the
+  pre-transition behaviour
 
 ### GA
 
@@ -539,5 +602,9 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
   reconciliation removed from `virt-operator` (release N+1);
   `kubevirt-observability-controller` is the sole source for metrics, recording
   rules, and alerts
+- [ ] All in-scope guest agent commands transitioned; `virt-launcher` no longer
+  polls any command kept alive solely to feed a metric
+- [ ] `VMStatsCollector` feature gate removed; the guest agent command removals
+  become unconditional
 - [ ] Upgrade/rollback tests pass across two consecutive releases
 - [ ] Documentation updated with new architecture diagrams and operator guide
