@@ -9,13 +9,12 @@ virtualization-stack-specific node operations behind a runtime plugin.
 
 **Each runtime plugin is deployed as a privileged DaemonSet**, with one pod
 on each node where its stack is supported. It serves gRPC over a local UNIX
-socket, not a cluster Service.
+socket.
 
 | Component | Responsibility |
 | --- | --- |
 | `virt-handler` | Reconcile VMIs, choose the matching plugin, invoke high-level RPCs, retry failures, and report Kubernetes status. |
 | Runtime plugin | Find the VM processes and perform backend-specific privileged operations. |
-| Plugin author and administrator | Ensure the implementation is safe and configure its host access and privileges. |
 
 Core calls operations such as `AdjustVMIResources`; it does not prescribe
 individual process, affinity, cgroup, or resource-limit changes.
@@ -67,10 +66,9 @@ alone does not mean the plugin is usable.
 
 | RPC | Purpose |
 | --- | --- |
-| `GetInfo` | Return stack identity, supported RPC API versions, and capabilities. |
+| `GetInfo` | Return stack identity, supported RPC API versions, capabilities, and required shared hypervisor device, if any. |
 | `AdjustVMIResources` | Apply backend-specific VM resource adjustments. |
 | `HandleHousekeepingResources` | Configure supporting VM processes and threads. |
-| `GetHypervisorDevice` | Report a required shared hypervisor device, if any. |
 | `GetNodeLabels` | Return opaque node-label key/value pairs. |
 | `GetMigrationEndpoints` | Prepare target migration sockets and return their names and paths. |
 
@@ -96,12 +94,12 @@ overwriting labels owned by another component. Label prefixes must prevent
 collisions between stacks.
 
 Core remains the sole kubelet device-plugin registrar for shared hypervisor
-devices and deduplicates reports from multiple stacks. Exclusive devices remain
-outside this mechanism.
+devices reported by `GetInfo` and deduplicates reports from multiple stacks.
+Exclusive devices remain outside this mechanism.
 
 The handler uses the VMI's resolved stack identity, preserved for its lifetime.
-The user-facing stack-selection field is defined separately. Plugin failure
-must not redirect an alternate-stack VMI to built-in QEMU logic.
+The user should specify the virt-stack for a given VMI using its a field in its spec.
+Plugin failure must not redirect an alternate-stack VMI to built-in QEMU logic.
 
 With the feature gate disabled, default behavior is unchanged. Default and
 legacy VMIs retain the built-in implementation. New handlers must continue
@@ -171,8 +169,8 @@ length limits. Legacy launchers retain their existing socket-path convention.
    be created after its CRD exists.
 4. **Discover and negotiate.** Each handler observes the registration, connects
    locally, calls `GetInfo`, and chooses a compatible API version.
-5. **Prepare the node.** The handler obtains labels and device requirements,
-   applies labels, and updates shared device registrations.
+5. **Prepare the node.** The handler calls `GetNodeLabels`, applies labels,
+   and updates shared device registrations using the `GetInfo` response.
 6. **Create a VMI.** The controller uses the matching controller plugin to
    render a launcher pod with selectors for a compatible, available node.
 7. **Invoke the runtime.** During VMI reconciliation, the handler calls the
