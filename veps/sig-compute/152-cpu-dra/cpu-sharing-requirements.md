@@ -163,34 +163,420 @@ VM B is the same with CPUs 1 and 5 in place of 0 and 4. The shared lines are ide
 
 ## Related designs
 
-These are the designs proposed so far in the VEP 152 and VEP 300 reviews. They are listed for reference; this document does not choose between them. For v1.10 the reviews settled on the generated exclusive claim (VEP 152) and aligned claims (VEP 300), and left shared CPUs to Phase 3 ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5502428224), [comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+These are the designs proposed so far in the VEP 152 and VEP 300 reviews, with the YAML each proposal used. They are listed for reference; this document does not choose between them. For v1.10 the reviews settled on the generated exclusive claim (VEP 152) and aligned claims (VEP 300), and left shared CPUs to Phase 3 ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5502428224), [comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
 
 ### How a VM says which vCPUs are exclusive or shared (R6)
 
-- **A1. Claim references on the CPU.** A list of claim references under `domain.cpu`, so that shared cores come from one claim and dedicated cores from another ([proposal](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849067984)). Not adopted: reviewers objected to claim references on the CPU field ([comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849154642), [comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3866548120)), and Phase 1 has no VMI API change.
-- **A2. `hostAllocation.groups` with access mode and mapping policy.** Each group targets a set of vCPUs and asks for a number of host CPUs with `accessMode: Exclusive | Shared` and `mappingPolicy: OneToOne | SharedSet` ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5453934486)). This is the discussion example in [Phase 3](vep.md#phase-3--advanced-use-cases-host-allocation-intent).
-- **A3. Trimmed groups.** `groups: [{vcpus, exclusive, hostCPUs}]`. `dedicatedCpuPlacement` expands to one all-exclusive group and cannot be combined with groups ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5485228539)).
-- **A4. CPU classes.** `cpu.classes: [{name, count, isolation: exclusive | shared}]` ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
-- **A5. CPU profiles.** `cpu.profile: <name>`, where a documented convention defines the split and a policy supplies the details ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
-- **A6. No new VM API.** Keep `dedicatedCpuPlacement`, `isolateEmulatorThread` and the IO thread settings, and let an admin-defined policy or translation layer decide oversubscription and mapping ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5500327129), [comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5490850285)). The counter-argument is that virt-launcher renders the domain XML without access to such policies, so the mapping has to reach it through the VMI ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5502428224)).
+#### A1. Claim references on the CPU
+
+A list of claim references under `domain.cpu`, so that shared cores can come from one claim and dedicated cores from another ([proposal](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849067984), [example](https://github.com/kubevirt/enhancements/pull/414#discussion_r3854004608)). Not adopted: reviewers objected to claim references on the CPU field ([comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849154642), [comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3866548120)), and Phase 1 has no VMI API change.
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  name: vmi-with-individual-cpu
+spec:
+  resourceClaims:
+  - name: cpu-claim
+    managedClaimProvisionerName: kubevirt-aligner
+  domain:
+    cpu:
+      cores: 4
+      dra:
+      - claimName: cpu-claim
+        requestName: numa0-cpus
+    resources:
+      requests:
+        memory: 8Gi
+```
+
+#### A2. `hostAllocation.groups` with access mode and mapping policy
+
+Each group targets a set of vCPUs and asks for a number of host CPUs with an access mode and a mapping policy ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5453934486)). This is the discussion example in [Phase 3](vep.md#phase-3--advanced-use-cases-host-allocation-intent).
+
+```yaml
+domain:
+  cpu:
+    sockets: 1
+    cores: 4
+    threads: 1
+    hostAllocation:
+      groups:
+      - name: exclusive
+        targets:
+          vcpus: "0"
+        hostCPUs:
+          count: 1
+          # Exclusive prevents these host CPUs from being allocated
+          # to another workload.
+          accessMode: Exclusive
+          # OneToOne pins each selected vCPU to a distinct host CPU.
+          mappingPolicy: OneToOne
+      - name: shared
+        targets:
+          vcpus: "1-3"
+        hostCPUs:
+          count: 2
+          # Shared permits other workloads to use the same host CPUs.
+          accessMode: Shared
+          # SharedSet pins every selected vCPU to the complete allocated
+          # host CPU set. Here, vCPUs 1-3 can run on either host CPU.
+          mappingPolicy: SharedSet
+```
+
+The domain XML virt-launcher would write from it:
+
+```xml
+<vcpu placement="static">4</vcpu>
+<cpu>
+  <topology sockets="1" cores="4" threads="1"/>
+</cpu>
+<cputune>
+  <vcpupin vcpu="0" cpuset="2"/>
+  <vcpupin vcpu="1" cpuset="6-7"/>
+  <vcpupin vcpu="2" cpuset="6-7"/>
+  <vcpupin vcpu="3" cpuset="6-7"/>
+</cputune>
+```
+
+#### A3. Trimmed groups
+
+The same idea without allocation vocabulary: `mappingPolicy` is dropped as derivable and `accessMode` becomes `exclusive: bool`. `dedicatedCpuPlacement` expands to one all-exclusive group, and the two cannot be combined ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5485228539)).
+
+```yaml
+domain:
+  cpu:
+    cores: 4
+    hostAllocation:
+      groups:
+      - vcpus: "0"
+        exclusive: true
+        hostCPUs: 1
+      - vcpus: "1-3"
+        exclusive: false
+        hostCPUs: 2
+```
+
+#### A4. CPU classes
+
+Named classes with a vCPU count and an isolation level ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+
+```yaml
+domain:
+  cpu:
+    cores: 16
+    classes:
+    - name: dataplane
+      count: 4
+      isolation: exclusive
+    - name: housekeeping
+      count: 12
+      isolation: shared
+```
+
+#### A5. CPU profiles
+
+A profile name on the VM, with the split defined by a documented convention and the details supplied by a policy ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+
+```yaml
+cpu:
+  cores: 16
+  profile: nfv-dataplane   # means 4 exclusive + 12 shared, convention documented
+```
+
+```yaml
+kind: ManagedClaimPolicy
+spec:
+  selectors: { matchLabels: { kubevirt.io/profile: nfv-dataplane } }
+  provisioner: vendor.io/nfv
+  params:
+    dataplane:
+      exclusive: true
+      alignWith: [gpus]
+    housekeeping:
+      exclusive: false
+      oversubscribe: "2:1"
+```
+
+#### A6. No new VM API
+
+Keep `dedicatedCpuPlacement`, `isolateEmulatorThread` and the IO thread settings, and let an admin-defined policy or translation layer decide oversubscription and mapping ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5500327129), [comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5490850285)). The VM keeps today's fields; a split between exclusive and shared CPUs, when a group of VMs needs one, lives in the policy parameters ([example](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)). The same comment notes that `dedicatedCpuPlacement: true` combined with a split is confusing, because the field means all vCPUs are exclusive.
+
+```yaml
+domain:
+  cpu:
+    cores: 16
+    dedicatedCpuPlacement: true
+    isolateEmulatorThread: true
+devices:
+  gpus:
+  - name: gpu0
+    claimName: topo
+    requestName: gpu
+```
+
+```yaml
+# ManagedClaimPolicy params
+cpu:
+  exclusive: 8
+  shared: 12
+align:
+  include:
+    cpu: exclusive
+    devices: [gpus]
+```
+
+The counter-argument is that virt-launcher renders the domain XML without access to such policies, so the mapping has to reach it through the VMI ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5502428224)).
 
 ### Who builds the claim, and how shared CPUs are allocated (R2–R5)
 
-- **B1. `ManagedClaimProvisioner`.** The VMI names a provisioner, and a provisioner controller generates the claim, including `matchAttribute` constraints. CPUs are requested as consumable capacity from a group device ([VEP 300](https://github.com/kubevirt/enhancements/pull/432)).
-- **B2. `ManagedClaimPolicy`.** A MigrationPolicy-style object selects VMIs by label and passes parameters, such as alignment, exclusive and shared counts and an oversubscription ratio, to a provisioner. Claim names reach virt-controller through VMI status and a `ManagedClaimsReady` condition. Each VMI gets its own claim against the same capacity pool; a single claim shared by many VMIs (`claimScope: Group`) is left for later ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)).
-- **B3. One claim with exclusive and shareable devices.** The provisioner creates one claim per VM that holds both exclusive and shareable CPU devices ([Phase 3](vep.md#phase-3--advanced-use-cases-host-allocation-intent)).
-- **B4. One claim shared across VMIs.** Several VMIs reference the same claim for their shared CPUs ([proposal](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849067984)). The alternative view is per-VMI claims against a shared pool, because a claim usually has one consumer ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)).
-- **B5. Driver support.** Mixed exclusive and shared allocation is tracked in dra-driver-cpu [#103](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/103) and [#305](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/305). The device layout is not decided yet and may need node cgroup changes and KEP-5517 ([comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3850303128)).
+#### B1. `ManagedClaimProvisioner`
+
+The admin creates a provisioner object that maps device types to DeviceClasses. The VMI names the provisioner, and a provisioner controller generates the claim, including `matchAttribute` constraints. CPUs are requested as consumable capacity from a group device ([VEP 300](https://github.com/kubevirt/enhancements/pull/432)). The example below is VEP 300's CPU, GPU and NIC example.
+
+```yaml
+apiVersion: kubevirt.io/v1alpha1
+kind: ManagedClaimProvisioner
+metadata:
+  name: hgx-b200-quarter
+spec:
+  provisioner: policy.kubevirt.io/aligner
+  deviceTypes:
+  - name: cpu
+    deviceClassName: dra.cpu
+  - name: gpu
+    deviceClassName: gpu.example.com
+  - name: network
+    deviceClassName: sriov.example.com
+```
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  name: full-topology-vm
+spec:
+  resourceClaims:
+  - name: all-devices
+    managedClaimProvisionerName: hgx-b200-quarter
+  domain:
+    cpu:
+      cores: 16
+      dra:  # field name defined by VEP-152, may change
+        claimName: all-devices
+        requestName: cpus
+    devices:
+      gpus:
+      - name: gpu0
+        claimName: all-devices
+        requestName: gpu0
+      - name: gpu1
+        claimName: all-devices
+        requestName: gpu1
+      interfaces:
+      - name: rdma-nic
+        sriov: {}
+    resources:
+      requests:
+        memory: 64Gi
+  networks:
+  - name: rdma-nic
+    resourceClaim:
+      claimName: all-devices
+      requestName: nic
+```
+
+The generated claim:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: full-topology-vm-all-devices
+  labels:
+    kubevirt.io/managed-claim: all-devices
+spec:
+  devices:
+    requests:
+    - name: cpus
+      exactly:
+        deviceClassName: dra.cpu
+        capacity:
+          requests:
+            dra.cpu/cpu: "16"
+    - name: gpu0
+      exactly:
+        deviceClassName: gpu.example.com
+        count: 1
+    - name: gpu1
+      exactly:
+        deviceClassName: gpu.example.com
+        count: 1
+    - name: nic
+      exactly:
+        deviceClassName: sriov.example.com
+        count: 1
+    constraints:
+    - matchAttribute: resource.kubernetes.io/pcieRoot
+      requests: [gpu0, gpu1, nic]
+```
+
+#### B2. `ManagedClaimPolicy`
+
+A MigrationPolicy-style object selects VMIs by label and passes parameters, such as alignment, exclusive and shared counts and an oversubscription ratio, to a provisioner. Claim names reach virt-controller through VMI status and a `ManagedClaimsReady` condition. Each VMI gets its own claim against the same capacity pool; a single claim shared by many VMIs (`claimScope: Group`) is left for later ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)).
+
+```yaml
+apiVersion: kubevirt.io/v1alpha1
+kind: ManagedClaimPolicy
+metadata:
+  name: aligned-gpu-workers
+spec:
+  selectors:
+    virtualMachineInstanceSelector:
+      matchLabels:
+        kubevirt.io/claim-policy: aligned-gpu
+  provisioner: policy.kubevirt.io/aligner
+  params:
+    align:
+      attributes: [resource.kubernetes.io/numaNode]
+```
+
+The VM opts in with a label and keeps today's CPU fields:
+
+```yaml
+metadata:
+  labels:
+    kubevirt.io/claim-policy: aligned-gpu
+spec:
+  template:
+    spec:
+      domain:
+        cpu:
+          cores: 16
+          dedicatedCpuPlacement: true
+          isolateEmulatorThread: true
+        devices:
+          gpus:
+          - name: gpu0
+            claimName: topo
+            requestName: gpu
+```
+
+#### B3. One claim with exclusive and shareable devices
+
+The provisioner creates one claim per VM that holds both exclusive and shareable CPU devices, for example one exclusive and two shareable CPU devices for a VM whose vCPU 0 is exclusive and vCPUs 1–3 share two CPUs ([Phase 3](vep.md#phase-3--advanced-use-cases-host-allocation-intent)). No YAML was proposed for the claim itself.
+
+#### B4. One claim shared across VMIs
+
+Several VMIs reference the same claim for their shared CPUs, while their dedicated CPUs come from per-VMI claims ([proposal](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849067984)). The alternative view is per-VMI claims against a shared pool, because a claim usually has one consumer ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)). No YAML was proposed.
+
+#### B5. Driver support
+
+dra-driver-cpu tracks mixed exclusive and shared allocation in [#103](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/103) and [#305](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/305). The device layout is not decided yet and may need node cgroup changes and KEP-5517 ([comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3850303128)).
+
+- **#103** asks for isolated CPUs from a claim plus a fractional amount of regular shared CPU, for example a pod that requests 5.5 CPUs with 5 of them through CPU DRA. It has no YAML.
+- **#305** proposes publishing the same CPUs twice, as exclusive CPUs per NUMA node and as shared CPU time for the whole machine, and relies on KEP-5517 to charge both against node allocatable CPU. A container with both requests runs on its exclusive CPUs plus the shared pool.
+
+```yaml
+# DeviceClass — exclusive CPUs
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: dra.cpu
+spec:
+  selectors:
+  - cel:
+      expression: >-
+        device.driver == "dra.cpu" &&
+        device.attributes["dra.cpu"].mode == "exclusive"
+---
+# DeviceClass — shared CPU time
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: dra.cpu.shared
+spec:
+  selectors:
+  - cel:
+      expression: >-
+        device.driver == "dra.cpu" &&
+        device.attributes["dra.cpu"].mode == "shared"
+```
+
+```yaml
+# ResourceSlice — exclusive CPUs (grouped mode, same as today)
+devices:
+- name: cpudevnuma0
+  allowMultipleAllocations: true
+  attributes:
+    dra.cpu/mode:
+      string: "exclusive"
+  capacity:
+    dra.cpu/cpu:
+      value: "16"
+  nodeAllocatableResources:
+    cpu: {mapping: {capacityKey: dra.cpu/cpu, capacityMultiplier: "1"}}
+- name: cpudevnuma1
+  allowMultipleAllocations: true
+  attributes:
+    dra.cpu/mode:
+      string: "exclusive"
+  capacity:
+    dra.cpu/cpu:
+      value: "16"
+  nodeAllocatableResources:
+    cpu: {mapping: {capacityKey: dra.cpu/cpu, capacityMultiplier: "1"}}
+# ResourceSlice — shared machine CPU
+- name: machinesharedpool
+  allowMultipleAllocations: true
+  attributes:
+    dra.cpu/mode:
+      string: "shared"
+  capacity:
+    dra.cpu/sharedCPU:
+      value: "32000m" # entire machine capacity of 32 CPUs
+      requestPolicy: {default: "100m", validRange: {min: "1m", step: "1m"}}
+  nodeAllocatableResources:
+    cpu: {mapping: {capacityKey: dra.cpu/sharedCPU, capacityMultiplier: "1"}}
+```
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: dataplane-cpu
+spec:
+  devices:
+    requests:
+    - name: fast-path
+      exactly:
+        deviceClassName: dra.cpu
+        capacity:
+          requests:
+            dra.cpu/cpu: "4"          # 4 exclusive CPUs
+    - name: housekeeping
+      exactly:
+        deviceClassName: dra.cpu.shared
+        capacity:
+          requests:
+            dra.cpu/sharedCPU: 500m   # half a CPU of shared time
+```
 
 ### How placement becomes visible (R7)
 
-- **C1. Device metadata.** virt-launcher reads the allocated CPUs from KEP-5304 device metadata ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)).
-- **C2. Publishing placement to the guest.** Expose the allocated CPUs inside the guest through a stable convention, as [kubevirt#6946](https://github.com/kubevirt/kubevirt/pull/6946) does for device NUMA information ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+#### C1. Device metadata
+
+virt-launcher reads the allocated CPUs from KEP-5304 device metadata ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)). No YAML was proposed.
+
+#### C2. Publishing placement to the guest
+
+Expose the allocated CPUs inside the guest through a stable convention, as [kubevirt#6946](https://github.com/kubevirt/kubevirt/pull/6946) does for device NUMA information ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)). No YAML was proposed.
 
 ### Coverage of the requirements
 
-- **R2 and R3:** B2 is the only concrete proposal for a bounded shared pool, and it depends on B5.
-- **R4:** B1 and B2 constraints can keep both parts in one topology domain. An L3-cache domain would also need a driver attribute to match on.
-- **R5:** depends on B5.
+- **R2 and R3:** B2 is the only KubeVirt-side proposal for a bounded shared pool, and it depends on B5. The #305 driver proposal bounds shared CPU time rather than vCPUs, and its shared pool covers the whole machine rather than one topology domain.
+- **R4:** B1 and B2 constraints can keep both parts in one topology domain. An L3-cache domain would also need a driver attribute to match on. In #305 the shared part is machine-wide, so it cannot share a domain with the exclusive part.
+- **R5:** depends on B5. #305 keeps exclusive and shared requests apart through node allocatable accounting.
 - **R6:** A2–A5 map vCPUs to groups, but none places the emulator and IO threads on the shared part, as scenario 3 does. A6 does not meet R6.
 - **Open question 3** relates to C2: both are about what the guest can learn about its placement.
