@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="592" height="276" viewBox="0 0 592 276" role="img" aria-labelledby="t d">
+<title id="t">Scenario 3, shared + exclusive: who runs where</title><desc id="d">VM A's vCPUs 0 and 1 are on CPUs 0 and 4. VM B's vCPUs 0 and 1 are on CPUs 1 and 5. CPUs 2, 6, 3 and 7 are shared by vCPU 2, the emulator thread and the IO thread of both VMs.</desc>
+<defs><linearGradient id="ab" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#cde8e0"/><stop offset="0.5" stop-color="#cde8e0"/><stop offset="0.5" stop-color="#d8ddf6"/><stop offset="1" stop-color="#d8ddf6"/></linearGradient></defs>
+<rect x="0.5" y="0.5" width="591" height="275" rx="10" fill="#ffffff" stroke="#dbe3e0"/>
+<text x="150.0" y="33" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#5a6762">core 0</text>
+<text x="272.0" y="33" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#5a6762">core 1</text>
+<text x="394.0" y="33" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#5a6762">core 2</text>
+<text x="516.0" y="33" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#5a6762">core 3</text>
+<text x="18" y="77.0" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#5a6762">thread 0</text>
+<rect x="92" y="42" width="116" height="62" rx="7" fill="#cde8e0" stroke="#c3cfcb"/>
+<text x="150.0" y="69.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">0</text>
+<text x="150.0" y="88.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">A vCPU 0</text>
+<rect x="214" y="42" width="116" height="62" rx="7" fill="#d8ddf6" stroke="#c3cfcb"/>
+<text x="272.0" y="69.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">1</text>
+<text x="272.0" y="88.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">B vCPU 0</text>
+<rect x="336" y="42" width="116" height="62" rx="7" fill="#f6d6d0" stroke="#c3cfcb"/>
+<text x="394.0" y="69.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">2</text>
+<text x="394.0" y="88.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">shared</text>
+<rect x="458" y="42" width="116" height="62" rx="7" fill="#f6d6d0" stroke="#c3cfcb"/>
+<text x="516.0" y="69.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">3</text>
+<text x="516.0" y="88.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">shared</text>
+<text x="18" y="145.0" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#5a6762">thread 1</text>
+<rect x="92" y="110" width="116" height="62" rx="7" fill="#cde8e0" stroke="#c3cfcb"/>
+<text x="150.0" y="137.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">4</text>
+<text x="150.0" y="156.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">A vCPU 1</text>
+<rect x="214" y="110" width="116" height="62" rx="7" fill="#d8ddf6" stroke="#c3cfcb"/>
+<text x="272.0" y="137.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">5</text>
+<text x="272.0" y="156.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">B vCPU 1</text>
+<rect x="336" y="110" width="116" height="62" rx="7" fill="#f6d6d0" stroke="#c3cfcb"/>
+<text x="394.0" y="137.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">6</text>
+<text x="394.0" y="156.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">shared</text>
+<rect x="458" y="110" width="116" height="62" rx="7" fill="#f6d6d0" stroke="#c3cfcb"/>
+<text x="516.0" y="137.0" text-anchor="middle" font-family="'IBM Plex Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#16201d">7</text>
+<text x="516.0" y="156.0" text-anchor="middle" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#16201d" fill-opacity="0.82">shared</text>
+<rect x="18" y="193" width="14" height="14" rx="3" fill="#cde8e0" stroke="#c3cfcb"/>
+<text x="42" y="204" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#5a6762">VM A's own core: vCPUs 0 and 1, one CPU each.</text>
+<rect x="18" y="218" width="14" height="14" rx="3" fill="#d8ddf6" stroke="#c3cfcb"/>
+<text x="42" y="229" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#5a6762">VM B's own core, the same.</text>
+<rect x="18" y="243" width="14" height="14" rx="3" fill="#f6d6d0" stroke="#c3cfcb"/>
+<text x="42" y="254" font-family="'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#5a6762">vCPU 2, emulator thread and IO thread of both VMs, floating.</text>
+</svg>
