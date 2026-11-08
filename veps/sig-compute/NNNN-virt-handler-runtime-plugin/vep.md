@@ -18,6 +18,8 @@ socket.
 
 Core calls operations such as `AdjustVMIResources`; it does not prescribe
 individual process, affinity, cgroup, or resource-limit changes.
+Plugin authors and cluster administrators are responsible for the safety of
+the privileged implementation.
 
 The administrator grants the DaemonSet the host PID visibility and host mounts
 needed by its implementation. Privileged mode alone does not provide those
@@ -66,7 +68,7 @@ alone does not mean the plugin is usable.
 
 | RPC | Purpose |
 | --- | --- |
-| `GetInfo` | Return stack identity, supported RPC API versions, capabilities, and required shared hypervisor device, if any. |
+| `GetInfo` | Return stack identity, supported RPC API versions, capabilities, and required shared hypervisor device. |
 | `AdjustVMIResources` | Apply backend-specific VM resource adjustments. |
 | `HandleHousekeepingResources` | Configure supporting VM processes and threads. |
 | `GetNodeLabels` | Return opaque node-label key/value pairs. |
@@ -95,15 +97,87 @@ collisions between stacks.
 
 Core remains the sole kubelet device-plugin registrar for shared hypervisor
 devices reported by `GetInfo` and deduplicates reports from multiple stacks.
-Exclusive devices remain outside this mechanism.
+Every runtime plugin must report a hypervisor device; device-less plugins are
+not supported. Exclusive devices remain outside this mechanism.
 
 The handler uses the VMI's resolved stack identity, preserved for its lifetime.
-The user should specify the virt-stack for a given VMI using its a field in its spec.
+The user selects the virtualization stack through a field in the VMI spec.
 Plugin failure must not redirect an alternate-stack VMI to built-in QEMU logic.
 
 With the feature gate disabled, default behavior is unchanged. Default and
 legacy VMIs retain the built-in implementation. New handlers must continue
 managing existing launchers without recreating their pods.
+
+### Launcher ownership conventions
+
+Retain existing file, device, and TAP ownership conventions for now. Non-root
+launcher implementations use UID/GID 107; this is a shared convention, not a
+QEMU requirement. The handler's existing `qemu` account lookup remains compatible
+with that identity. Configurable launcher ownership is follow-up work, not a
+prerequisite for the runtime plugin interface.
+
+### Node topology
+
+Handler core discovers host topology directly from Linux sysfs, independently
+of the selected stack. It supplies NUMA nodes, memory, hugepage information,
+node distances, and CPU topology through the existing launcher Command API.
+Libvirt capability XML is no longer the source of this topology.
+
+Plugin-based startup must not require the Libvirt node-labeller init container
+or its capability files. Stack-specific labels still come from `GetNodeLabels`.
+
+### Guest-agent status
+
+Adopt the separation proposed in
+[kubevirt/kubevirt#15402](https://github.com/kubevirt/kubevirt/pull/15402)
+(closed without merging). Guest-agent connection detection and support checks
+belong in the launcher, not the runtime DaemonSet or handler core.
+
+Extend the existing `GetGuestInfo` response with:
+
+| Field | Meaning |
+| --- | --- |
+| `GuestAgentConnected` | Whether the guest agent is connected. |
+| `GuestAgentSupported` | Whether it supports the operations required for this VMI. |
+| `GuestAgentUnsupportedReason` | Explanation when a connected agent is unsupported. |
+
+Each launcher implements these checks for its own agent. The Libvirt launcher
+owns the `org.qemu.guest_agent.0` channel check, required QEMU guest-agent
+commands, and supported-version fallback. Core supplies relevant VMI and
+configuration data but only uses the returned fields to maintain
+`AgentConnected` and `UnsupportedAgent` conditions.
+
+Prefer connection events and cached capability information over additional
+connection polling. Refresh the cache on reconnect or relevant configuration
+changes; continue polling guest information that can change while connected.
+
+Keep the RPC name and preserve compatibility with older launchers through
+Command API version negotiation. Missing status fields must not be interpreted
+as a disconnected or unsupported agent. Older launchers retain the existing
+handler-side checks; plugin launchers must support the extended response.
+Update guest-info REST, metrics, and freezer callers together. No new runtime
+RPC is needed.
+
+### Console and downward metrics
+
+Launcher plugins retain the existing console socket directory:
+
+```text
+/run/kubevirt-private/<VMI-UID>/
+```
+
+For supported features, they provide `virt-vnc`, `virt-serial0`, and
+`virt-usbredir-<slot>` sockets with the corresponding protocols. Handler core
+continues connecting and forwarding directly; no console discovery RPC is added.
+
+Add `GetVmmVersion` to the launcher Command API without removing `GetQemuVersion`.
+Each launcher returns its own VMM version information, which the downward
+metrics reporter accesses through the generic `GetVmmVersion` client method.
+The client tries the new RPC and falls back to `GetQemuVersion` only on gRPC
+`Unimplemented`, not on timeouts or other errors. New Libvirt launchers serve
+both names through the same implementation so older handlers also work.
+Keep the legacy RPC for the supported compatibility window; running VMIs do
+not need their launcher pods restarted.
 
 ### Live migration
 
@@ -170,7 +244,8 @@ length limits. Legacy launchers retain their existing socket-path convention.
 4. **Discover and negotiate.** Each handler observes the registration, connects
    locally, calls `GetInfo`, and chooses a compatible API version.
 5. **Prepare the node.** The handler calls `GetNodeLabels`, applies labels,
-   and updates shared device registrations using the `GetInfo` response.
+   updates shared device registrations using the `GetInfo` response, and
+   discovers host topology directly.
 6. **Create a VMI.** The controller uses the matching controller plugin to
    render a launcher pod with selectors for a compatible, available node.
 7. **Invoke the runtime.** During VMI reconciliation, the handler calls the
@@ -192,14 +267,31 @@ with the controller-plugin VEP.
 3. Add feature-gated registration watching, socket mounts, connection handling,
    and API negotiation to `virt-handler`.
 4. Route resource and housekeeping calls using the resolved VMI stack identity;
-   preserve the existing launcher Command and Notify APIs.
+   preserve compatibility with the launcher Command and Notify APIs.
 5. Add opaque-label ownership, per-stack availability, and shared-device
    aggregation. Coordinate selection and scheduling with the controller VEP.
 6. Add runtime migration endpoint preparation and named port mappings. Reuse
    core TLS proxies with the shared source socket convention, retaining the
    legacy migration path and unchanged launcher Command API.
-7. Provide a reference runtime DaemonSet and installation manifests; exercise
+7. Move guest-agent connection and support checks into the launcher, extend
+   `GetGuestInfo`, and update its callers and generated schemas. Preserve
+   legacy-launcher behavior and use connection events where available.
+8. Replace Libvirt-derived node topology with direct core discovery, preserving
+   the topology fields sent to launchers. Remove the unconditional Libvirt
+   node-labeller startup dependency for plugin-based operation.
+9. Document console and ownership requirements. Add `GetVmmVersion` across the
+   Command API, launchers, and downward metrics reporter, with legacy RPC
+   fallback and dual-method support in new Libvirt launchers.
+10. Provide a reference runtime DaemonSet and installation manifests; exercise
    the full registration-to-invocation flow and legacy-launcher compatibility.
 
-Rollback with alternate-stack VMIs, the availability-label
-format, and single-versus-multiple device reporting remain open.
+Follow-up details:
+
+- CBT readiness currently depends on `api.Domain` disk `DataStore` fields.
+  A backend-independent readiness contract still needs agreement.
+- SEV device preparation and its mapping to runtime RPCs need specification;
+  the existing attestation Command API remains the starting point.
+- QEMU-specific emulation status and error-string handling need normalization
+  or explicit launcher compatibility requirements.
+- Rollback with alternate-stack VMIs, the availability-label format, and
+  single-versus-multiple device reporting remain open.
