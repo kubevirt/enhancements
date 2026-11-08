@@ -510,6 +510,8 @@ More details can be found in vep300
 
 **v1.11.** This phase adds a VMI API for **host-allocation intent**: which domain vCPUs belong to which host CPU allocation groups, and whether those groups are exclusive or shared. Phases 1 and 2 do not have that. Leaving the mapping only in the provisioner would make virt-launcher unable to build domain XML.
 
+The use cases and requirements for this phase are collected in [CPU sharing requirements](cpu-sharing-requirements.md).
+
 One advanced example is mixed exclusive and shared host CPUs. Consider two VMIs, each with four domain vCPUs:
 
 - **VMI1** needs four exclusive host CPUs, each domain vCPU pinned 1:1.
