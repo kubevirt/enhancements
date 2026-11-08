@@ -160,3 +160,37 @@ VM B is the same with CPUs 1 and 5 in place of 0 and 4. The shared lines are ide
 1. **Isolation.** May exclusive-CPU VMs, other pods or host processes run on a shared pool's CPUs?
 2. **Accounting.** What does a VM on a shared pool count against the node's allocatable CPU and its pod's CPU request, and which QoS class does the pod get?
 3. **Guest topology.** In shared + exclusive, should the guest see that its exclusive vCPUs are SMT siblings? Scenario 3 shows them as separate single-thread cores.
+
+## Related designs
+
+These are the designs proposed so far in the VEP 152 and VEP 300 reviews. They are listed for reference; this document does not choose between them. For v1.10 the reviews settled on the generated exclusive claim (VEP 152) and aligned claims (VEP 300), and left shared CPUs to Phase 3 ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5502428224), [comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+
+### How a VM says which vCPUs are exclusive or shared (R6)
+
+- **A1. Claim references on the CPU.** A list of claim references under `domain.cpu`, so that shared cores come from one claim and dedicated cores from another ([proposal](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849067984)). Not adopted: reviewers objected to claim references on the CPU field ([comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849154642), [comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3866548120)), and Phase 1 has no VMI API change.
+- **A2. `hostAllocation.groups` with access mode and mapping policy.** Each group targets a set of vCPUs and asks for a number of host CPUs with `accessMode: Exclusive | Shared` and `mappingPolicy: OneToOne | SharedSet` ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5453934486)). This is the discussion example in [Phase 3](vep.md#phase-3--advanced-use-cases-host-allocation-intent).
+- **A3. Trimmed groups.** `groups: [{vcpus, exclusive, hostCPUs}]`. `dedicatedCpuPlacement` expands to one all-exclusive group and cannot be combined with groups ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5485228539)).
+- **A4. CPU classes.** `cpu.classes: [{name, count, isolation: exclusive | shared}]` ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+- **A5. CPU profiles.** `cpu.profile: <name>`, where a documented convention defines the split and a policy supplies the details ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+- **A6. No new VM API.** Keep `dedicatedCpuPlacement`, `isolateEmulatorThread` and the IO thread settings, and let an admin-defined policy or translation layer decide oversubscription and mapping ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5500327129), [comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5490850285)). The counter-argument is that virt-launcher renders the domain XML without access to such policies, so the mapping has to reach it through the VMI ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5502428224)).
+
+### Who builds the claim, and how shared CPUs are allocated (R2–R5)
+
+- **B1. `ManagedClaimProvisioner`.** The VMI names a provisioner, and a provisioner controller generates the claim, including `matchAttribute` constraints. CPUs are requested as consumable capacity from a group device ([VEP 300](https://github.com/kubevirt/enhancements/pull/432)).
+- **B2. `ManagedClaimPolicy`.** A MigrationPolicy-style object selects VMIs by label and passes parameters, such as alignment, exclusive and shared counts and an oversubscription ratio, to a provisioner. Claim names reach virt-controller through VMI status and a `ManagedClaimsReady` condition. Each VMI gets its own claim against the same capacity pool; a single claim shared by many VMIs (`claimScope: Group`) is left for later ([proposal](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)).
+- **B3. One claim with exclusive and shareable devices.** The provisioner creates one claim per VM that holds both exclusive and shareable CPU devices ([Phase 3](vep.md#phase-3--advanced-use-cases-host-allocation-intent)).
+- **B4. One claim shared across VMIs.** Several VMIs reference the same claim for their shared CPUs ([proposal](https://github.com/kubevirt/enhancements/pull/414#discussion_r3849067984)). The alternative view is per-VMI claims against a shared pool, because a claim usually has one consumer ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)).
+- **B5. Driver support.** Mixed exclusive and shared allocation is tracked in dra-driver-cpu [#103](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/103) and [#305](https://github.com/kubernetes-sigs/dra-driver-cpu/issues/305). The device layout is not decided yet and may need node cgroup changes and KEP-5517 ([comment](https://github.com/kubevirt/enhancements/pull/414#discussion_r3850303128)).
+
+### How placement becomes visible (R7)
+
+- **C1. Device metadata.** virt-launcher reads the allocated CPUs from KEP-5304 device metadata ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5443995265)).
+- **C2. Publishing placement to the guest.** Expose the allocated CPUs inside the guest through a stable convention, as [kubevirt#6946](https://github.com/kubevirt/kubevirt/pull/6946) does for device NUMA information ([comment](https://github.com/kubevirt/enhancements/pull/432#issuecomment-5520019159)).
+
+### Coverage of the requirements
+
+- **R2 and R3:** B2 is the only concrete proposal for a bounded shared pool, and it depends on B5.
+- **R4:** B1 and B2 constraints can keep both parts in one topology domain. An L3-cache domain would also need a driver attribute to match on.
+- **R5:** depends on B5.
+- **R6:** A2–A5 map vCPUs to groups, but none places the emulator and IO threads on the shared part, as scenario 3 does. A6 does not meet R6.
+- **Open question 3** relates to C2: both are about what the guest can learn about its placement.
