@@ -115,6 +115,7 @@ documentation before adoption.
 - [kubevirt/enhancements](https://github.com/kubevirt/enhancements) — initial adopter
 - [kubevirt/hyperconverged-cluster-operator](https://github.com/kubevirt/hyperconverged-cluster-operator) — initial adopter
 - [kubevirt/monitoring](https://github.com/kubevirt/monitoring) — initial adopter
+- [kubevirt/coderabbit](https://github.com/kubevirt/coderabbit) — central CodeRabbit configuration; holds the shared `linked_repositories` roster
 - Other kubevirt repositories — opt-in at their own discretion
 
 ## Design
@@ -184,15 +185,31 @@ as contributors identify areas where review quality would benefit from more cont
 
 `knowledge_base.linked_repositories` gives CodeRabbit cross-repo context during reviews,
 enabling it to trace dependencies, verify API compatibility, and surface breaking changes across
-related codebases. Each repository lists the repos it depends on or that depend on it.
+related codebases.
 
-For example, kubevirt/kubevirt and kubevirt/enhancements have a natural dependency: implementation
-PRs in kubevirt/kubevirt reference VEPs in kubevirt/enhancements. Linking them lets CodeRabbit
-verify that an implementation aligns with the API shape, phasing plan, and non-goals described
-in the referenced VEP, without the reviewer having to locate and cross-check it manually.
+The shared roster lives in [`kubevirt/coderabbit`](https://github.com/kubevirt/coderabbit)
+(`.coderabbit.yaml`). That file is the only place that lists every CodeRabbit adopter. Adding
+an adopter is a pull request against that file, not an edit in every other repository.
+Tracked by [kubevirt/enhancements#512](https://github.com/kubevirt/enhancements/issues/512).
+
+CodeRabbit ignores the central file when a repository already has its own `.coderabbit.yaml`,
+unless both files set `inheritance: true`. Adopters keep their review settings locally and set
+the flag so the roster is merged in:
 
 ```yaml
-# Example: kubevirt/kubevirt linking to kubevirt/enhancements
+# kubevirt/coderabbit/.coderabbit.yaml
+inheritance: true
+knowledge_base:
+  linked_repositories:
+    - repository: "kubevirt/kubevirt"
+      instructions: "KubeVirt repository with CodeRabbit installed. Use for cross-repository context."
+    - repository: "kubevirt/enhancements"
+      instructions: "VEP proposals. Use when a PR references a VEP."
+```
+
+```yaml
+# An adopter that needs a repository-specific instruction
+inheritance: true
 knowledge_base:
   linked_repositories:
     - repository: "kubevirt/enhancements"
@@ -201,8 +218,29 @@ knowledge_base:
         phasing plan, and non-goals."
 ```
 
-Each repository's maintainers determine which linked repositories are relevant and provide
-instructions that describe the nature of the dependency.
+`linked_repositories` is merged in this order:
+
+1. Entries in the repository's own `.coderabbit.yaml` are added first. If both files name the
+   same repository, the local `instructions` are used and the central copy does not take a
+   second slot.
+2. Entries from `kubevirt/coderabbit/.coderabbit.yaml` are appended, skipping duplicates.
+3. The merged list is cut to the plan limit (10 on the current plan). Local entries are kept.
+   Inherited entries past the limit are dropped from the tail, and the review summary names
+   them. A repository that already lists 10 links keeps those 10. One that lists 4 keeps those
+   4 and then takes up to 6 from the central roster.
+
+Repository-specific instructions stay in the consumer's file. Examples are VEP checks in
+kubevirt/kubevirt, operator CR checks in kubevirt/hyperconverged-cluster-operator, and
+alert-definition search in kubevirt/monitoring. The central file does not copy review profiles,
+path instructions, or other knowledge-base settings.
+
+On a public repository, CodeRabbit blocks some features until the repository has at least 10
+GitHub stars. Automatic PR review is one of those features. A public repository under that line
+is not added to the roster and does not receive an inheritance pull request.
+`kubevirt/coderabbit` is created so CodeRabbit can read the central file; automatic PR review
+on that repository itself stays off until it reaches 10 stars. `k8snetworkplumbingwg/kubemacpool`
+cannot be linked from GitHub Cloud, because links must stay inside the kubevirt organization,
+and it is not part of the roster.
 
 ### Feedback and Iteration
 
