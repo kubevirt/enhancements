@@ -151,10 +151,9 @@ or adapt the existing KubeVirt code.
 
 #### `HandleHousekeepingResources`
 
-**Arguments:** VMI snapshot, local node identity, and serialized CPU-placement
-information needed by the backend, such as the emulator CPU set. The portable
-CPU-placement schema remains to be defined; do not pass `cgroup.Manager` or the
-handler's `api.Domain` object as the runtime contract.
+**Arguments:** Serialized VMI and Domain snapshots, plus local node identity.
+The Domain snapshot may be absent. No controller objects, cgroup managers,
+isolation objects, or core callbacks cross the RPC boundary.
 
 **Returns:** Success or an error.
 
@@ -165,9 +164,21 @@ CPU set, moving non-vCPU threads, setting realtime vCPU scheduling, and applying
 PIT-thread scheduling/affinity where required. Other runtimes implement their
 equivalent behavior without assuming QEMU thread names or cgroup layout.
 
-The runtime owns its process discovery and housekeeping cgroup operations.
-Missing or not-yet-observed placement information must not be treated as a fresh
-post-sync backend state.
+Use the launcher socket/PID discovery described for `AdjustVMIResources`, then
+inspect `/proc/<launcher-PID>/cgroup` to locate the original container cgroup.
+The runtime owns discovery, cgroup handling, and backend thread configuration;
+it does not call handler helpers.
+
+The runtime may use Domain fields such as `CPUTune.EmulatorPin` for placement.
+If Domain cannot represent the needed information, it queries its launcher
+through a backend-specific UNIX socket. Launcher and runtime authors agree on
+the path and protocol; the socket directory must also be accessible to the
+runtime DaemonSet. This does not replace the handler-launcher Command/Notify
+APIs or Domain reporting required by core.
+
+Domain is an observed snapshot, not guaranteed fresh after synchronization.
+The runtime handles absent or stale information or queries its launcher for
+current state. A stack-agnostic replacement for Domain is outside this VEP.
 
 #### `GetNodeLabels`
 
@@ -413,7 +424,7 @@ installation. Each is discovered independently; existing VMIs are unchanged.
    behavior; keep them available for default and legacy VMIs.
 2. Define protobuf requests, responses, discovery negotiation, errors, and
    retry-safe operation semantics. Implement plugin-owned launcher discovery
-   for resource adjustment; define the portable housekeeping placement input
+   for resource adjustment and housekeeping. Pass serialized VMI/Domain data
    without handler object dependencies.
 3. Add operator-bootstrap CRD installation and feature-gated registration
    watching. Retain the default node-labeller init container.
