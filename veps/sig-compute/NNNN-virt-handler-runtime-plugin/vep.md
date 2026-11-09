@@ -87,13 +87,111 @@ against the registration and selects the highest mutually supported API version.
 No shared version or a missing required RPC makes that runtime unavailable.
 The negotiated version is used for subsequent calls.
 
-Per-VMI requests carry the VMI UID, launcher pod UID, node identity, and relevant
-VMI, domain, and configuration data. The plugin verifies the target before
-operating on its processes. Protobuf schemas will define the exact fields.
+Requests contain serialized data, not handler controller objects, cgroup
+managers, or isolation objects. The plugin verifies the target before operating
+on its processes. The logical arguments below will be defined in protobuf.
 Repeated resource and housekeeping calls must be safe.
 
 RPCs have deadlines and return explicit errors. The handler retries temporary
 failures and reports errors on affected VMIs.
+
+### RPC arguments and runtime behavior
+
+#### `GetInfo`
+
+**Arguments:** None; this is the initial call before API version negotiation.
+
+**Returns:** Stack identity, supported runtime API versions, capabilities, and
+the required shared hypervisor device.
+
+**Runtime behavior:** Report the implementation's identity and supported
+operations. Core checks these against the registration and negotiates a version
+before invoking the other RPCs. Device registration remains core's responsibility.
+
+#### `AdjustVMIResources`
+
+**Arguments:** VMI snapshot, including its UID, resource requirements, lifecycle
+and migration status, and `Status.ActivePods`; local node identity. The current
+Libvirt implementation does not use the full KubeVirt configuration.
+
+**Returns:** Success or an error.
+
+**Runtime behavior:**
+
+1. Determine whether the VMI needs backend-specific resource adjustments.
+2. Find the local launcher socket and obtain its server PID as described below.
+3. Locate the backend's VMM or supporting daemon. The Libvirt implementation
+   adjusts `virtqemud` before local QEMU creation and QEMU once it is running.
+4. Apply the required adjustments. Today this sets unlimited memory-lock limits
+   for workloads requiring locked memory, including VFIO, realtime, and SEV.
+
+Core retains calls before VM startup, after migration-target preparation, when
+the target domain is detected, and before host-device hotplug. It does not
+choose backend processes or prescribe individual resource-limit changes.
+
+**Launcher discovery:** Virt-controller maintains `VMI.Status.ActivePods` as
+pod UID to node name; handler passes that observed information in the request.
+The runtime filters entries for its node and checks each candidate's socket:
+
+```text
+<kubelet-pods-mount>/<pod-UID>/volumes/kubernetes.io~empty-dir/sockets/launcher-sock
+```
+
+The existing handler mounts the kubelet pods directory at `/pods`. The plugin
+needs access to the same host directory, but may use a different mount path.
+Exactly one matching local socket must exist; absence or ambiguity returns an
+error for retry. During migration, node filtering distinguishes source and
+target launchers on different nodes.
+
+Connect to the UNIX socket and use Linux `SO_PEERCRED` to obtain its server PID.
+The plugin needs host PID visibility and may inspect the server's parent and
+process tree to locate its VMM. These are plugin-owned discovery steps, not
+handler callbacks. An SDK is follow-up work; authors can implement them directly
+or adapt the existing KubeVirt code.
+
+#### `HandleHousekeepingResources`
+
+**Arguments:** VMI snapshot, local node identity, and serialized CPU-placement
+information needed by the backend, such as the emulator CPU set. The portable
+CPU-placement schema remains to be defined; do not pass `cgroup.Manager` or the
+handler's `api.Domain` object as the runtime contract.
+
+**Returns:** Success or an error.
+
+**Runtime behavior:** Discover the local launcher and backend threads, then
+apply supporting-process and thread policy after launcher synchronization.
+For Libvirt/KVM this includes creating the housekeeping cgroup, assigning its
+CPU set, moving non-vCPU threads, setting realtime vCPU scheduling, and applying
+PIT-thread scheduling/affinity where required. Other runtimes implement their
+equivalent behavior without assuming QEMU thread names or cgroup layout.
+
+The runtime owns its process discovery and housekeeping cgroup operations.
+Missing or not-yet-observed placement information must not be treated as a fresh
+post-sync backend state.
+
+#### `GetNodeLabels`
+
+**Arguments:** Local node identity and relevant label-generation configuration.
+
+**Returns:** Opaque node-label key/value pairs.
+
+**Runtime behavior:** Discover the stack's local capabilities and generate the
+labels agreed with its controller plugin. Core applies them, tracks ownership,
+and removes stale labels. The runtime does not write Kubernetes node labels or
+provide core's host topology.
+
+#### `GetMigrationEndpoints`
+
+**Arguments:** VMI snapshot, local node identity, and migration UID identifying
+the target preparation.
+
+**Returns:** An array of socket entries, each containing `name` and `path`.
+
+**Runtime behavior:** After target launcher synchronization, perform any
+backend-specific preparation or repairs and return sockets accepting connections.
+Paths refer to the target launcher's filesystem and must be accessible to core.
+Core creates the TLS listeners and publishes named destination ports; the
+runtime does not own TLS certificates or network forwarding.
 
 ### Labels, devices, and choosing the plugin
 
@@ -314,7 +412,9 @@ installation. Each is discovered independently; existing VMIs are unchanged.
 1. Isolate existing resource and housekeeping implementations without changing
    behavior; keep them available for default and legacy VMIs.
 2. Define protobuf requests, responses, discovery negotiation, errors, and
-   retry-safe operation semantics.
+   retry-safe operation semantics. Implement plugin-owned launcher discovery
+   for resource adjustment; define the portable housekeeping placement input
+   without handler object dependencies.
 3. Add operator-bootstrap CRD installation and feature-gated registration
    watching. Retain the default node-labeller init container.
    Add socket mounts, connection handling, and API negotiation to `virt-handler`.
