@@ -80,7 +80,6 @@ retries are independent for each registration.
 | `AdjustVMIResources` | Apply backend-specific VM resource adjustments. |
 | `HandleHousekeepingResources` | Configure supporting VM processes and threads. |
 | `GetNodeLabels` | Return opaque node-label key/value pairs. |
-| `GetMigrationEndpoints` | Prepare target migration sockets and return their names and paths. |
 
 `GetInfo` uses a fixed discovery schema. The handler verifies the stack identity
 against the registration and selects the highest mutually supported API version.
@@ -190,19 +189,6 @@ current state. A stack-agnostic replacement for Domain is outside this VEP.
 labels agreed with its controller plugin. Core applies them, tracks ownership,
 and removes stale labels. The runtime does not write Kubernetes node labels or
 provide core's host topology.
-
-#### `GetMigrationEndpoints`
-
-**Arguments:** VMI snapshot, local node identity, and migration UID identifying
-the target preparation.
-
-**Returns:** An array of socket entries, each containing `name` and `path`.
-
-**Runtime behavior:** After target launcher synchronization, perform any
-backend-specific preparation or repairs and return sockets accepting connections.
-Paths refer to the target launcher's filesystem and must be accessible to core.
-Core creates the TLS listeners and publishes named destination ports; the
-runtime does not own TLS certificates or network forwarding.
 
 ### Labels, devices, and choosing the plugin
 
@@ -338,19 +324,23 @@ not need their launcher pods restarted.
 
 ### Live migration
 
-Keep the existing migration sequence and launcher Command API.
+Keep the existing migration sequence and launcher Command API RPC names.
 Each launcher plugin implements `SyncMigrationTarget`, `MigrateVirtualMachine`,
 `CancelVirtualMachineMigration`, and `FinalizeVirtualMachineMigration` using
 its native virtualization stack.
 
-The runtime plugin performs backend-specific node preparation, including socket
-setup and repairs. Core owns the TLS listeners, certificates, and forwarding
+The target launcher creates and serves its backend's migration UNIX sockets.
+It reports their endpoints directly to core; no runtime endpoint-discovery RPC
+is needed. Any required privileged node preparation remains a runtime
+responsibility. Core owns the TLS listeners, certificates, and forwarding
 between nodes.
 
-`GetMigrationEndpoints` returns an array, with one entry per target socket:
+Extend the existing `SyncMigrationTarget` response with an optional
+`migrationEndpoints` array, with one entry per target socket:
 
 ```yaml
-sockets:
+success: true
+migrationEndpoints:
   - name: libvirt-migration-control
     path: /run/libvirt/virtqemud-sock
   - name: libvirt-migration-state
@@ -358,19 +348,28 @@ sockets:
 ```
 
 Paths refer to the target launcher's filesystem and must be accessible to
-`virt-handler`. The call succeeds once the sockets accept connections.
+`virt-handler`. For endpoint-reporting launchers, success means all returned
+sockets accept migration connections, not merely that configuration was accepted.
+Preparation still in progress returns a retryable result; core does not publish
+destination ports or start source migration until preparation succeeds.
 Names are opaque to core; the source and target plugins agree on their meaning.
 A backend needing only one socket returns one entry.
+
+Add the optional repeated field to the shared protobuf `Response`, preserving
+existing fields and the RPC signature. Older handlers ignore the new field;
+new handlers retain the hardcoded endpoint convention for older built-in
+launchers that do not report endpoints. Custom launchers must supply endpoints;
+an absent list must not trigger Libvirt fallback.
 
 The flow is:
 
 1. Target handler prepares storage, networking, and devices, then calls the
    target launcher's `SyncMigrationTarget`. Source and target use the VMI's
    selected stack; migration does not switch stacks.
-2. Target handler calls the runtime plugin's `GetMigrationEndpoints`, passing
-   the VMI and migration identity.
-3. Target handler creates a TLS listener for each socket and publishes the
-   target address and socket-name-to-TCP-port mapping in VMI migration status.
+2. Target launcher returns success with ready migration endpoints.
+3. Target handler uses the response to create a TLS listener for each socket
+   and publishes the target address and socket-name-to-TCP-port mapping in VMI
+   migration status.
 4. Source handler reads that mapping and creates a local UNIX proxy for each
    name, forwarding to the corresponding target TLS port.
 5. After source node preparation, source handler invokes the launcher's
@@ -384,9 +383,10 @@ Source proxy paths follow a shared convention:
 <virtShareDir>/migration-sockets/<migration-UID>/<socket-name>.sock
 ```
 
-Core and launcher use the same path construction; no socket-path list is added
-to the Command API. Names must be filename-safe and paths must fit UNIX-socket
-length limits. Legacy launchers retain their existing socket-path convention.
+Core and launcher use the same source path construction; target endpoint paths
+are not passed to `MigrateVirtualMachine`. Names must be filename-safe and paths
+must fit UNIX-socket length limits. Legacy launchers retain their existing
+socket-path convention.
 
 ### End-to-end installation and invocation
 
@@ -435,9 +435,9 @@ installation. Each is discovered independently; existing VMIs are unchanged.
    independent per-stack readiness after the handshake, label application, and
    device-plugin startup.
    Coordinate per-VMI selection and scheduling with the controller VEP.
-6. Add runtime migration endpoint preparation and named port mappings. Reuse
-   core TLS proxies with the shared source socket convention, retaining the
-   legacy migration path and unchanged launcher Command API.
+6. Extend `SyncMigrationTarget` responses with ready migration endpoints and
+   add named port mappings. Reuse core TLS proxies with the shared source socket
+   convention, retaining compatibility with legacy built-in launchers.
 7. Move guest-agent connection and support checks into the launcher, extend
    `GetGuestInfo`, and update its callers and generated schemas. Preserve
    legacy-launcher behavior and use connection events where available.
