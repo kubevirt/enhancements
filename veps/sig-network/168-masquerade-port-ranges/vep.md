@@ -99,6 +99,7 @@ The following validation rules will apply:
 - For each range, the `start` field must be less than or equal to `end`.
 - If two or more ranges are specified, they must not overlap **unless they use different protocols** (e.g. a TCP range can overlap with a UDP range, but two TCP ranges must not overlap).
 - All port numbers must be valid (0 < x < 65536).
+- A maximum of 10 port ranges can be specified per interface.
 - Additional checks may be added for security and consistency as needed.
 
 #### Note on mutual exclusivity
@@ -278,16 +279,13 @@ The proposed modification poses no scalability problems: it can actually make fo
   - Valid port numbers
   - Overlap checks (disallowed for same protocol, allowed for different)
   - Mutual exclusivity with the Ports field
+- PortRanges validation errors are properly reported
+- Invalid or not correct fields in the templates are rejected with appropriate errors.
 - Checks for the updated masquerade rules creation logic
 
 ### Functional Tests
 
-- PortRanges validation errors are properly reported
 - Forwarding of both the range delimiting ports and of at least one inner port is verified against a running cluster.
-
-### Integration Tests
-
-- Invalid or not correct fields in the templates are rejected with appropriate errors.
 
 ## Implementation History
 
