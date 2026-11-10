@@ -14,7 +14,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 -->
 
 - This VEP targets alpha for version: v1.10
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -23,7 +23,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [X] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -240,11 +240,8 @@ An overview on the approaches used to functional test this design)
 
 ## Implementation History
 
-<!--
-For example:
-01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
-03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
--->
+- **2026-09-02:** Merged [VEP proposal](https://github.com/kubevirt/enhancements/pull/343).
+- **2026-10-22:** Merged [alpha implementation](https://github.com/kubevirt/kubevirt/pull/18249) (`SCSIMultiIOThread` feature gate, virtio-scsi multi IOThread support, and `MultiIOThreadAutoPolicy` for virtio-blk `auto` behavior).
 
 ## Graduation Requirements
 
@@ -265,13 +262,17 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 -->
 
 ### Alpha
-- [ ] Add new `SCSIMultiIOThread` feature gate to guard changes for virtio-scsi
-- [ ] Add new KubeVirt configuration `MultiIOThreadAutoPolicy` to toggle new `auto` policy behavior for virtio-blk.
-- [ ] Updates to virtio-scsi controller
-- [ ] Updates to `auto` policy behavior for virtio-blk
+- [X] Add new `SCSIMultiIOThread` feature gate to guard changes for virtio-scsi
+- [X] Add new KubeVirt configuration `MultiIOThreadAutoPolicy` to toggle new `auto` policy behavior for virtio-blk.
+- [X] Updates to virtio-scsi controller
+- [X] Updates to `auto` policy behavior for virtio-blk
+- [X] Unit and functional test coverage for new feature
 
 ### Beta
-- [ ] Successful performance testing
+- [ ] Successful performance testing showing virtio-scsi benefits from iothread-vq-mapping (comparable to virtio-blk)
+- [ ] User-guide documentation added for `SCSIMultiIOThread` usage
+- [ ] E2E tests covering upgrade/rollback scenarios
+- [ ] Feature gate enabled by default (still disable-able)
 
 ### GA
 - [ ] Feature gate is graduated
