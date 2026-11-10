@@ -123,19 +123,23 @@ documentation before adoption.
 ### GitHub App Installation
 
 The CodeRabbit GitHub App is installed on the kubevirt organization, scoped initially to
-kubevirt/kubevirt and kubevirt/enhancements. CodeRabbit is free for public and open-source
-repositories with no seat limit.
+kubevirt/kubevirt, kubevirt/enhancements, and kubevirt/coderabbit. The installation on
+kubevirt/coderabbit is required before any adopter uses the central file. Creating that
+repository does not let CodeRabbit read `.coderabbit.yaml`. CodeRabbit is free for public
+and open-source repositories with no seat limit.
 
 ### Per-Repository Configuration
 
-Each participating repository places a `.coderabbit.yaml` file at its root. This file is a
-**living document**: it is expected to evolve continuously as contributor feedback is gathered
-and the knowledge base matures. Progression to more assertive settings happens only when the
-community is satisfied with the precision and relevance of reviews.
+A participating repository either uses the central configuration with no local file, or places
+a `.coderabbit.yaml` at its root. A local file is a **living document**: it is expected to
+evolve continuously as contributor feedback is gathered and the knowledge base matures.
+Progression to more assertive settings happens only when the community is satisfied with the
+precision and relevance of reviews.
 
 Initial baseline (low-friction, advisory only):
 
 ```yaml
+inheritance: true
 language: en-US
 reviews:
   profile: chill
@@ -155,6 +159,17 @@ Path-specific instructions are added for directories or file types that carry do
 conventions (e.g., API types, VEP documents, test helpers). Instructions are written in
 plain English and reference the relevant sections of contribution guidelines or architecture
 documents directly.
+
+#### Onboarding a new repository
+
+A repository that only wants CodeRabbit, with no repository-specific review rules, does not add
+a `.coderabbit.yaml`. CodeRabbit then uses
+[`kubevirt/coderabbit/.coderabbit.yaml`](https://github.com/kubevirt/coderabbit) as the whole
+configuration for that repository. That is enough to pick up the shared `linked_repositories`
+roster. The CodeRabbit GitHub App must still be installed on the repository.
+
+A public repository under 10 GitHub stars can onboard this way, but automatic PR review stays
+blocked until it reaches 10 stars, and it is not added to the central roster until then.
 
 ### Knowledge Base
 
@@ -193,12 +208,15 @@ an adopter is a pull request against that file, not an edit in every other repos
 Tracked by [kubevirt/enhancements#512](https://github.com/kubevirt/enhancements/issues/512).
 
 CodeRabbit ignores the central file when a repository already has its own `.coderabbit.yaml`,
-unless both files set `inheritance: true`. Adopters keep their review settings locally and set
-the flag so the roster is merged in:
+unless that file sets `inheritance: true`. The local flag merges the adopter's settings with
+the central roster. It is not required on the central file. Setting it there continues the
+merge into lower-priority sources, including repository and organization UI settings, and
+those UI settings then apply to adopters that have no local file. The central file leaves
+`inheritance` unset so the chain stops at the roster. Adopters keep their review settings
+locally and set the flag so the roster is merged in:
 
 ```yaml
 # kubevirt/coderabbit/.coderabbit.yaml
-inheritance: true
 knowledge_base:
   linked_repositories:
     - repository: "kubevirt/kubevirt"
@@ -237,10 +255,11 @@ path instructions, or other knowledge-base settings.
 On a public repository, CodeRabbit blocks some features until the repository has at least 10
 GitHub stars. Automatic PR review is one of those features. A public repository under that line
 is not added to the roster and does not receive an inheritance pull request.
-`kubevirt/coderabbit` is created so CodeRabbit can read the central file; automatic PR review
-on that repository itself stays off until it reaches 10 stars. `k8snetworkplumbingwg/kubemacpool`
-cannot be linked from GitHub Cloud, because links must stay inside the kubevirt organization,
-and it is not part of the roster.
+`kubevirt/coderabbit` is created and the CodeRabbit GitHub App is installed on it before
+adopters rely on the central file. Creating the repository alone does not let CodeRabbit
+read that file. Automatic PR review on that repository itself stays off until it reaches
+10 stars. `k8snetworkplumbingwg/kubemacpool` cannot be linked from GitHub Cloud, because links
+must stay inside the kubevirt organization, and it is not part of the roster.
 
 ### Feedback and Iteration
 
@@ -259,6 +278,7 @@ No API changes. The following is an illustrative `.coderabbit.yaml` snippet show
 path-specific instructions for kubevirt/kubevirt:
 
 ```yaml
+inheritance: true
 language: en-US
 reviews:
   profile: chill
@@ -313,9 +333,13 @@ verified against the current plan before adoption.
 
 ## Update/Rollback Compatibility
 
-Fully reversible. Removing the GitHub App from a repository or deleting `.coderabbit.yaml` stops
-all CodeRabbit activity immediately. No changes are made to kubevirt source code, build system,
-or CI configuration.
+Fully reversible. Removing the GitHub App from a repository stops all CodeRabbit activity.
+Deleting `.coderabbit.yaml` does not: with the app still installed, CodeRabbit continues
+under the central configuration or its defaults, and automatic review stays on. To stop
+automatic reviews without removing the app, set `reviews.auto_review.enabled` to `false`
+([Automatic review controls](https://docs.coderabbit.ai/configuration/auto-review)).
+On-demand `@coderabbitai` commands still run until the app is removed. No changes are made
+to kubevirt source code, build system, or CI configuration.
 
 ## Functional Testing Approach
 
@@ -338,7 +362,7 @@ Will be updated as implementation proceeds.
 
 ### Alpha
 
-- [ ] CodeRabbit GitHub App installed on kubevirt/kubevirt and kubevirt/enhancements
+- [ ] CodeRabbit GitHub App installed on kubevirt/kubevirt, kubevirt/enhancements, and kubevirt/coderabbit
 - [ ] Initial `.coderabbit.yaml` merged in both repositories with low-friction, advisory-only settings
 - [ ] Knowledge base seeded with contribution guidelines and architecture documentation
 - [ ] First contributor feedback gathered and used to update configuration and knowledge base
