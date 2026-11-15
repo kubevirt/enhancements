@@ -10,53 +10,51 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-At present KubeVirt can only be used to create and manage virtual machines (VMs) via Libvirt on the QEMU virtual-machine monitor (VMM), with only the hypervisor being configurable between KVM and MSHV. However, this design is limited and hard to maintain because in the wider industry, there are an increasing number of VMMs and hypervisors available - such as Cloud Hypervisor, OpenVMM (VMMs) and HyperV (hypervisor). Adding and maintaining support for so many backends in-tree in the core KubeVirt repository would make the code difficult to maintain. Furthermore, the dependence of KubeVirt on LibVirt forces any VMM that could be used to have a LibVirt driver, which is untenable.
+At present KubeVirt can only be used to create and manage virtual machines (VMs) via Libvirt on the QEMU virtual-machine monitor (VMM), with only the hypervisor being configurable between KVM and MSHV. However, this design is limited and hard to maintain because in the wider industry, there are an increasing number of VMMs and hypervisors available - such as Cloud Hypervisor, OpenVMM (VMMs) and HyperV and Xen (hypervisor). Adding and maintaining support for so many backends in-tree in the core KubeVirt repository would make the code difficult to maintain. Furthermore, the dependence of KubeVirt on LibVirt forces any VMM that could be used to have a LibVirt driver, which is untenable.
 
-Therefore, to maximize the adoption of alternative virtualization stacks within KubeVirt, the most preferable design is to decouple it entirely from the underlying virtualization stack components - and make the virt-stack pluggable. Core KubeVirt would provide the orchestration-related functionalities and offload virtualization-related functionalities to the plugin.
+Therefore, to maximize the adoption of alternative virtualization stacks within KubeVirt, the most preferable design is to decouple it entirely from the underlying virtualization stack (virt-stack) components - and make the virt-stack pluggable. Core KubeVirt would provide the orchestration-related functionalities and offload virtualization-related functionalities to the plugin.
 
 This VEP builds on the Hypervisor Generalization VEP ([#98](https://github.com/kubevirt/enhancements/pull/98)) and continues the discussion carried out in [VEP #83](https://github.com/kubevirt/enhancements/pull/83).
 
 ## Motivation
 
-There are multiple reasons to decouple KubeVirt from the underlying virtualization stack components.
+There are multiple reasons to decouple KubeVirt from the underlying virtualization stack components, and **not mandate** the use of Libvirt as an intermediate layer between KubeVirt and the virt-stack.
 
-- Customer scenarios require different virtualization stack components: Given the increasing number of virtualization stack components available today, different customers of KubeVirt would require specific components to cater to their unique needs. Decoupling KubeVirt from Libvirt/QEMU would allow them to use their preferred virtualization stack components.
+- **Customer scenarios require different virtualization stack components**: Given the increasing number of virtualization stack components available today, different customers of KubeVirt would require specific components to cater to their unique needs. Decoupling KubeVirt from Libvirt/QEMU would allow them to use their preferred virtualization stack components. The existence of projects such as [kubeswift](https://github.com/kubeswift-io/kubeswift/) and [virtink](https://github.com/smartxworks/virtink) demonstrate that VMs on alternate virt-stacks are desirable in a K8s environment.
 
-- Limitations and overhead imposed by Libvirt: Libvirt is a management wrapper which executes functions in its API by calling into the underlying VMM. Such functions can be directly invoked against the VMM by virt-launcher, thereby saving the overhead imposed by the Libvirt daemon. The use of Libvirt as the intermediate VM management layer restricts the virtualization stacks that can be used to only those that have a Libvirt driver. For example, OpenVMM does not have a Libvirt driver, and hence cannot be easily integrated into KubeVirt. Libvirt is implemented in C, and a programming language providing easier memory safety would reduce security risks. The plan for incorporating Rust into Libvirt has had relatively slow progress.
+- **Maintaining multiple virtualization stacks in-tree is unmaintainable**: Implementing support for different virtualization stacks directly in the core KubeVirt repository would significantly increase code complexity, testing burden, and maintenance overhead. A plugin-based architecture allows each virtualization stack implementation to be developed and maintained independently, reducing the maintenance burden on the core KubeVirt project.
+
+- **Limitations and overhead imposed by Libvirt**: Libvirt is a management wrapper which executes functions in its API by calling into the underlying VMM. Such functions can be directly invoked against the VMM by virt-launcher, thereby saving the overhead imposed by the Libvirt daemon. The use of Libvirt as the intermediate VM management layer restricts the virtualization stacks that can be used to only those that have a Libvirt driver. For example, OpenVMM does not have a Libvirt driver, and hence cannot be easily integrated into KubeVirt. Libvirt is implemented in C, and a programming language providing easier memory safety would reduce security risks. The plan for incorporating Rust into Libvirt has had relatively slow progress.
 Furthermore, although libvirt provides a useful unified Domain definition across virtualization stacks, it is redundant in the presence of KubeVirt’s own VirtualMachineInstance definition.
 Additionally, KubeVirt only utilizes around 20% (~57/292) of all the Libvirt APIs available –leaving Libvirt significantly underutilized while virt-launcher still incurs the overhead of running the Libvirt daemon.
 
-- Maintaining multiple virtualization stacks in-tree is unmaintainable: Implementing support for different virtualization stacks directly in the core KubeVirt repository would significantly increase code complexity, testing burden, and maintenance overhead. A plugin-based architecture allows each virtualization stack implementation to be developed and maintained independently, reducing the maintenance burden on the core KubeVirt project.
-
 ### Areas of Tight Coupling Between KubeVirt and Libvirt/QEMU/KVM
 
-- Libvirt/QEMU semantics are embedded throughout KubeVirt's CRDs and cluster configuration. For example, `Machine.Type` is documented as a "QEMU machine type", `CPU.Model` refers to the Libvirt CPU model map, `CPUFeature.Policy` uses Libvirt policy names verbatim, and `Disk.IO` specifies which QEMU disk I/O mode should be used. Cluster configuration also exposes `OVMFPath`, `EmulatedMachines`, and `MachineType` as first-class fields. Consequently, the KubeVirt v1 API is effectively a Libvirt/QEMU abstraction in several areas, rather than a virtualization-stack-neutral API.
+- **Hardcoded Libvirt/QEMU in launcher pod rendering logic**: The launcher pod rendering logic in `virt-controller` assumes the presence of a Libvirt daemon and QEMU process in the virt-launcher. Additionally, it also adds fields to the pod spec that are refer to Libvirt and QEMU, e.g., volume `libvirt-runtime`.
 
-- KubeVirt’s virt-launcher is built for Libvirt/QEMU: Although interaction with virt-launcher takes place through well-defined interfaces (CmdServer and NotifyServer), it is not possible to build a virt-launcher component wherein the implementation of those interfaces can be backed by an alternative virtualization stack.
+- **Hardcoded Libvirt/QEMU in virt-handler**: `virt-handler`'s privileged operations on the `virt-launcher` container makes hardcoded assumptions about the virt-stack. E.g., to update the `memlock` limit of a VM's VMM process, the `virt-handler` logic explicitly looks for a `virtqemud` or `qemu-system-x86` process.
 
-- Libvirt domain XML’s mirror `api.Domain` data structure: KubeVirt thoroughly uses the api.Domain data structure to internally represent a virtual machine instance. This definition is meant to mirror Libvirt’s domain definition.
+- **Libvirt/QEMU-specific guest agent status determination**: Virt-Handler checks the state of the Libvirt channel "org.qemu.guest_agent.0” to determine if the guest agent is connected. It also assumes that the guest agent is QEMU Guest Agent and compares the list of supported commands with the set of required commands to determine if the agent is supported.
 
-- Node Labeling involves invoking Libvirt’s QEMU driver: During the initialization of KubeVirt’s virt-handler component on a given node, it generates labels for that node based on the node’s virtualization capabilities. The virt-handler component queries node’s virtualization capabilities by running a virt-launcher container and invoking multiple Libvirt APIs, which in turn query the QEMU VMM. In addition to virtualization capabilities, the node topology is also queried from Libvirt, although that is not tied to the virtualization stack nor used for node labeling.
+- **KubeVirt’s virt-launcher is built for Libvirt/QEMU**: Although interaction with virt-launcher takes place through well-defined interfaces (Command and Notify API in handler-launcher-communication), it is not possible to build a virt-launcher component wherein the implementation of those interfaces can be backed by an alternative virtualization stack.
 
-- Hardcoded Libvirt/QEMU/KVM-specific values in control-plane components: Code of components such as virt-controller and virt-handler contain hardcoded references to one of Libvirt, QEMU or KVM/MSHV. For instance, for computing the memory overhead of the virt-launcher's components, the `LauncherHypervisorResources` interface implementations for both KVM and MSHV assume the presence of a LibVirt daemon and QEMU process in the virt-launcher. Another example is when the virt-handler is called to update the `memlock` limit of a VM's VMM process, and it explicitly looks for a `virtqemud` or `qemu-system-x86` process.
+- **Node Labeling invokes Libvirt's QEMU driver**: During the initialization of KubeVirt’s virt-handler component on a given node, it generates labels for that node based on the node’s virtualization capabilities. The virt-handler component queries node’s virtualization capabilities by running a virt-launcher container and invoking multiple Libvirt APIs, which in turn query the QEMU VMM. In addition to virtualization capabilities, the node topology is also queried from Libvirt, although that is not tied to the virtualization stack nor used for node labeling.
 
-- Libvirt/QEMU-specific guest agent status determination: Virt-Handler checks the state of the Libvirt channel "org.qemu.guest_agent.0” to determine if the guest agent is connected. It also assumes that the guest agent is QEMU Guest Agent and compares the list of supported commands with the set of required commands to determine if the agent is supported.
+- **KubeVirt's v1 API**: Libvirt/QEMU semantics are embedded throughout KubeVirt's CRDs and cluster configuration. For example, `Machine.Type` is documented as a "QEMU machine type", `CPU.Model` refers to the Libvirt CPU model map, `CPUFeature.Policy` uses Libvirt policy names verbatim, and `Disk.IO` specifies which QEMU disk I/O mode should be used. Cluster configuration also exposes `OVMFPath`, `EmulatedMachines`, and `MachineType` as first-class fields. Consequently, the KubeVirt v1 API is effectively a Libvirt/QEMU abstraction in several areas, rather than a virtualization-stack-neutral API.
+
+- **Internal Libvirt domain XML’s mirror `api.Domain` data structure**: KubeVirt thoroughly uses the api.Domain data structure to internally represent a virtual machine instance. This definition is meant to mirror Libvirt’s domain definition.
 
 ## Relationship to KubeVirt Structured Plugins
 
-KubeVirt Structured Plugins provide extension points for adding out-of-tree functionality to specific parts of KubeVirt. They augment the behavior of the core implementation rather than replace its virtualization stack.
-
-Virtualization stack plugins define a different boundary: they replace the Libvirt/QEMU-specific implementation across the relevant KubeVirt components with an implementation for another virtualization stack.
+KubeVirt Structured Plugins provide extension points for adding out-of-tree functionality to specific parts of KubeVirt. They augment the behavior of the core implementation rather than replace its virtualization stack. Virtualization stack plugins define a different boundary: they replace the Libvirt/QEMU-specific implementation across the relevant KubeVirt components with an implementation for another virtualization stack.
 
 The mechanisms are therefore orthogonal. A virtualization stack plugin supplies the base VMM and runtime integration, while Structured Plugins may extend the functionality of whichever virtualization stack is selected.
 
 ## Goals
 
-- It should be possible to have multiple VMs based on different virtualization stacks running on the same node. For example, a single node with the KVM hypervisor should be able to host a VM backed by traditional LibVirt/QEMU backend as well as a VM backed by Cloud-Hypervisor.
+- Allow a cluster administrator to deploy KubeVirt core using upstream manifests and virtualization stack plugins and be able to launch and manage VMs.
 
-- Refactor KubeVirt to allow the development of alternative variants of the virt-launcher component for different virtualization stacks.
-
-- Refactor KubeVirt to decouple it from Libvirt, QEMU and KVM.
+- Refactor KubeVirt to decouple it from Libvirt, QEMU and KVM/MSHV and invoke all virtualization related functionality via Plugin APIs.
 
 - Introduce a dedicated `VirtualizationStackPlugin` CRD for selecting and configuring virtualization stack plugins.
 
@@ -66,7 +64,13 @@ The mechanisms are therefore orthogonal. A virtualization stack plugin supplies 
 
 ## Non Goals
 
-- Implementation of the proposed plugin components (e.g., virt-launcher and admission webhooks) for alternative virtualization stacks.
+- Heterogeneous virtualization stacks in the same cluster or same node is out of scope for this VEP. Supporting that would make the VEP much more complex.
+
+- This VEP will not make changes to the KubeVirt API to make it virt-stack-agnostic. This VEP proposes to continue using the v1 API, even though it is heavily inspired by Libvirt, since it is general enough to express features provided by other virt-stacks.
+
+- This VEP will not generalize the internal representation of a running VM, i.e., the `api.Domain` data structure. It is general enough to use for representing VMs in other virt-stacks. The plugin author would need to write an adapter to and from `api.Domain` to their stack's VM representation.
+
+- Implementation of the proposed plugin components (e.g., virt-launcher and admission webhooks) for alternative virtualization stacks is not covered by this VEP.
 
 ## Definition of Users
 
@@ -74,13 +78,13 @@ The proposed plugin-based virtualization stack architecture is intended for adva
 
 - Platform engineers and infrastructure teams deploying KubeVirt in environments where alternative virtualization stacks (e.g., Cloud Hypervisor, Firecracker) are preferred due to performance, security, or hardware compatibility requirements.
 
-- Distributors and downstream projects that package KubeVirt as part of a larger platform and need to support multiple hypervisor backends.
+- Distributors and downstream projects that package KubeVirt as part of a larger platform and need to support custom hypervisor backends.
 
 ## User Stories
 
 ### The Platform Operator (Infrastructure Admin)
 
-- User Story: "As a platform operator, I want to deploy lightweight microVMs (e.g., Cloud Hypervisor) alongside standard workloads to increase tenant density and reduce resource overhead on my nodes."
+- User Story: "As a platform operator, I want to deploy lightweight microVMs (e.g., Cloud Hypervisor) alongside containerized workloads to increase tenant density and reduce resource overhead on my nodes."
 
 - Benefit: Flexibility to choose the virtualization stack that best fits the hardware and performance requirements of the organization without maintaining multiple orchestration platforms.
 
