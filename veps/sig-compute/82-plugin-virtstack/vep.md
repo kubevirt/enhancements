@@ -120,19 +120,23 @@ This section will walk through each key component of KubeVirt that performs virt
 
 ### Architecture Overview
 
-Several KubeVirt components are tightly coupled to the default Libvirt/QEMU/KVM virtualization stack. This proposal moves stack-specific logic behind plugins used by `virt-controller` and `virt-handler`, and makes `virt-launcher` a stack-specific component. The controller plugin is exposed through a Kubernetes Service backed by a Deployment. The node-local `virt-runtime` plugin is deployed as a DaemonSet, providing an instance on each node for `virt-handler` to invoke.
+Several KubeVirt components are tightly coupled to the default Libvirt/QEMU/KVM virtualization stack. This proposal moves stack-specific logic behind plugins used by `virt-controller` and `virt-handler`, and makes `virt-launcher` a stack-specific component. The controller plugin is declared in the `VirtualizationStackPlugin` CR as either a CEL expression executed within `virt-controller` or a Kubernetes Service backed by a Deployment. In both cases, `virt-controller` first renders the default Libvirt/QEMU/KVM launcher pod, then invokes the plugin to obtain the final launcher pod. The node-local `virt-runtime` plugin is deployed as a DaemonSet, providing an instance on each node for `virt-handler` to invoke.
 
 ```mermaid
 flowchart LR
   VSP[VirtualizationStackPlugin CR]
   DS[virt-runtime DaemonSet]
 
-  subgraph ControlPlane[      sssssss Control plane]
+  subgraph ControlPlane[Control plane]
     VC[virt-controller]
+    DISPATCH{Controller plugin type?}
+    CEL[Execute CEL expression internally]
     SVC[Controller plugin Service]
     DEP[Controller plugin Deployment]
 
-    VC -->|RPC query for launcher pod rendering| SVC
+    VC --> |Render virt-launcher| DISPATCH
+    DISPATCH -->|CEL| CEL
+    DISPATCH -->|Cluster service: RPC query| SVC
     SVC --> DEP
   end
 
@@ -145,17 +149,15 @@ flowchart LR
     VH <-->|Command and Notify APIs| VL
   end
 
-  VC -.->|Creates pod using stack-specific image| VL
   DS -.->|Deploys| VR
-  VSP -.->|References Service| SVC
   VSP -.->|Declares socket name| VH
-  VSP -.->|Declares launcher image and Controller Plugin Service| VC
+  VSP -.->|Declares Controller Plugin| VC
 
   classDef core fill:#dbeafe,stroke:#2563eb,color:#172554
   classDef plugin fill:#dcfce7,stroke:#16a34a,color:#052e16
   classDef registration fill:#fef3c7,stroke:#d97706,color:#451a03
 
-  class VC,VH core
+  class VC,VH,DISPATCH,CEL,FINAL core
   class SVC,DEP,DS,VR,VL plugin
   class VSP registration
 ```
@@ -168,21 +170,25 @@ flowchart LR
 
 ### Virt-Controller
 
+This section presents an overview of this VEP's proposed design for the `virt-controller` component. For more details, please refer to the dedicated VEP for making launcher pod rendering pluggable in virt-controller: [VEP 487: Pluggable virt-launcher Pod rendering in virt-controller](https://github.com/kubevirt/enhancements/pull/488/).
+
 #### Virt-Controller Plugin API
 
-We propose exposing a common plugin contract through which `virt-controller` consisting of the following RPC functions:
+Before invoking the controller plugin, `virt-controller` renders the launcher pod using its existing logic for the default Libvirt/QEMU/KVM stack. It then invokes a common pod-rendering plugin contract:
 
-- GetLauncherOverhead
-- GetLauncherImage
-- GetLauncherCommand: returns command and args
-- GetAdditionalVolumes: returns volumes to add and their corresponding mounts
-- GetLauncherCapabilities: additional capabilities to add to virt-launcher container
-- GetRunAsUserGroup
-- GetNodeSelectors: additional node-selectors to be added
+- **Input:** the VMI, the launcher pod constructed for the default stack, and the renderer context.
+- **Output:** the final launcher pod.
+
+The plugin adapts the default pod for its virtualization stack, including replacing the launcher image, command and arguments, resource overhead, volumes and mounts, security context, capabilities, and node selectors as needed. `virt-controller` creates the pod returned by the plugin. The detailed virt-controller VEP will define the renderer context and concrete API schema shared by both deployment models.
 
 #### Virt-Controller Plugin Deployment Model
 
-The plugin will be reached through the cluster Service declared by the `VirtualizationStackPlugin` CRD. The detailed VEP for virt-controller plugin will describe timeout and retry behavior, and caching results for a given plugin service.
+Two deployment models are supported, with exactly one declared under `spec.controller` in the `VirtualizationStackPlugin` CR:
+
+1. **CEL:** the CR declares a CEL expression. `virt-controller` executes it internally with the VMI, default launcher pod, and renderer context as inputs, and uses the resulting final launcher pod. No controller plugin Service or Deployment is required.
+2. **Cluster service:** the CR references a Kubernetes Service backed by an independently deployed controller plugin. `virt-controller` sends an RPC request containing the same inputs and receives the final launcher pod in the response.
+
+The detailed VEP for the virt-controller plugin will describe CEL evaluation limits and error handling, as well as RPC timeout and retry behavior and caching for the cluster-service model.
 
 ### Virt-Handler
 
@@ -275,6 +281,7 @@ metadata:
   name: cloud-hypervisor-mshv
 spec:
   controller:
+    type: ClusterService
     service:
       namespace: cloud-hypervisor-system
       name: cloud-hypervisor-controller-plugin
@@ -283,20 +290,32 @@ spec:
     # Resolved below a KubeVirt-owned runtime directory on each node.
     socketName: cloud-hypervisor-mshv.sock
 
-  launcher:
-    image: quay.io/company-x/virt-launcher:clh-mshv
 ```
 
-A cluster administrator creates the `VirtualizationStackPlugin` resource after deploying the plugin components. The resource registers endpoints and launcher information with KubeVirt; it does not deploy or manage those components. In the initial design, consuming KubeVirt components (such as `virt-controller` and `virt-handler`) independently resolve the plugin endpoints and report invocation or availability failures through events and/or conditions on the affected resources (e.g., VMI).
+Alternatively, the controller declaration can use CEL:
+
+```yaml
+spec:
+  controller:
+    type: CEL
+    cel:
+      expression: "pod"
+  runtime:
+    socketName: cloud-hypervisor-mshv.sock
+```
+
+The CEL example illustrates an identity expression returning the input default launcher pod, exposed as `pod`; an alternative stack would supply an expression that adapts it. The concrete CEL input bindings and pod-construction syntax will be defined in the detailed virt-controller VEP. The CRD must require exactly one controller model: `cel` for `type: CEL` or `service` for `type: ClusterService`.
+
+A cluster administrator creates the `VirtualizationStackPlugin` resource to register the controller plugin and node-local runtime socket with KubeVirt; it does not deploy or manage plugin components. The launcher image is selected by the controller plugin in its returned pod. In the initial design, consuming KubeVirt components (such as `virt-controller` and `virt-handler`) independently load the CEL expression or resolve the plugin endpoints and report invocation or availability failures through events and/or conditions on the affected resources (e.g., VMI).
 
 ### Deployment and Readiness Lifecycle
 
 During the alpha stage, this architecture is enabled through the `PluggableVirtualizationStack` feature gate. The deployment proceeds as follows:
 
 1. The cluster administrator deploys KubeVirt with the feature gate enabled. Core components start and remain ready while waiting for a virtualization stack to be registered.
-2. The administrator deploys the stack-provided components: the controller plugin Deployment and Service, the `virt-runtime` DaemonSet, the launcher image, and any optional admission webhooks.
-3. The administrator creates a `VirtualizationStackPlugin` resource containing the controller Service, node-local runtime socket name, and launcher image. Plugin workloads and the registration may be created in either order because discovery is retried.
-4. `virt-controller` watches the registration, repeatedly resolves the referenced Service, and negotiates a compatible plugin API. If the plugin is unavailable, `virt-controller` remains ready, but launcher pod rendering for VMIs selecting that stack fails and is retried with an event or condition reported on the VMI.
+2. The administrator deploys the stack-provided components: the controller plugin Deployment and Service only for the cluster-service model, the `virt-runtime` DaemonSet, and any optional admission webhooks.
+3. The administrator creates a `VirtualizationStackPlugin` resource declaring either the controller CEL expression or cluster Service, and the node-local runtime socket name. Plugin workloads and the registration may be created in either order because discovery is retried.
+4. `virt-controller` watches the registration. For CEL, it loads and checks the expression for internal execution. For a cluster service, it repeatedly resolves the referenced Service and negotiates a compatible plugin API. For each VMI, it first renders the default launcher pod and then invokes the selected plugin model with the VMI, default pod, and renderer context. If the plugin is unavailable or invocation fails, `virt-controller` remains ready, but pod creation for VMIs selecting that stack is blocked and reconciliation is retried with an event or condition reported on the VMI.
 5. Each `virt-handler` discovers the registered runtime through its published UNIX socket, negotiates a compatible API, calls `GetNodeLabels()`, and applies the returned labels to its node. A failure to discover the required runtime keeps the existing `kubevirt.io/schedulable` label set to `false`; successful discovery allows it to be set to `true`.
 
 ```mermaid
@@ -312,14 +331,18 @@ sequenceDiagram
   API-->>Operator: Observe KubeVirt CR creation
   Operator->>API: Create core KubeVirt components
 
-  Admin->>API: Deploy plugin Service, Deployment, and DaemonSet
+  Admin->>API: Deploy runtime DaemonSet and optional controller Service/Deployment
   Runtime->>Runtime: Publish node-local UNIX socket
 
   Admin->>API: Create VirtualizationStackPlugin
 
   API-->>Controller: Observe plugin registration
-  Controller->>API: Resolve controller Service
-  Controller->>Controller: Retry discovery until reachable
+  alt CEL controller plugin
+    Controller->>Controller: Load and check CEL expression
+  else Cluster-service controller plugin
+    Controller->>API: Resolve controller Service
+    Controller->>Controller: Retry discovery until reachable
+  end
 
   API-->>Handler: Observe plugin registration
   Handler->>Runtime: Connect through UNIX socket
@@ -327,7 +350,7 @@ sequenceDiagram
   Runtime-->>Handler: Return stack capability labels
   Handler->>API: Apply labels and set kubevirt.io/schedulable=true
 
-  Note over Controller,Handler: Stack can serve VMIs when the controller plugin is reachable and compatible nodes advertise its runtime
+  Note over Controller,Handler: Stack can serve VMIs when the controller plugin is usable and compatible nodes advertise its runtime
 ```
 
 When multiple stacks can be independently available on the same node, stack-specific availability labels will supplement `kubevirt.io/schedulable`. Failure of one runtime will then prevent scheduling only VMIs that select that stack, rather than making the node unavailable to every stack.
@@ -336,7 +359,7 @@ When multiple stacks can be independently available on the same node, stack-spec
 
 ### Virt-Controller Plugin Deployment Alternatives
 
-Two deployment models were considered for the `virt-controller` plugin.
+CEL execution within `virt-controller` and an external cluster service are supported deployment models. A sidecar was also considered as an alternative to the cluster service.
 
 #### Design 1: Cluster Service
 
@@ -348,7 +371,7 @@ The plugin runs as a sidecar container in each `virt-controller` pod. This avoid
 
 #### Virt-Controller Deployment Decision
 
-We choose Design 1. Cluster API (CAPI) demonstrates that external RPC servers can be used successfully as extension hooks. The Service-based model also preserves the independent lifecycle of stack plugins and avoids modifying the core `virt-controller` deployment for each installed stack.
+We support CEL and Design 1 rather than the sidecar model. CEL allows pod adaptation without deploying a controller plugin service. For plugins requiring an external implementation, Cluster API (CAPI) demonstrates that external RPC servers can be used successfully as extension hooks. The Service-based model preserves the independent lifecycle of stack plugins and avoids modifying the core `virt-controller` deployment for each installed stack.
 
 ### Virt-Launcher Virtualization Stack Boundary
 
@@ -392,7 +415,7 @@ The main cost of Design 1 is that functionality currently supplied by Libvirt, m
 
 ### Conformance Test Suite
 
-A standalone conformance test suite will validate a plugin's gRPC surface directly without requiring a live KubeVirt cluster. It will verify schema compliance, error codes for invalid input, operation idempotency, and behavioral invariants. For example, calling `AdjustVMIResources` twice for the same VMI must be safe, and `GetNodeLabels()` must return key-value pairs in the expected format.
+A standalone conformance test suite will validate a plugin's gRPC surface and the CEL controller contract directly without requiring a live KubeVirt cluster. It will verify schema compliance, error reporting for invalid input, operation idempotency, and behavioral invariants. For example, calling `AdjustVMIResources` twice for the same VMI must be safe, and `GetNodeLabels()` must return key-value pairs in the expected format.
 
 Following precedents such as CSI Sanity and CNI conformance testing, this suite will allow third-party plugin authors to self-certify implementations before integrating with a cluster, without requiring KubeVirt core team involvement or CI access.
 
@@ -402,7 +425,7 @@ The main KubeVirt functional and end-to-end regression suite will continue to ru
 
 ### Mock Plugin
 
-Unit and controller-level tests will use a mock plugin only to verify that `virt-controller` and `virt-handler` invoke the expected RPC, such as `GetLauncherOverhead` or `AdjustVMIResources`, at the correct point and with the correct arguments. These tests verify dispatch, not realistic alternate behavior or behavioral divergence between stacks.
+Unit and controller-level tests will verify that `virt-controller` first renders the default launcher pod and then invokes either CEL or a mock controller plugin service with the VMI, default pod, and renderer context, using the returned final pod for creation. Mock runtime tests will verify that `virt-handler` invokes the expected RPC, such as `AdjustVMIResources`, at the correct point and with the correct arguments. These tests verify dispatch, not realistic alternate behavior or behavioral divergence between stacks.
 
 ## Backward Compatibility
 
@@ -427,10 +450,10 @@ Required compatibility coverage includes:
 
 ### Alpha
 
-- [ ] Refactor the default Libvirt/QEMU/KVM logic in `virt-controller` and `virt-handler` into self-contained internal functions, one per capability that will become a plugin RPC, without changing behavior. Existing end-to-end tests must pass unmodified before introducing dispatch.
+- [ ] Preserve the existing default Libvirt/QEMU/KVM pod renderer in `virt-controller` as the input-producing step for the controller plugin. Refactor the default stack logic in `virt-handler` into self-contained internal functions, one per capability that will become a plugin RPC, without changing behavior. Existing end-to-end tests must pass unmodified before introducing dispatch.
 - [ ] Introduce the `PluggableVirtualizationStack` feature gate and guard all plugin-dispatch paths with it.
 - [ ] Define and register the `VirtualizationStackPlugin` CRD.
-- [ ] Implement conditional dispatch in `virt-controller` and `virt-handler`: invoke the internal default function when the feature gate is disabled or no matching plugin is registered, and otherwise route the call to the plugin.
+- [ ] Implement conditional dispatch in `virt-controller`: always render the default launcher pod first; when the feature gate is enabled and a matching plugin is registered, invoke its declared CEL or cluster-service model and use the returned final pod. Otherwise, use the default pod unchanged. In `virt-handler`, invoke the internal default function when the feature gate is disabled or no matching plugin is registered, and otherwise route the call to the runtime plugin.
 - [ ] Verify through an explicit regression test that disabling the feature gate preserves pre-VEP behavior.
 - [ ] Verify that enabling the feature gate without registering a plugin continues to resolve VMIs through the default-function fallback.
 - [ ] Implement a second virtualization stack plugin, such as Cloud Hypervisor, including its controller plugin, `virt-runtime`, and stack-specific `virt-launcher`. Verify end-to-end functionality.
