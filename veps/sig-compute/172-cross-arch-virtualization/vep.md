@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.9.0, 1.10.0
-- This VEP targets beta for version:
+- This VEP targets beta for version: 1.11.0
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -1448,6 +1448,8 @@ characteristics are TBD.
 - 2026-08-26: Update e2e test strategy and drop binary distribution requirement
   for software emulation.
 - 2026-08-26: Added `emulationPolicy` field for configuration
+- 2026-11-16: Update with work done during 1.10.
+- 2026-11-16: Add beta target
 
 ## Graduation Requirements
 
@@ -1483,12 +1485,12 @@ characteristics are TBD.
 - [ ] Documentation of performance limitations and use cases
 - [x] Cross-arch QEMU binaries included in virt-launcher image
 - [x] Validation that required QEMU binaries exist
-- [ ] User-facing documentation in kubevirt/user-guide covering feature gate
+- [x] User-facing documentation in kubevirt/user-guide covering feature gate
       enablement, supported architecture combinations, QEMU binary
       requirements, performance limitations, and example VMI specs
 - [ ] Basic test coverage for software emulation (E2E tests)
-- [ ] `emulationPolicy` field introduced and scheduling updated
-- [ ] Unit tests for policy precedence, enforcement, and webhook validation
+- [x] `emulationPolicy` field introduced and scheduling updated
+- [x] Unit tests for policy precedence, enforcement, and webhook validation
 - [ ] Decide if `emulationPolicy` should also replace `useEmulation` to consolidate emulation under a single setting
 
 ### Beta
