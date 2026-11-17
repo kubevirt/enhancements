@@ -287,6 +287,10 @@ The proposed modification poses no scalability problems: it can actually make fo
 
 - Forwarding of both the range delimiting ports and of at least one inner port is verified against a running cluster.
 
+### End-to-End Tests
+
+- Forwarding of both the range delimiting ports and of at least one inner one is tested.
+
 ## Implementation History
 
 - 2026-01-03: Initial VEP draft created.
