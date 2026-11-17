@@ -3,31 +3,24 @@
 ## Design
 
 This follow-up to [VEP 82](../82-plugin-virtstack/vep.md) moves
-virtualization-stack-specific node operations behind a runtime plugin.
-
-The default Libvirt/QEMU stack remains available alongside registered plugins.
-Multiple custom stacks can run in the same cluster and on the same node, where
-their required devices and runtime plugins are available.
+virtualization-stack-specific node operations by the `virt-handler` behind a runtime plugin.
 
 ### Deployment and responsibilities
 
-**Each runtime plugin is deployed as a privileged DaemonSet**, with one pod
-on each node where its stack is supported. It serves gRPC over a local UNIX
-socket.
+**The Runtime Plugin is deployed as a privileged DaemonSet**, with one pod
+on each node. It serves gRPC over a local UNIX socket.
 
 | Component | Responsibility |
 | --- | --- |
-| `virt-handler` | Reconcile VMIs, use each VMI's selected stack, invoke high-level RPCs, retry failures, and report Kubernetes status. |
+| `virt-handler` | Reconcile VMIs, invoke high-level RPCs, retry failures, and report Kubernetes status. |
 | Runtime plugin | Find the VM processes and perform backend-specific privileged operations. |
 
-Core calls operations such as `AdjustVMIResources`; it does not prescribe
+`virt-handler` core invokes operations such as `AdjustVMIResources` via RPC; it does not prescribe
 individual process, affinity, cgroup, or resource-limit changes.
-Plugin authors and cluster administrators are responsible for the safety of
-the privileged implementation.
+Plugin authors and cluster administrators are responsible for the privileged implementation of these core operations and their safety and correctness.
 
 The administrator grants the DaemonSet the host PID visibility and host mounts
-needed by its implementation. Privileged mode alone does not provide those
-views. The plugin does not need Kubernetes write access for node labels.
+needed by its implementation (similar to `virt-handler`).
 
 VM lifecycle commands still go directly from `virt-handler` to the selected
 launcher through the existing Command API. The Notify API, `api.Domain`, and
@@ -35,11 +28,8 @@ launcher through the existing Command API. The Notify API, `api.Domain`, and
 
 ### Registration and socket discovery
 
-Use the cluster-scoped `VirtualizationStackPlugin` CRD proposed by VEP 82.
-The resource registers a stack; it does not deploy the plugin.
-`virt-operator` installs this CRD during bootstrap, without requiring a
-KubeVirt CR. Administrators wait for the CRD's `Established=True` condition
-before creating a plugin CR.
+Use the cluster-scoped `VirtualizationStackPlugin` CRD proposed by VEP #82.
+The cluster admin declares the name of the UNIX socket which the runtime is listening on.
 
 ```yaml
 apiVersion: virstackplugin.kubevirt.io/v1alpha1
@@ -47,52 +37,31 @@ kind: VirtualizationStackPlugin
 metadata:
   name: cloud-hypervisor-mshv
 spec:
-  controller:
-    service:
-      namespace: cloud-hypervisor-system
-      name: cloud-hypervisor-controller-plugin
-      port: 9443
+  ...
   runtime:
-    socketName: cloud-hypervisor-mshv.sock
-  launcher:
-    image: quay.io/company-x/virt-launcher:clh-mshv
+    socketName: cloud-hypervisor-mshv-runtime.sock
+  ...
 ```
 
 Proposed host socket directory: `/var/run/kubevirt/virt-runtime/`.
-Both `virt-handler` and the plugin mount it through `hostPath`; the plugin
-publishes the socket named in its registration. Socket permissions restrict
-access to the handler and administrator-managed workloads.
-
-`virt-handler` watches registrations and connects to the declared socket on
-its own node. It does not scan for arbitrary sockets. `socketName` must be a
-filename, not a path, and registrations must not share a socket name.
-
-Missing sockets are retried with backoff. After a disconnect or registration
-update, the handler reconnects and repeats API negotiation. Socket existence
-alone does not mean the plugin is usable. Connections, API negotiation, and
-retries are independent for each registration.
+Both `virt-handler` and the plugin mount it through `hostPath`. `virt-handler` looks for the socket declared in the `VirtualizationStackPlugin` CR and connects to it. Missing sockets are retried with backoff. 
 
 ### Runtime API
 
 | RPC | Purpose |
 | --- | --- |
-| `GetInfo` | Return stack identity, supported RPC API versions, capabilities, and required shared hypervisor device. |
+| `GetInfo` | Return stack identity, supported RPC API versions, and required hypervisor device. |
 | `AdjustVMIResources` | Apply backend-specific VM resource adjustments. |
 | `HandleHousekeepingResources` | Configure supporting VM processes and threads. |
 | `GetNodeLabels` | Return opaque node-label key/value pairs. |
 
-`GetInfo` uses a fixed discovery schema. The handler verifies the stack identity
-against the registration and selects the highest mutually supported API version.
-No shared version or a missing required RPC makes that runtime unavailable.
+`GetInfo` uses a fixed discovery schema. The handler verifies the virtualization-stack identity
+against the name in the `VirtualizationStackPlugin` CR and selects the highest mutually supported API version.
+No shared version or a missing required RPC makes the runtime plugin unavailable.
 The negotiated version is used for subsequent calls.
 
-Requests contain serialized data, not handler controller objects, cgroup
-managers, or isolation objects. The plugin verifies the target before operating
-on its processes. The logical arguments below will be defined in protobuf.
-Repeated resource and housekeeping calls must be safe.
-
 RPCs have deadlines and return explicit errors. The handler retries temporary
-failures and reports errors on affected VMIs.
+failures and reports errors on affected VMIs. Repeated resource and housekeeping calls must be safe.
 
 ### RPC arguments and runtime behavior
 
@@ -100,24 +69,25 @@ failures and reports errors on affected VMIs.
 
 **Arguments:** None; this is the initial call before API version negotiation.
 
-**Returns:** Stack identity, supported runtime API versions, capabilities, and
-the required shared hypervisor device.
+**Returns:** Virtualization Stack name, supported runtime API versions, and
+the required hypervisor device (e.g., `/dev/mshv`).
 
-**Runtime behavior:** Report the implementation's identity and supported
-operations. Core checks these against the registration and negotiates a version
-before invoking the other RPCs. Device registration remains core's responsibility.
+**Runtime behavior:** Report the plugin virtualization stack's name. Core checks this against the registration and negotiates a version before invoking the other RPCs. Device registration remains core's responsibility.
 
 #### `AdjustVMIResources`
 
-**Arguments:** VMI snapshot, including its UID, resource requirements, lifecycle
-and migration status, and `Status.ActivePods`; local node identity. The current
-Libvirt implementation does not use the full KubeVirt configuration.
+**Arguments:**
+
+  1. VMI snapshot, including its UID, resource requirements, lifecycle
+and migration status, and `Status.ActivePods`
+  2. Node name
+  3. KubeVirt configuration
 
 **Returns:** Success or an error.
 
 **Runtime behavior:**
 
-1. Determine whether the VMI needs backend-specific resource adjustments.
+1. Determine whether the VMI needs backend-specific resource adjustments, e.g., memlock limit adjustment.
 2. Find the local launcher socket and obtain its server PID as described below.
 3. Locate the backend's VMM or supporting daemon. The Libvirt implementation
    adjusts `virtqemud` before local QEMU creation and QEMU once it is running.
@@ -144,15 +114,12 @@ target launchers on different nodes.
 
 Connect to the UNIX socket and use Linux `SO_PEERCRED` to obtain its server PID.
 The plugin needs host PID visibility and may inspect the server's parent and
-process tree to locate its VMM. These are plugin-owned discovery steps, not
-handler callbacks. An SDK is follow-up work; authors can implement them directly
-or adapt the existing KubeVirt code.
+process tree to locate its VMM.
 
 #### `HandleHousekeepingResources`
 
 **Arguments:** Serialized VMI and Domain snapshots, plus local node identity.
-The Domain snapshot may be absent. No controller objects, cgroup managers,
-isolation objects, or core callbacks cross the RPC boundary.
+The Domain snapshot may be absent.
 
 **Returns:** Success or an error.
 
@@ -185,70 +152,29 @@ current state. A stack-agnostic replacement for Domain is outside this VEP.
 
 **Returns:** Opaque node-label key/value pairs.
 
-**Runtime behavior:** Discover the stack's local capabilities and generate the
-labels agreed with its controller plugin. Core applies them, tracks ownership,
+**Runtime behavior:** Discover the stack's local capabilities and generate the node labels.
+Core applies them, tracks ownership,
 and removes stale labels. The runtime does not write Kubernetes node labels or
 provide core's host topology.
 
-### Labels, devices, and choosing the plugin
+### Node Labels and Hypervisor device
 
-Node labels are opaque to core. The runtime and controller plugins agree on
-the labels and matching launcher node selectors. Core checks Kubernetes label
+Node labels are opaque to core. The `virt-runtime` and `virt-controller`'s launcher rendering plugins agree on
+the labels and matching launcher node selectors. Core `virt-handlers checks Kubernetes label
 syntax, tracks labels it applies, and removes stale plugin-owned labels without
-overwriting labels owned by another component. Plugins use distinct label
-prefixes so they do not collide with each other or the default node labeller.
+overwriting labels owned by another component. Each plugin's labels will have it's name as a prefix so that in the future when multiple plugins on same node/cluster are considered, they don't collide with each other.
 
-Core remains the sole kubelet device-plugin registrar for shared hypervisor
-devices reported by `GetInfo`. It deduplicates registration by device/resource
-identity, including devices used by the default stack. Stacks sharing `/dev/kvm`
-share its existing advertised capacity; each plugin does not add another pool.
-Every runtime plugin must report a hypervisor device; device-less plugins are
-not supported. Exclusive devices remain outside this mechanism.
-
-The KubeVirt CR's `PluggableVirtualizationStack` feature gate enables custom
-stacks without replacing the default stack:
-
-| Feature gate | Plugin CRs | Behavior |
-| --- | --- | --- |
-| Disabled | Present or absent | Default Libvirt/QEMU. |
-| Enabled | Absent | Default Libvirt/QEMU. |
-| Enabled | Present | Default Libvirt/QEMU plus the registered custom stacks. |
-
-The user selects a custom stack through a field in the VMI spec identifying its
-registration. An omitted selection uses the default stack. The resolved stack
-identity is preserved for the VMI's lifetime and used for controller rendering,
-runtime calls, and migration. Unknown or disabled custom selections are rejected,
-not silently assigned to the default stack.
-
-Handler core retries each registered local socket with backoff. A slow or absent
-runtime makes only that custom stack unavailable on the node. Its VMIs must not
-fall back to Libvirt/QEMU or another plugin.
-
-The operator always retains the existing launcher-image node-labeller init
-container and default-stack configuration in the handler DaemonSet. Plugin
-registration does not remove them. A node with KVM can therefore continue serving
-default VMIs while also serving supported custom stacks.
-
-New handlers must continue managing existing launchers without recreating their
-pods. Installing another plugin does not change the stack of existing VMIs.
+Core remains the sole kubelet device-plugin registrar for hypervisor
+device reported by `GetInfo`. It sets up a custom device plugin (like today) for the hypervisor device reported by the `virt-runtime` plugin. Every runtime plugin must report a hypervisor device; device-less plugins are
+not supported.
 
 ### Node scheduling readiness
 
-For each plugin stack, handler core advertises stack-specific readiness only
+Virt Handler core advertises node readiness only
 after the handshake/API negotiation succeeds, the plugin's node labels are
 applied, and the device plugin for its reported hypervisor device has started
 and registered with kubelet. Kubelet publishes device capacity; core does not
 wait for an exact capacity value before advertising readiness.
-
-Core applies a separate availability label for each custom stack, required by
-that stack's controller-generated launcher selectors. It withdraws only that
-label when the runtime becomes unavailable. Default-stack scheduling behavior
-and other plugins' availability remain unchanged. Affected VMI operations retry
-without changing stacks.
-
-This does not change Kubernetes `NodeReady`. The availability-label format is
-a shared contract with the controller-plugin VEP. Kubernetes scheduling also
-checks the launcher's requested hypervisor-device resource.
 
 ### Launcher ownership conventions
 
@@ -264,10 +190,6 @@ Handler core discovers host topology directly from Linux sysfs, independently
 of the selected stack. It supplies NUMA nodes, memory, hugepage information,
 node distances, and CPU topology through the existing launcher Command API.
 Libvirt capability XML is no longer the source of this topology.
-
-The retained node-labeller init container and capability files serve the default
-stack only. Custom-stack labels come from `GetNodeLabels`; neither their
-interpretation nor core topology discovery depends on Libvirt capability XML.
 
 ### Guest-agent status
 
@@ -330,7 +252,7 @@ Each launcher plugin implements `SyncMigrationTarget`, `MigrateVirtualMachine`,
 its native virtualization stack.
 
 The target launcher creates and serves its backend's migration UNIX sockets.
-It reports their endpoints directly to core; no runtime endpoint-discovery RPC
+It reports their endpoints directly to core `virt-handler`; no runtime endpoint-discovery RPC
 is needed. Any required privileged node preparation remains a runtime
 responsibility. Core owns the TLS listeners, certificates, and forwarding
 between nodes.
@@ -364,8 +286,7 @@ an absent list must not trigger Libvirt fallback.
 The flow is:
 
 1. Target handler prepares storage, networking, and devices, then calls the
-   target launcher's `SyncMigrationTarget`. Source and target use the VMI's
-   selected stack; migration does not switch stacks.
+   target launcher's `SyncMigrationTarget`.
 2. Target launcher returns success with ready migration endpoints.
 3. Target handler uses the response to create a TLS listener for each socket
    and publishes the target address and socket-name-to-TCP-port mapping in VMI
@@ -393,30 +314,26 @@ socket-path convention.
 1. **Install the operator.** Install `virt-operator` without creating a KubeVirt
    CR. It installs the plugin registration CRD during bootstrap.
 2. **Wait for the CRD.** Wait for its `Established=True` condition.
-3. **Install the stack.** The administrator deploys its privileged runtime
+3. **Install the virtualization stack plugins.** The administrator deploys its privileged runtime
    DaemonSet and controller Service/Deployment, and makes its launcher image
-   available. Each runtime pod publishes its local socket.
+   available.
 4. **Register the stack.** Create the `VirtualizationStackPlugin` resource
    pointing to those components.
 5. **Install KubeVirt core.** Create the KubeVirt CR with
-   `PluggableVirtualizationStack` enabled. The operator installs core, retains
-   the node-labeller init container, and gives handler registration read/watch
+   `PluggableVirtualizationStack` enabled. The operator installs core and gives handler registration read/watch
    access and the shared socket mount.
 6. **Discover and negotiate.** Each handler observes the registration, connects
    locally, calls `GetInfo`, and chooses a compatible API version.
 7. **Prepare the node.** The handler calls `GetNodeLabels`, applies labels,
    starts and registers the hypervisor device plugin using `GetInfo`, and
    discovers host topology directly. It then advertises that stack's readiness.
-8. **Create a VMI.** With a custom stack selected, the controller uses its
+8. **Create a VMI.** The `virt-controller` uses the launcher-rendering
    controller plugin to render a launcher pod with stack availability selectors
-   and the required device resource. Without a selection, default rendering
-   remains unchanged.
+   and the required device resource.
 9. **Invoke the runtime.** During VMI reconciliation, the handler calls the
-   selected runtime's resource and housekeeping RPCs. The plugin performs
+   runtime's resource and housekeeping RPCs. The plugin performs
    the operations and returns their results.
 
-Additional plugins can be installed and registered before or after KubeVirt core
-installation. Each is discovered independently; existing VMIs are unchanged.
 
 ## Implementation Plan
 
@@ -427,14 +344,14 @@ installation. Each is discovered independently; existing VMIs are unchanged.
    for resource adjustment and housekeeping. Pass serialized VMI/Domain data
    without handler object dependencies.
 3. Add operator-bootstrap CRD installation and feature-gated registration
-   watching. Retain the default node-labeller init container.
+   watching.
    Add socket mounts, connection handling, and API negotiation to `virt-handler`.
 4. Route resource and housekeeping calls using each VMI's resolved stack;
    preserve compatibility with the launcher Command and Notify APIs.
-5. Add opaque-label ownership, deduplicated hypervisor device registration, and
-   independent per-stack readiness after the handshake, label application, and
+5. Add opaque-label ownership, hypervisor device registration, and
+   virtualization-stack readiness after the handshake, label application, and
    device-plugin startup.
-   Coordinate per-VMI selection and scheduling with the controller VEP.
+   Coordinate per-VMI node selector assignment and scheduling with the controller VEP.
 6. Extend `SyncMigrationTarget` responses with ready migration endpoints and
    add named port mappings. Reuse core TLS proxies with the shared source socket
    convention, retaining compatibility with legacy built-in launchers.
@@ -458,5 +375,9 @@ Follow-up details:
   the existing attestation Command API remains the starting point.
 - QEMU-specific emulation status and error-string handling need normalization
   or explicit launcher compatibility requirements.
-- Rollback with alternate-stack VMIs, the per-stack availability-label format,
-  and single-versus-multiple device reporting remain open.
+- Rollback with alternate-stack VMIs remains open.
+
+## Open Questions
+
+1. Should the Virt-Runtime Plugin expose supported capabilities/functions through which the virt-handler core can determine if the plugin is supported ?
+2. All plugins for virtualization stack, i.e., Virt Controller's plugin, Virt Runtime plugin and Virt Launcher are implemented by the same Plugin authors. They are responsible for maintaining any shared volume between the Virt Runtime pod and the Virt Launcher, which might be needed for any out-of-band management of the running VM process for specific virtualization stacks.
