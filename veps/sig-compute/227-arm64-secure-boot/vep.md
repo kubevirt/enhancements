@@ -73,8 +73,9 @@ security) can be deployed.
 
 ## Non Goals
 
-- Supporting Secure Boot with confidential computing (SEV/SNP/TDX) on ARM64
-  (these technologies are x86-only today).
+- Supporting Secure Boot with ARM Confidential Compute Architecture (CCA).
+  CCA firmware and trust requirements are tracked separately in
+  [VEP #338](https://github.com/kubevirt/enhancements/issues/338).
 - Providing ARM64-specific attestation or key enrollment APIs beyond what the
   firmware provides by default.
 - Automatic detection of hypervisor stack capabilities (QEMU version, libvirt
@@ -146,6 +147,13 @@ host side. This device:
 - Works with KVM (unlike the EL3 approach which is TCG-only)
 - Uses a ROM-type loader instead of pflash
 
+This design assumes a trusted host, including QEMU and the backing variable
+store. Host-side authenticated variable handling protects against unauthorized
+guest modification; it does not establish boot-policy integrity against an
+untrusted host. CCA integration needs a separate firmware and trust contract
+under VEP #338, including explicit supported Secure Boot combinations and
+rejection of unsupported combinations without fallback.
+
 The resulting libvirt domain XML is structurally different:
 
 | Aspect | x86_64 | ARM64 |
@@ -159,9 +167,10 @@ The resulting libvirt domain XML is structurally different:
 ### Leveraging Libvirt Firmware Auto-Selection
 
 Despite the architectural differences, both x86_64 and ARM64 Secure Boot use
-the same libvirt firmware auto-selection XML on the KubeVirt side. When a user
-requests Secure Boot on an ARM64 VMI, KubeVirt generates the same XML
-structure as VEP #241 uses for x86_64:
+the same libvirt firmware auto-selection mechanism on the KubeVirt side. When
+a user requests Secure Boot on an ARM64 VMI, KubeVirt requests the same
+firmware features as VEP #241 uses for x86_64 and sets the JSON varstore path
+to its existing EFI storage directory. For example:
 
 ```xml
 <os firmware='efi'>
@@ -170,13 +179,15 @@ structure as VEP #241 uses for x86_64:
     <feature enabled='yes' name='secure-boot'/>
     <feature enabled='yes' name='enrolled-keys'/>
   </firmware>
+  <varstore path='/var/lib/libvirt/qemu/nvram/guest_VARS.json'/>
 </os>
 ```
 
 Libvirt then matches this against available firmware descriptor JSON files on
 the host (e.g. `90-edk2-aarch64-qemuvars-sb-enrolled.json`) and automatically
-configures the correct loader, varstore, and QEMU device. The resulting domain
-XML produced by libvirt will look like:
+configures the correct loader, varstore template, and QEMU device while
+retaining KubeVirt's explicit varstore path. The resulting domain XML produced
+by libvirt will look like:
 
 ```xml
 <os firmware='efi'>
@@ -187,15 +198,14 @@ XML produced by libvirt will look like:
   </firmware>
   <loader type='rom' format='raw'>/usr/share/edk2/aarch64/QEMU_EFI.qemuvars.fd</loader>
   <varstore template='/usr/share/edk2/aarch64/vars.secboot.json'
-            path='/var/lib/libvirt/qemu/varstore/guest.json'/>
+            path='/var/lib/libvirt/qemu/nvram/guest_VARS.json'/>
 </os>
 ```
 
-Note that despite using the same input XML, libvirt resolves ARM64 to a ROM
-loader with a `<varstore>` element (using the `uefi-vars` device) rather than
-the pflash `<loader>`/`<nvram>` that x86_64 receives. This is handled
-entirely by libvirt's firmware descriptor matching — KubeVirt does not need
-to differentiate.
+Libvirt resolves ARM64 to a ROM loader with a `<varstore>` element (using the
+`uefi-vars` device), while x86_64 uses a pflash `<loader>`/`<nvram>` pair.
+Libvirt handles firmware and device selection; KubeVirt sets the appropriate
+variable storage path for each architecture.
 
 This approach:
 
@@ -204,6 +214,22 @@ This approach:
 - Unifies the Secure Boot code path across x86_64 and ARM64 — both use the
   same `UsesFirmwareAutoSelection` mechanism from VEP #241
 - Is the approach libvirt's own documentation recommends for aarch64
+
+### Persistent EFI State
+
+The ARM64 JSON varstore path is
+`filepath.Join(util.PathForNVram(vmi), vmi.Name+"_VARS.json")`.
+`PathForNVram()` selects the EFI directory for the launcher's root or non-root
+configuration; the XML above illustrates the root configuration. KubeVirt
+sets this path explicitly instead of using libvirt's default varstore
+directory.
+
+When `spec.domain.firmware.bootloader.efi.persistent: true`, the existing EFI
+backend-storage lifecycle places this directory on persistent storage so
+firmware variables survive VM stop/start and replacement of the VMI and
+virt-launcher pod. This requires the existing backend-storage prerequisites,
+including a suitable storage class. Without persistent EFI enabled, the
+varstore follows the launcher's ephemeral storage lifecycle.
 
 ### Feature Gate
 
@@ -279,55 +305,69 @@ Extend the firmware auto-selection code path introduced by VEP #241 to
 handle ARM64. The domain schema types (`Firmware`, `FirmwareInfo`,
 `FirmwareFeature`) and the `UsesFirmwareAutoSelection` field in
 `EFIConfiguration` are already available from VEP #241. The converter logic
-for ARM64 Secure Boot uses the same `UsesFirmwareAutoSelection` path —
-the only difference is the architecture in the `<type>` element, which
-libvirt uses to select the correct firmware descriptor.
+for ARM64 Secure Boot uses the same `UsesFirmwareAutoSelection` path. The
+architecture in the `<type>` element lets libvirt select the correct firmware
+descriptor; KubeVirt also sets the ARM64 JSON varstore path.
 
-When `arch == "aarch64"` and `secureBoot == true`:
+When `arch == "arm64"` and `secureBoot == true`:
 
 - Set `UsesFirmwareAutoSelection = true` in the `EFIConfiguration`
 - The existing auto-selection code path sets `domain.Spec.OS.Firmware`
     and `domain.Spec.OS.FirmwareInfo` with `secure-boot` and
     `enrolled-keys` features
-- Do NOT set `BootLoader` or `NVRam` — for ARM64, libvirt uses a
-    `<varstore>` element (via the `uefi-vars` device) instead of pflash
-    `<nvram>`. Note: for x86_64, VEP #241 explicitly sets `<nvram>` via
-    `PathForNVram()` to preserve filename convention; this is not needed for
-    ARM64 since it uses a different variable storage mechanism.
+- Leave `BootLoader` and `NVRam` unset; libvirt selects the ROM loader
+- Set `domain.Spec.OS.VarStore.Path` to
+    `filepath.Join(util.PathForNVram(vmi), vmi.Name+"_VARS.json")`
+- Add the `VarStore` domain schema type with `path` and optional `template`
+    attributes. Libvirt selects the template from the matching firmware
+    descriptor; KubeVirt sets the path to reuse its EFI backend storage.
+    The amd64 path continues to use binary `<nvram>` storage.
 
-When `arch == "aarch64"` and `secureBoot == false`:
+When `arch == "arm64"` and `secureBoot == false`:
 
 - Continue using the existing explicit `<loader>`/`<nvram>` approach with
     AAVMF firmware (no behavior change)
 
 #### 3. Validation Webhook (`pkg/virt-api/webhooks/validating-webhook/admitters/vmi-create-admitter.go`)
 
-Two validation changes are needed:
+Two validation changes are needed, both implemented within `validateDomainSpec`
+via an architecture switch on the `secureBoot` path:
 
-**Feature gate check**: When an ARM64 VMI requests `secureBoot: true`, the
-webhook must verify that the `ARM64SecureBoot` feature gate is enabled. If
-not, reject with a clear error:
+**SMM validation and feature gate check**: The existing "SecureBoot requires
+SMM" check is made architecture-aware using a switch on `arch`. The `arm64`
+case skips the SMM check (SMM is x86-only) and instead validates that both
+the `ARM64SecureBoot` and `FirmwareAutoSelection` feature gates are enabled:
 
 ```go
-if secureBootEnabled(spec.Firmware) && spec.Architecture == "arm64" &&
-    !config.ARM64SecureBootEnabled() {
+switch arch {
+case "amd64", "":
+    if !smmFeatureEnabled(spec.Features) && !tdxEnabled {
+        causes = append(causes, metav1.StatusCause{
+            Type:    metav1.CauseTypeFieldValueInvalid,
+            Message: fmt.Sprintf("%s has EFI SecureBoot enabled. SecureBoot requires SMM, which is currently disabled.", field.String()),
+            Field:   field.String(),
+        })
+    }
+case "arm64":
+    if !config.ARM64SecureBootEnabled() {
+        causes = append(causes, metav1.StatusCause{
+            Type:    metav1.CauseTypeFieldValueInvalid,
+            Message: fmt.Sprintf("%s feature gate is not enabled in kubevirt-config", featuregate.ARM64SecureBoot),
+            Field:   sbField.String(),
+        })
+    }
+    if !config.FirmwareAutoSelectionEnabled() {
+        causes = append(causes, metav1.StatusCause{
+            Type:    metav1.CauseTypeFieldValueInvalid,
+            Message: fmt.Sprintf("%s feature gate is required for ARM64 Secure Boot", featuregate.FirmwareAutoSelection),
+            Field:   sbField.String(),
+        })
+    }
+default:
     causes = append(causes, metav1.StatusCause{
         Type:    metav1.CauseTypeFieldValueInvalid,
-        Message: "ARM64SecureBoot feature gate is not enabled in kubevirt-config",
-        Field:   field.Child("domain", "firmware", "bootloader", "efi", "secureBoot").String(),
-    })
-}
-```
-
-**SMM validation**: Make the existing "SecureBoot requires SMM" check
-architecture-aware, since SMM is an x86 concept and does not apply to
-ARM64. ARM64 Secure Boot protection is provided by the `uefi-vars` device
-on the host side:
-
-```go
-if secureBootEnabled(spec.Firmware) && !smmFeatureEnabled(spec.Features) && spec.Architecture != "arm64" {
-    causes = append(causes, metav1.StatusCause{
-        // ...
+        Message: fmt.Sprintf("SecureBoot is not supported on architecture %s", arch),
+        Field:   field.String(),
     })
 }
 ```
@@ -349,16 +389,14 @@ start time, it will return a clear error that surfaces to the user.
 Extend the firmware auto-selection condition from VEP #241 to include ARM64.
 The existing VEP #241 logic sets `UsesFirmwareAutoSelection = true` for
 standard Secure Boot when `FirmwareAutoSelection` is enabled. ARM64
-additionally requires the `ARM64SecureBoot` feature gate — both gates must
-be enabled for ARM64 Secure Boot to use firmware auto-selection:
+additionally requires the `ARM64SecureBoot` feature gate — if either gate is
+absent for an ARM64 VMI, auto-selection is suppressed and the explicit path
+is taken (which will error, but the webhook guards against reaching this state):
 
 ```go
-if secureBoot && vmType == efi.None && l.firmwareAutoSelectionEnabled {
-    if arch == "aarch64" && !l.arm64SecureBootEnabled {
-        // ARM64 Secure Boot requires both feature gates.
-        // Rejected by webhook, should not reach here.
-    }
-    log.Log.Infof("Using firmware auto-selection for EFI Secure Boot")
+if secureBoot && vmType == efi.None && l.firmwareAutoSelectionEnabled &&
+    (vmi.Spec.Architecture != "arm64" || l.arm64SecureBootEnabled) {
+    log.Log.V(4).Infof("Using firmware auto-selection for EFI Secure Boot")
     efiConf = &convertertypes.EFIConfiguration{
         SecureLoader:              true,
         UsesFirmwareAutoSelection: true,
@@ -489,55 +527,69 @@ No scalability impact. The change affects per-VM domain XML generation only.
   Secure Boot without SMM and continues to require SMM for x86_64.
 - **Unit tests**: Verify ARM64 defaults remain unchanged (SecureBoot=false).
 - **E2E tests**: On ARM64 CI infrastructure with QEMU 10.0+ and appropriate
-  firmware packages, boot an ARM64 VM with Secure Boot enabled and verify
-  that Secure Boot is active inside the guest (e.g. via
-  `mokutil --sb-state`).
+  firmware packages, boot an Ubuntu 24.04 ARM64 VM with both feature gates
+  enabled and require `mokutil --sb-state` to report `SecureBoot enabled`.
+- **E2E tests**: With `efi.persistent: true` and a suitable backend-storage
+  class, write a nonvolatile EFI test variable in the guest, stop and start
+  the VM, verify that the new VMI has a different UID, and check that the
+  variable retains its value. Check `mokutil --sb-state` on both starts.
+
+These tests cover guest-visible Secure Boot state and persistence of an
+ordinary nonvolatile EFI variable. Additional enforcement coverage should
+attempt to boot an unsigned or tampered EFI binary and verify its rejection.
+That negative boot test is follow-up work and is not implemented in the
+current Alpha tests.
 
 ### Guest Image Requirements for E2E Testing
 
-E2E testing requires a guest containerdisk whose shim and GRUB are both
-properly signed for the edk2 Secure Boot trust chain. Investigation during
-the [implementation PR](https://github.com/kubevirt/kubevirt/pull/17135)
-found that:
+E2E testing requires a guest containerdisk whose EFI boot chain is trusted by
+the selected firmware's enrolled keys. This includes shim, GRUB, and any
+fallback EFI binaries used during first boot.
 
-- **Fedora 40–43**: aarch64 shim is unsigned — fails UEFI db verification.
-- **CentOS Stream 10**: aarch64 shim is signed by Red Hat/CentOS keys, not
-  Microsoft keys — fails UEFI db verification against the standard edk2
-  trust store.
-- **Fedora 44**: shim is Microsoft-signed (UEFI CA 2023), but the GA
-  release shipped `grubaa64.efi` with test signatures instead of the
-  production Fedora Secure Boot CA — shim rejects GRUB.
+The [implementation PR](https://github.com/kubevirt/kubevirt/pull/17135)
+uses `quay.io/containerdisks/ubuntu:24.04` for CI and already performs
+in-guest Secure Boot verification and EFI variable persistence testing.
+Ubuntu is a temporary CI image choice; another ARM64 image with a valid
+Secure Boot chain can provide the same coverage.
 
-**Fedora 45** (targeted GA ~October 2026) is expected to ship aarch64
-with both shim and GRUB properly signed. However, the Fedora 45 GA target
-(~October 20, 2026) falls immediately before the
-[v1.10.0 Code Freeze](https://github.com/kubevirt/sig-release/blob/main/releases/v1.10/schedule.md)
-(October 21, 2026). Fedora releases frequently slip, so the E2E tests
-may need to use an Ubuntu-based containerdisk as a fallback if Fedora 45
-is not available in time, with a TODO to switch to Fedora 45 once it
-ships.
+The implementation retains a TODO to switch to Fedora 45 once a suitable
+image with a properly signed aarch64 boot chain is available. The Fedora 44
+issue recorded in the implementation concerns a test-signed `fbaa64.efi`
+fallback binary causing a Security Violation on first boot. Switching guest
+images is independent of the existing Alpha guest-state verification.
 
 ## Implementation History
 
 - 2026-03-20: Implementation PR opened (<https://github.com/kubevirt/kubevirt/pull/17135>)
+- 2026-06-18: VEP #241 (Firmware Auto-Selection) merged
+- 2026-09-15: Implementation PR rebased on merged VEP #241; webhook validation
+  refactored to inline ARM64 feature gate checks into `validateDomainSpec`
+- 2026-10-21: VEP aligned with the implementation's in-guest Secure Boot
+  verification, explicit JSON varstore path, and EFI persistence test;
+  clarified the separate CCA trust contract.
 
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] VEP #241 (Firmware Auto-Selection) merged and `FirmwareAutoSelection`
+- [x] VEP #241 (Firmware Auto-Selection) merged and `FirmwareAutoSelection`
       feature gate at least Alpha
-- [ ] `ARM64SecureBoot` feature gate added and registered as Alpha
-- [ ] Validation webhook rejects ARM64 `secureBoot: true` when feature gate is
-      disabled
-- [ ] Validation webhook allows ARM64 Secure Boot without SMM when feature
+- [x] `ARM64SecureBoot` feature gate added and registered as Alpha
+- [x] `FirmwareAutoSelection` feature gate required alongside `ARM64SecureBoot`
+      for ARM64 Secure Boot (both validated by the webhook)
+- [x] Validation webhook rejects ARM64 `secureBoot: true` when
+      `ARM64SecureBoot` or `FirmwareAutoSelection` feature gate is disabled
+- [x] Validation webhook allows ARM64 Secure Boot without SMM when feature
       gate is enabled
-- [ ] Domain converter generates firmware auto-selection XML for ARM64 Secure
+- [x] Domain converter generates firmware auto-selection XML for ARM64 Secure
       Boot (reusing VEP #241 infrastructure)
-- [ ] Unit tests for all changed code paths
-- [ ] E2E test containerdisk with properly signed aarch64 shim and GRUB
-      (Fedora 45+ or Ubuntu-based fallback — see
+- [x] Unit tests for all changed code paths
+- [x] E2E test booting an ARM64 VM with Secure Boot enabled using Ubuntu 24.04
+      and verifying `mokutil --sb-state` reports `SecureBoot enabled` (see
       [Guest Image Requirements](#guest-image-requirements-for-e2e-testing))
+- [x] JSON varstore path uses KubeVirt's EFI storage directory, with an E2E
+      test verifying a nonvolatile EFI variable survives VM stop/start and
+      VMI replacement when `efi.persistent: true`
 - [ ] Documentation updated to mention ARM64 Secure Boot support, the feature
       gate, and host requirements (QEMU 10.0+, libvirt with varstore support,
       edk2-aarch64 firmware)
@@ -546,7 +598,6 @@ ships.
 
 - [ ] `ARM64SecureBoot` feature gate promoted to Beta
 - [ ] ARM64 CI lane with Secure Boot testing
-- [ ] E2E tests verifying Secure Boot is active inside guest
 - [ ] Verified with at least two Linux distributions as guests
 
 #### On-By-Default Readiness
