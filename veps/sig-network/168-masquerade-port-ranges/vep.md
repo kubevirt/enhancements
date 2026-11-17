@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.9
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version: 
 
 ## Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required _prior to targeting to a milestone / release_
 
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [X] (R) Alpha target version is explicitly mentioned and approved
-- [] (R) Beta target version is explicitly mentioned and approved
+- [X] (R) Beta target version is explicitly mentioned and approved
 - [] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -34,7 +34,6 @@ Presently, when using an interface of type `masquerade` all traffic gets forward
 
 ## Non Goals
 
-- Allowing combined use of `Ports` and `PortRanges` in the initial implementation
 - Supporting `PortRanges` on non-masquerade bindings
 - Supporting `PortRanges` on secondary multus interfaces
 - Forwarding ports to the `virt-launcher` pod itself instead of the guest VMI
@@ -56,7 +55,7 @@ Presently, when using an interface of type `masquerade` all traffic gets forward
 
 ## Design
 
-A new `PortRange` type will be added to the KubeVirt API:
+A new `PortRange` type is added to the KubeVirt API:
 
 ```go
 // PortRange represents a range of ports to forward to the virtual machine.
@@ -74,16 +73,14 @@ type PortRange struct {
 }
 ```
 
-The `PortRanges` field will be added to the existing `Interface` type and made mutually exclusive with the already present `Ports` field during the Alpha release:
+The `PortRanges` field is added to the existing `Interface` type:
 
 ```go
 type Interface struct {
   ...
   // List of ports to be forwarded to the virtual machine.
-  // Mutually exclusive with the portRanges field.
   Ports []Port `json:"ports,omitempty"`
   // List of ranges of ports to be forwarded to the virtual machine.
-  // Mutually exclusive with the ports field.
   PortRanges []PortRange `json:"portRanges,omitempty"`
   ...
 }
@@ -93,7 +90,7 @@ type Interface struct {
 
 The following validation rules will apply:
 
-- `PortRanges` and `Ports` cannot be used together in the same interface (Note: This mutual exclusivity constraint will be enforced for the Alpha release (v1.9) to simplify implementation; it may be relaxed in Beta or later).
+- `Ports` and `PortRanges` can be used together in the same interface.
 - `PortRanges` can only be used on interfaces of type `masquerade` (not on other bindings).
 - Use of `PortRanges` is not allowed on secondary multus interfaces (this feature is only for the pod interface).
 - For each range, the `start` field must be less than or equal to `end`.
@@ -102,22 +99,17 @@ The following validation rules will apply:
 - A maximum of 10 port ranges can be specified per interface.
 - Additional checks may be added for security and consistency as needed.
 
-#### Note on mutual exclusivity
-
-This decision is deliberate: mutual exclusivity between `Ports` and `PortRanges` will be required during Alpha (v1.9) to keep implementation and validation simple and predictable. The team will revisit this constraint during Beta based on Alpha feedback and may allow combined usage (for example: single ports together with ranges) in a later release.
-
 ### NFTables rules conversion
 
-The existing logic for converting ports specified in the VM/I specs to nftables rules (currently in `pkg/network/setup/netpod/masquerade/masquerade.go`) will be updated to handle port ranges. For each specified range, a single nftables rule will be created to cover the interval, optimizing the number of rules compared to specifying many single ports.
+The existing logic for converting ports specified in the VM/I specs to nftables rules (currently in `pkg/network/setup/netpod/masquerade/masquerade.go`) is updated to handle port ranges. For each specified range, a single nftables rule will be created to cover the interval, optimizing the number of rules compared to specifying many single ports.
 
 ### Feature Gate
 
-The feature will be guarded by a Feature Gate during Alpha and Beta.
-Proposed Feature Gate name: `PortRangesSpec`.
+The feature is guarded by the `PortRangesSpec` feature gate. Its lifecycle across releases is described in the [Graduation Requirements](#graduation-requirements) section.
 
 ## API Examples
 
-The following example demonstrates a configuration using the newly defined `portRanges` field. Note how ranges of different protocols (TCP and UDP) are allowed to overlap. Note that in the Alpha phase, validation will enforce mutual exclusivity with the existing `port` field. 
+The following example demonstrates a configuration using both `ports` and `portRanges` on the same interface. It also illustrates that ranges of different protocols (TCP and UDP) are allowed to overlap.
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -130,6 +122,10 @@ spec:
           interfaces:
             - name: red
               masquerade: {}
+              ports:
+                - name: ssh
+                  port: 22
+                  protocol: TCP
               portRanges:
                 - start: 1000
                   end: 8000
@@ -142,9 +138,9 @@ spec:
           pod: {}
 ```
 
-### Validation error example (Alpha)
+### Validation error example
 
-The following shows an invalid VM manifest that uses both `ports` and `portRanges` on the same interface (not allowed during Alpha), and an example of the API server validation error that should be returned when attempting to create it.
+The following shows an invalid VM manifest that uses two overlapping TCP `portRanges` on the same interface, and an example of the API server validation error that should be returned when attempting to create it.
 
 Invalid manifest:
 
@@ -161,13 +157,12 @@ spec:
           interfaces:
             - name: red
               masquerade: {}
-              ports:
-                - name: ssh
-                  port: 22
-                  protocol: TCP
               portRanges:
-                - start: 1000
-                  end: 2000
+                - start: 80
+                  end: 200
+                  protocol: TCP
+                - start: 150
+                  end: 300
                   protocol: TCP
       networks:
         - name: red
@@ -177,7 +172,7 @@ spec:
 Example API server validation output:
 
 ```text
-Error from server (Invalid): error when creating "invalid-vm.yaml": VirtualMachine.kubevirt.io "invalid-vm" is invalid: spec.template.spec.domain.devices.interfaces[0]: Invalid value: interface: "ports" and "portRanges" cannot be used together
+Error from server (Invalid): error when creating "invalid-vm.yaml": VirtualMachine.kubevirt.io "invalid-vm" is invalid: spec.template.spec.domain.devices.interfaces[0].portRanges: Invalid value: TCP portRanges [80-200] and [150-300] overlap
 ```
 
 ## Alternatives
@@ -278,7 +273,6 @@ The proposed modification poses no scalability problems: it can actually make fo
 - API validation for PortRanges
   - Valid port numbers
   - Overlap checks (disallowed for same protocol, allowed for different)
-  - Mutual exclusivity with the Ports field
 - PortRanges validation errors are properly reported
 - Invalid or not correct fields in the templates are rejected with appropriate errors.
 - Checks for the updated masquerade rules creation logic
@@ -293,6 +287,8 @@ The proposed modification poses no scalability problems: it can actually make fo
 - 2026-04-08: Added explicit validation checks and nftables rules conversion subsection under Design.
 - 2026-04-08: Added Alpha/Beta/GA graduation plan and Feature Gate strategy.
 - 2026-05-10: Minor Fixes, added E2E tests.
+- 2026-09-08: Beta graduation (v1.11): feature gate graduated to Beta, combined `Ports` + `PortRanges` usage supported, E2E coverage added.
+- 2026-10-21: Restructured to describe the GA end state; Alpha/Beta/GA specifics moved to Graduation Requirements.
 
 ## Graduation Requirements
 
@@ -305,9 +301,11 @@ The proposed modification poses no scalability problems: it can actually make fo
 
 ### Beta
 
-- [ ] Feature remains protected by a feature gate
-- [ ] Extended validation and functional coverage based on Alpha feedback
-- [ ] Decision recorded on whether combined `Ports` + `PortRanges` usage should be introduced in this phase or deferred
+- [X] Feature remains protected by a feature gate and is enabled by default
+- [X] Extended validation and functional coverage based on Alpha feedback
+- [X] Decision recorded on whether combined `Ports` + `PortRanges` usage should be introduced in this phase or deferred (introduced in Beta)
+
+No external usage of the new `portRanges` field was reported during Alpha.
 
 ### GA
 
