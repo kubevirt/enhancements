@@ -6,7 +6,7 @@
 
 - This VEP targets alpha for version: v1.6
 - This VEP targets beta for version: v1.9
-- This VEP targets GA for version: v1.10
+- This VEP targets GA for version: v1.11
 
 ### Release Signoff Checklist
 
@@ -366,7 +366,7 @@ The deprecated `HotplugVolumes` feature gate will be retained through the beta p
 - No regressions in existing volume hotplug functionality
 - `HotplugVolumes` feature gate usage has been sufficiently phased out
 
-### GA (v1.10)
+### GA (v1.11)
 
 GA once the feature has been running enabled by default without critical issues. The following cleanup will occur:
 
