@@ -283,7 +283,7 @@ for ARM64 Secure Boot uses the same `UsesFirmwareAutoSelection` path —
 the only difference is the architecture in the `<type>` element, which
 libvirt uses to select the correct firmware descriptor.
 
-When `arch == "aarch64"` and `secureBoot == true`:
+When `arch == "arm64"` and `secureBoot == true`:
 
 - Set `UsesFirmwareAutoSelection = true` in the `EFIConfiguration`
 - The existing auto-selection code path sets `domain.Spec.OS.Firmware`
@@ -295,39 +295,51 @@ When `arch == "aarch64"` and `secureBoot == true`:
     `PathForNVram()` to preserve filename convention; this is not needed for
     ARM64 since it uses a different variable storage mechanism.
 
-When `arch == "aarch64"` and `secureBoot == false`:
+When `arch == "arm64"` and `secureBoot == false`:
 
 - Continue using the existing explicit `<loader>`/`<nvram>` approach with
     AAVMF firmware (no behavior change)
 
 #### 3. Validation Webhook (`pkg/virt-api/webhooks/validating-webhook/admitters/vmi-create-admitter.go`)
 
-Two validation changes are needed:
+Two validation changes are needed, both implemented within `validateDomainSpec`
+via an architecture switch on the `secureBoot` path:
 
-**Feature gate check**: When an ARM64 VMI requests `secureBoot: true`, the
-webhook must verify that the `ARM64SecureBoot` feature gate is enabled. If
-not, reject with a clear error:
+**SMM validation and feature gate check**: The existing "SecureBoot requires
+SMM" check is made architecture-aware using a switch on `arch`. The `arm64`
+case skips the SMM check (SMM is x86-only) and instead validates that both
+the `ARM64SecureBoot` and `FirmwareAutoSelection` feature gates are enabled:
 
 ```go
-if secureBootEnabled(spec.Firmware) && spec.Architecture == "arm64" &&
-    !config.ARM64SecureBootEnabled() {
+switch arch {
+case "amd64", "":
+    if !smmFeatureEnabled(spec.Features) && !tdxEnabled {
+        causes = append(causes, metav1.StatusCause{
+            Type:    metav1.CauseTypeFieldValueInvalid,
+            Message: fmt.Sprintf("%s has EFI SecureBoot enabled. SecureBoot requires SMM, which is currently disabled.", field.String()),
+            Field:   field.String(),
+        })
+    }
+case "arm64":
+    if !config.ARM64SecureBootEnabled() {
+        causes = append(causes, metav1.StatusCause{
+            Type:    metav1.CauseTypeFieldValueInvalid,
+            Message: fmt.Sprintf("%s feature gate is not enabled in kubevirt-config", featuregate.ARM64SecureBoot),
+            Field:   sbField.String(),
+        })
+    }
+    if !config.FirmwareAutoSelectionEnabled() {
+        causes = append(causes, metav1.StatusCause{
+            Type:    metav1.CauseTypeFieldValueInvalid,
+            Message: fmt.Sprintf("%s feature gate is required for ARM64 Secure Boot", featuregate.FirmwareAutoSelection),
+            Field:   sbField.String(),
+        })
+    }
+default:
     causes = append(causes, metav1.StatusCause{
         Type:    metav1.CauseTypeFieldValueInvalid,
-        Message: "ARM64SecureBoot feature gate is not enabled in kubevirt-config",
-        Field:   field.Child("domain", "firmware", "bootloader", "efi", "secureBoot").String(),
-    })
-}
-```
-
-**SMM validation**: Make the existing "SecureBoot requires SMM" check
-architecture-aware, since SMM is an x86 concept and does not apply to
-ARM64. ARM64 Secure Boot protection is provided by the `uefi-vars` device
-on the host side:
-
-```go
-if secureBootEnabled(spec.Firmware) && !smmFeatureEnabled(spec.Features) && spec.Architecture != "arm64" {
-    causes = append(causes, metav1.StatusCause{
-        // ...
+        Message: fmt.Sprintf("SecureBoot is not supported on architecture %s", arch),
+        Field:   field.String(),
     })
 }
 ```
@@ -349,16 +361,18 @@ start time, it will return a clear error that surfaces to the user.
 Extend the firmware auto-selection condition from VEP #241 to include ARM64.
 The existing VEP #241 logic sets `UsesFirmwareAutoSelection = true` for
 standard Secure Boot when `FirmwareAutoSelection` is enabled. ARM64
-additionally requires the `ARM64SecureBoot` feature gate — both gates must
-be enabled for ARM64 Secure Boot to use firmware auto-selection:
+additionally requires the `ARM64SecureBoot` feature gate — if either gate is
+absent for an ARM64 VMI, auto-selection is suppressed and the explicit path
+is taken (which will error, but the webhook guards against reaching this state):
 
 ```go
-if secureBoot && vmType == efi.None && l.firmwareAutoSelectionEnabled {
-    if arch == "aarch64" && !l.arm64SecureBootEnabled {
-        // ARM64 Secure Boot requires both feature gates.
-        // Rejected by webhook, should not reach here.
-    }
-    log.Log.Infof("Using firmware auto-selection for EFI Secure Boot")
+useAutoSelection := secureBoot && vmType == efi.None && l.firmwareAutoSelectionEnabled
+if vmi.Spec.Architecture == "arm64" && !l.arm64SecureBootEnabled {
+    useAutoSelection = false
+}
+
+if useAutoSelection {
+    log.Log.V(4).Infof("Using firmware auto-selection for EFI Secure Boot")
     efiConf = &convertertypes.EFIConfiguration{
         SecureLoader:              true,
         UsesFirmwareAutoSelection: true,
@@ -520,24 +534,31 @@ ships.
 ## Implementation History
 
 - 2026-03-20: Implementation PR opened (<https://github.com/kubevirt/kubevirt/pull/17135>)
+- 2026-06-18: VEP #241 (Firmware Auto-Selection) merged
+- 2026-09-15: Implementation PR rebased on merged VEP #241; webhook validation
+  refactored to inline ARM64 feature gate checks into `validateDomainSpec`
 
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] VEP #241 (Firmware Auto-Selection) merged and `FirmwareAutoSelection`
+- [x] VEP #241 (Firmware Auto-Selection) merged and `FirmwareAutoSelection`
       feature gate at least Alpha
-- [ ] `ARM64SecureBoot` feature gate added and registered as Alpha
-- [ ] Validation webhook rejects ARM64 `secureBoot: true` when feature gate is
-      disabled
-- [ ] Validation webhook allows ARM64 Secure Boot without SMM when feature
+- [x] `ARM64SecureBoot` feature gate added and registered as Alpha
+- [x] `FirmwareAutoSelection` feature gate required alongside `ARM64SecureBoot`
+      for ARM64 Secure Boot (both validated by the webhook)
+- [x] Validation webhook rejects ARM64 `secureBoot: true` when
+      `ARM64SecureBoot` or `FirmwareAutoSelection` feature gate is disabled
+- [x] Validation webhook allows ARM64 Secure Boot without SMM when feature
       gate is enabled
-- [ ] Domain converter generates firmware auto-selection XML for ARM64 Secure
+- [x] Domain converter generates firmware auto-selection XML for ARM64 Secure
       Boot (reusing VEP #241 infrastructure)
-- [ ] Unit tests for all changed code paths
-- [ ] E2E test containerdisk with properly signed aarch64 shim and GRUB
-      (Fedora 45+ or Ubuntu-based fallback — see
-      [Guest Image Requirements](#guest-image-requirements-for-e2e-testing))
+- [x] Unit tests for all changed code paths
+- [ ] E2E test booting an ARM64 VMI with Secure Boot enabled using Ubuntu 24.04
+      as a temporary fallback (see
+      [Guest Image Requirements](#guest-image-requirements-for-e2e-testing));
+      in-guest verification (`mokutil --sb-state`) deferred to Beta when Fedora
+      45 with a properly signed Secure Boot chain is available
 - [ ] Documentation updated to mention ARM64 Secure Boot support, the feature
       gate, and host requirements (QEMU 10.0+, libvirt with varstore support,
       edk2-aarch64 firmware)
