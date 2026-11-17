@@ -464,8 +464,9 @@ The fetcher requires that:
 - Layer media types are supported
 - No volume name appears in more than one layer
 - `io.kubevirt.disk.size` is a valid Kubernetes resource quantity
-- Every PVC volume in the config blob is named by exactly one disk layer's
-  `io.kubevirt.disk.name`, and every disk layer names a PVC volume
+- Every disk layer names a PVC volume in the config blob, and no PVC volume
+  is named by more than one disk layer
+- At most one persistent state layer is present
 
 All fetcher messages other than the stdout JSON are emitted to stderr.
 
@@ -506,6 +507,19 @@ otherwise the `VirtualMachineImport` CR name. `DISK_NAME` is the layer's
 Job, ConfigMap, DataVolumes, PVCs, target VM or VMTemplate) are created in
 the same namespace as the `VirtualMachineImport` CR. Cross-namespace import
 is not supported.
+
+**Persistent state:** An artifact exported from a VM with backend storage
+may carry a persistent state layer, identified by its media type. Starting
+with Beta, the controller restores a present layer into a PVC labelled
+`persistent-state-for: <target VM name>` in the import namespace. KubeVirt
+adopts a PVC carrying that label instead of provisioning a new one, so the
+imported VM starts on its own NVRAM and swtpm state. Without the layer, and
+in Alpha, where the layer is not imported, KubeVirt provisions a fresh
+backend PVC for the imported VM.
+
+A PVC volume in the config blob that no disk layer names is not restored.
+The importer leaves the volume as it is, and the claim has to exist on the
+target cluster before the VM starts.
 
 **Volume sources on imported VMs:** The export format (VEP #256) strips
 `dataVolumeTemplates` and replaces DataVolume volume sources with PVC
@@ -945,6 +959,8 @@ versions it works with:
 - [ ] `virtimportctl` commands moved into `virtctl` as `virtctl vmimport`,
   and `virtimportctl` dropped
 - [ ] Any API changes based on Alpha feedback incorporated
+- [ ] Persistent state layer restored into a PVC adopted as the imported
+  VM's backend storage
 - [ ] User-facing documentation polished
 
 #### On-By-Default Readiness
