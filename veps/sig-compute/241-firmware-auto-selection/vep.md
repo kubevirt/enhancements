@@ -62,21 +62,24 @@ secure boot, enrolled keys, and SMM capabilities.
 - Eliminate hardcoded OVMF firmware paths for the Secure Boot case.
 - Ensure functional equivalence with the current explicit-path approach.
 - Unify the Secure Boot firmware selection mechanism across x86_64 and ARM64.
+- Expose `spec.domain.firmware.bootloader.efi.enrolledKeys` to allow VMs to
+  boot EFI Secure Boot in Setup Mode with no pre-enrolled keys.
 
 ## Non Goals
 
-- Changing the user-facing API (`spec.domain.firmware.bootloader.efi`).
 - Adopting firmware auto-selection for non-Secure-Boot EFI or confidential
   computing VM types (SEV/SEV-ES, SEV-SNP, TDX). See the
   [Why Only Secure Boot?](#why-only-secure-boot) section below for detailed
   rationale.
 - Removing the explicit firmware path detection code in `efi.go` entirely
   (it remains needed for the excluded cases above).
+- API changes beyond `enrolledKeys` described in this VEP.
 
 ## Definition of Users
 
-- **VM Authors**: No change in behavior. The same `secureBoot: true` API
-  field produces the same Secure Boot functionality.
+- **VM Authors**: No change in default behavior. The same `secureBoot: true`
+  API field produces the same Secure Boot functionality. VM Authors can
+  additionally opt into Setup Mode via `enrolledKeys: false`.
 - **Cluster Admins**: Should be aware that the internal domain XML changes,
   which could affect custom monitoring or tooling that parses domain XML.
 - **KubeVirt Developers**: Benefit from a simpler, more maintainable firmware
@@ -92,6 +95,10 @@ secure boot, enrolled keys, and SMM capabilities.
 - As a Cluster Admin, I want KubeVirt to automatically use the best available
   firmware format (raw or qcow2) without requiring KubeVirt code changes when
   the edk2 package is updated.
+- As a VM Author running a custom Secure Boot key hierarchy (e.g. a Talos
+  SecureBoot ISO built with `--secureboot-enroll-keys force`), I want to boot
+  my VM in Secure Boot Setup Mode so that I can enroll my own keys without
+  hitting a "Security violation" from pre-enrolled Microsoft certificates.
 
 ## Repos
 
@@ -229,6 +236,7 @@ blocked on missing firmware descriptors (see [Remaining Blockers](#remaining-blo
 | VM Configuration | Current | Alpha | Target (GA) |
 |---|---|---|---|
 | EFI + Secure Boot (standard) | Explicit paths | **Firmware auto-selection** | Firmware auto-selection |
+| EFI + Secure Boot + Setup Mode | Not supported | **`enrolledKeys: false`** | `enrolledKeys: false` |
 | EFI without Secure Boot | Explicit paths | Explicit paths (unchanged) | Firmware auto-selection |
 | EFI + SEV/SEV-ES | Explicit paths | Explicit paths (unchanged) | Explicit paths (blocked) |
 | EFI + SEV-SNP | Explicit paths (stateless) | Explicit paths (unchanged) | Explicit paths (unchanged) |
@@ -342,6 +350,64 @@ if secureBoot && vmType == efi.None && l.firmwareAutoSelectionEnabled {
 }
 ```
 
+### Secure Boot Setup Mode via `enrolledKeys`
+
+With firmware auto-selection in place, the `enrolled-keys` libvirt feature flag
+can be set to `no` alongside `secure-boot: yes` to select a Secure Boot-capable
+firmware with an **empty varstore**. This allows the guest to boot in UEFI
+Setup Mode — no Microsoft certificates are pre-enrolled, so the guest firmware
+will present the standard Setup Mode enrollment UI and can accept a
+custom key hierarchy.
+
+A new optional field `spec.domain.firmware.bootloader.efi.enrolledKeys`
+(type `*bool`, defaults to `true` when nil) controls this behaviour.
+Setting it to `false` alongside `secureBoot: true` causes virt-launcher to
+request:
+
+```xml
+<os firmware='efi'>
+  <firmware>
+    <feature enabled='yes' name='secure-boot'/>
+    <feature enabled='no' name='enrolled-keys'/>
+  </firmware>
+  ...
+</os>
+```
+
+Libvirt resolves this against a descriptor whose NVRAM template has no
+pre-enrolled keys (e.g. `40-edk2-ovmf-x64-sb.json` on CentOS Stream 9,
+which maps to `OVMF_VARS.fd` — a blank varstore). The guest boots in Setup
+Mode; `mokutil --sb-state` inside the guest will report `SecureBoot disabled`
+and `Platform is in Setup Mode`.
+
+#### Constraints
+
+- `enrolledKeys: false` is only valid when `secureBoot: true`. Setting it
+  without Secure Boot is rejected by the admission webhook.
+- `enrolledKeys: false` requires the `FirmwareAutoSelection` feature gate.
+  Without auto-selection, libvirt cannot match the `enrolled-keys=no`
+  descriptor; the admission webhook rejects the combination.
+- `enrolledKeys: false` is rejected when `launchSecurity` is set. Confidential
+  computing VMs (SEV/SEV-ES, SEV-SNP, TDX) do not use the auto-selection
+  path and never need an empty varstore.
+- Guest-enrolled keys live in NVRAM. Without `persistent: true` they are lost
+  on every restart and the guest re-enters Setup Mode. With `persistent: true`,
+  an NVRAM file that already holds the Microsoft keys is not modified —
+  flipping `enrolledKeys` on a running VM with existing persistent NVRAM does
+  not remove pre-enrolled keys.
+- The `enrolledKeys` field is distinct from the non-Secure-Boot EFI use of
+  `enrolled-keys=no` described in [Non-Secure-Boot EFI](#non-secure-boot-efi).
+  That case uses `enrolled-keys=no` to select a no-SB firmware; this case
+  uses it with `secure-boot=yes` to select a SB-capable firmware with an empty
+  varstore.
+
+#### Safety net at virt-launcher
+
+If the `FirmwareAutoSelection` feature gate is disabled after a VMI with
+`enrolledKeys: false` has already been admitted, virt-launcher will fail to
+start the VMI with an explicit error rather than silently booting with the
+enrolled Microsoft keys.
+
 ### Code Changes
 
 1. **`pkg/virt-config/featuregate/active.go`**: Register
@@ -379,7 +445,7 @@ if secureBoot && vmType == efi.None && l.firmwareAutoSelectionEnabled {
 
 ## API Examples
 
-No user-facing API changes. The existing API is unchanged:
+### Standard Secure Boot (unchanged)
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -390,6 +456,24 @@ spec:
       bootloader:
         efi:
           secureBoot: true
+```
+
+### Secure Boot Setup Mode
+
+Boot with Secure Boot firmware but no pre-enrolled keys, so the guest can
+enroll its own key hierarchy. Requires the `FirmwareAutoSelection` feature gate.
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+spec:
+  domain:
+    firmware:
+      bootloader:
+        efi:
+          secureBoot: true
+          enrolledKeys: false
+          persistent: true   # retain enrolled keys across restarts
 ```
 
 ## Alternatives
@@ -461,6 +545,8 @@ Libvirt's firmware descriptor matching is a fast in-memory operation.
 
 - 2026-03-23: VEP PR opened (https://github.com/kubevirt/enhancements/pull/242)
 - 2026-04-02: Implementation PR opened (https://github.com/kubevirt/kubevirt/pull/17263)
+- 2026-09-23: `enrolledKeys` PR opened (https://github.com/kubevirt/kubevirt/pull/19210);
+  VEP amended to document the `enrolledKeys` API field and Setup Mode design
 
 ## Graduation Requirements
 
@@ -473,12 +559,23 @@ Libvirt's firmware descriptor matching is a fast in-memory operation.
 - [ ] NVRAM path compatibility verified for both root and non-root VMs
 - [ ] Unit tests for new code paths
 - [ ] Existing Secure Boot e2e tests pass
+- [ ] `spec.domain.firmware.bootloader.efi.enrolledKeys` field added to core
+  v1 API
+- [ ] Admission webhook validates: requires `secureBoot: true`, rejects with
+  `launchSecurity`, requires `FirmwareAutoSelection` feature gate when `false`
+- [ ] virt-launcher requests `enrolled-keys=no` in domain XML when
+  `enrolledKeys` is `false`
+- [ ] virt-launcher fails loudly if `enrolledKeys: false` is seen on the
+  explicit-path code path (feature gate disabled after admission)
+- [ ] E2E test: guest boots in Setup Mode (`mokutil --sb-state` reports
+  `Platform is in Setup Mode`)
 
 ### Beta
 
 - [ ] Feature gate enabled by default
 - [ ] Non-Secure-Boot EFI added to firmware auto-selection (using
-  `enrolled-keys=no`)
+  `enrolled-keys=no` — distinct from the `enrolledKeys` API field which
+  controls Setup Mode for Secure Boot VMs)
 - [ ] Migration between virt-launcher versions verified
 - [ ] Persistent EFI NVRAM compatibility verified
 - [ ] No regressions reported during Alpha
