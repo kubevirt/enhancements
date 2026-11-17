@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.10.0
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11.0
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [X] (R) Enhancement issue [#287](https://github.com/kubevirt/enhancements/issues/287) created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [X] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [X] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -258,7 +258,7 @@ all endpoints:
 - **virt-handler / synchronization-controller** server endpoints via
   `SetupTLSForServer`; **exportproxy** via `SetupExportProxyTLS`;
   **exportserver** via `buildServer`; **virt-template** components via the
-  injected `--tls-groups` flag.
+  injected `--tls-curve-preferences` flag.
 
 All KubeVirt TLS endpoints are served directly by the virt pods listed above;
 KubeVirt has no separately-managed operand endpoints that construct their own
@@ -303,10 +303,10 @@ constraint is enforced declaratively via CEL rather than in Go.
 ### Deployment Injection
 
 Extend `InjectTLSConfigIntoDeployment` to inject a
-`--tls-groups` flag for virt-template components, matching the existing pattern
+`--tls-curve-preferences` flag for virt-template components, matching the existing pattern
 for `--tls-cipher-suites` and `--tls-min-version`. The virt-template
-components currently do not accept a `--tls-groups` flag, so the flag must
-be added to their startup code as part of this work.
+components accept the `--tls-curve-preferences` flag as of
+[kubevirt/virt-template#126](https://github.com/kubevirt/virt-template/pull/126).
 
 ### Validation
 
@@ -470,9 +470,9 @@ is O(n) over a short list (the handful of standardised groups).
   support. Components that do not yet understand the `groups` field will use
   Go defaults, which include all the same groups — so there is no security
   regression during rolling updates.
-- virt-template components receive TLS configuration via `--tls-groups` flags
+- virt-template components receive TLS configuration via `--tls-curve-preferences` flags
   injected by virt-operator. During a rolling upgrade, a new virt-operator may
-  inject the `--tls-groups` flag into a deployment running old virt-template
+  inject the `--tls-curve-preferences` flag into a deployment running old virt-template
   pods that do not recognise the flag. virt-operator already handles this by
   triggering a rolling deployment update, so old pods are replaced with new
   ones that understand the flag.
@@ -504,9 +504,8 @@ test.
 Extend `tests/infrastructure/tls-configuration.go`:
 
 - Configure `groups` on the KubeVirt CR
-- Verify TLS connections to virt-api, virt-handler, virt-exportproxy,
-  virt-template-apiserver, and virt-template-controller negotiate using the
-  configured groups
+- Verify TLS connections to virt-api, virt-handler and virt-exportproxy
+  negotiate using the configured groups
 - Verify that a client offering only a non-configured curve (where the
   configured set excludes it) is rejected or falls back appropriately
 - Verify that omitting `groups` preserves default behaviour
@@ -518,23 +517,30 @@ Extend `tests/infrastructure/tls-configuration.go`:
 09-02-2026: Retargeted to Alpha in v1.10.0 behind the `TLSGroupPreferences`
 feature gate; adopted open string set API design with declarative CEL validation
 
+10-21-2026: Alpha implementation merged in
+[kubevirt/kubevirt#19215](https://github.com/kubevirt/kubevirt/pull/19215) and
+[kubevirt/virt-template#126](https://github.com/kubevirt/virt-template/pull/126),
+shipping in v1.10.0
+
+11-17-2026: Targeted Beta in v1.11.0
+
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] Feature gate `TLSGroupPreferences` guards all code changes (disabled by
+- [X] Feature gate `TLSGroupPreferences` guards all code changes (disabled by
   default)
-- [ ] `Groups []string` open string set added to `TLSConfiguration` (no hard
+- [X] `Groups []string` open string set added to `TLSConfiguration` (no hard
   enum, per #18612 §3.2), with convenience group-name constants
-- [ ] `CurvePreferenceIds([]string)` helper in `pkg/util/tls/tls.go`,
+- [X] `CurvePreferenceIds([]string)` helper in `pkg/util/tls/tls.go`,
   gracefully skipping unrecognised names
-- [ ] `CurvePreferences` set on `tls.Config` in all TLS setup functions
-- [ ] `--tls-groups` flag added to virt-template components
-- [ ] `InjectTLSConfigIntoDeployment` extended to inject `--tls-groups`
-- [ ] CEL `x-kubernetes-validations` rule on `TLSConfiguration` enforcing the
+- [X] `CurvePreferences` set on `tls.Config` in all TLS setup functions
+- [X] `--tls-curve-preferences` flag added to virt-template components
+- [X] `InjectTLSConfigIntoDeployment` extended to inject `--tls-curve-preferences`
+- [X] CEL `x-kubernetes-validations` rule on `TLSConfiguration` enforcing the
   TLS-version/group compatibility constraint (#18612 §4.2)
-- [ ] Unit tests for mapping, validation, and TLS setup
-- [ ] Functional tests verifying group enforcement on virt pod endpoints
+- [X] Unit tests for mapping, validation, and TLS setup
+- [X] Functional tests verifying group enforcement on virt pod endpoints
   (including virt-template components)
 
 ### Beta
@@ -544,5 +550,9 @@ feature gate; adopted open string set API design with declarative CEL validation
 - [ ] Keep the recognised group constants and the `CurvePreferenceIds` mapping
   in step with the groups supported by the Go version KubeVirt ships, extending
   them as new hybrid groups are standardised
+- [ ] No API changes to `TLSConfiguration.Groups` or the CEL validation rule
+  since alpha
+- [ ] User-guide documentation for configuring `tlsConfiguration.groups` and
+  the `TLSGroupPreferences` feature gate
 
 ### GA
