@@ -1,0 +1,37 @@
+name: VEP tracker check
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled, unlabeled, assigned, unassigned]
+
+permissions:
+  issues: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  check:
+    # Open tracker issues only; stale or rotten ones are left to the
+    # lifecycle bot, whose clock a comment would reset.
+    if: >-
+      github.event.issue.state == 'open' &&
+      contains(github.event.issue.labels.*.name, 'kind/tracker') &&
+      !contains(github.event.issue.labels.*.name, 'lifecycle/stale') &&
+      !contains(github.event.issue.labels.*.name, 'lifecycle/rotten')
+    concurrency:
+      group: vep-tracker-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check the tracker issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python3 .github/scripts/vep_tracker_check.py --post "$REPO" "$ISSUE_NUMBER"
