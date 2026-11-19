@@ -14,7 +14,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 -->
 
 - This VEP targets alpha for version: v1.9
-- This VEP targets beta for version: v1.10
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version: TBD
 
 ### Release Signoff Checklist
@@ -22,7 +22,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [X] (R) Alpha target version is explicitly mentioned and approved
 - [ ] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
@@ -32,7 +32,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 Provide a brief overview of the topic
 -->
 
-This proposal adds **iteration-aligned stall detection** that works by monitoring **remaining bytes** as reported by QEMU to detect stall and trigger switch-over (to post-copy or stop-and-copy) at a **local minimum**, minimizing downtime and/or the duration spent in post-copy. The aim of this proposal is to achieve both lower migration times and lower downtimes all with less wasted bandwidth/compute once pre-copy plateaus.
+This proposal adds **iteration-aligned stall detection** using **remaining bytes** reported by QEMU. Once pre-copy stalls, the monitor uses the minimum remaining bytes in a trailing time window to choose when to switch to post-copy or stop-and-copy. This aims to reduce both total migration time and the downtime (or time spent in post-copy) once pre-copy plateaus.
 
 ## Motivation
 
@@ -115,21 +115,14 @@ This design discussion assumes the reader is familiar with the following concept
 
 ### Stall Detection
 
-The key idea behind our proposed stall detection algorithm is as follows: Near "convergence", dirty rate, bandwidth, and remaining bytes vary by iteration: remaining data flattens and oscillates instead of trending down. We switch at a **local minimum** of remaining bytes (relative to post-stall samples), not at an arbitrary iteration, in hopes of optimizing downtime duration.
+The key idea behind our proposed stall detection algorithm is as follows: Near "convergence", dirty rate, bandwidth, and remaining bytes vary by iteration: remaining data flattens and oscillates instead of trending down. We switch at a **local minimum** of remaining bytes (over the trailing window), not at an arbitrary iteration, in hopes of optimizing downtime duration.
 
 > __Convergence__:
 Pre-copy **convergence** here means no net progress on remaining bytes iteration-to-iteration: remaining bytes fluctuate around the same level rather than continuing to fall monotonically.
 
-In order to achieve this, once we detect that we have "stalled" (as defined later), we look at some number of iterations since the start of the stall and record the smallest remaining bytes seen over those sample iterations as `bestRemainingBytes`. Afterwards, when **remaining bytes** is within **x%** of `bestRemainingBytes` (i.e. we are roughly as good as the best sample), we trigger a switch-over. We refer to this "x%" value as the "Stall Margin".
+At the end of each iteration, the monitor records the remaining bytes and the job's `TimeElapsed`. `targetRemainingBytes` is the lowest reading less than `stallProgressTimeout` seconds old, including the current reading.
 
-A future section also discusses a relaxation to the "the smallest remaining bytes seen" requirements if that smallest historic sample is not seen again for too many iterations.
-
-> __Sample Iterations__:
-From here, we will refer to the "some number of iterations since the start of the stall" as the sample iterations.
-
-> __Best Remaining Bytes (`bestRemainingBytes`)__:
-Once stall is detected, the smallest remaining bytes observed over the sample iterations is the initial switch-over target. Relaxation (below) may **raise** that target if the old level doesn't reoccur for long enough (perhaps because of guest workload or network shifts).
-
+With `searchLocalMinima` enabled, the monitor starts checking for switch-over on the iteration that detects stall. An iteration qualifies when `remainingBytes <= targetRemainingBytes × (1 + stallMargin/100)`.
 
 ### Defining Stall
 
@@ -141,19 +134,9 @@ Once stall is detected, the smallest remaining bytes observed over the sample it
 ![Stall](./stall.png)
 
 > __Stall Progress Timeout (`stallProgressTimeout`)__:
-New stall-detector knob (default **40s**) controlling the sliding window for outside-window minimum tracking and stall detection (note: this is different from the legacy `progressTimeout` field).
-
-> __Stall Start Time__:
-A previous iteration with the smallest bytes remaining whose elapsed time was at least `stallProgressTimeout` seconds earlier than the current iteration.
+New stall-detector knob (default **40s**) controlling the sliding window for stall detection and local-minimum selection (note: this is different from the legacy `progressTimeout` field).
 
 Our proposed stall definition is reasonable and robust because it allows remaining bytes to rise temporarily—whether from a dirty-rate spike that pushes remaining bytes up or a temporary bandwidth drop—as long as the overall trend is still downward within the `stallProgressTimeout` window.
-
-We define **Sample iterations** as the iterations that occurred since the "stall start time" through the iteration that **detects** stall; the definition implies **≥2** samples before detection:
-1. Stall-start iteration.
-2. A later iteration with remaining bytes **≥** stall-start level (triggers detection).
-3. Zero or more iterations between them, depending on `stallProgressTimeout` and per-iteration duration.
-
-The fact we are guaranteed **≥2** sample iterations at least reduces the chances of a switch-over at a local maximum. Nevertheless, fewer samples when iterations are **long** is acceptable: long iterations already **average** workload phase variation, so extra samples rarely help local-minimum choice (see **Alternatives** §4). Similarly, shorter iterations tend to have higher variations, so collecting more samples gives a better idea of what a "good" iteration looks like. Finally, iteration duration during stall is also related to the expected downtime. So if a migration is stalled with 30-second long iterations, the downtime will also be around 30 seconds. At these scales, we don't care as much about optimizing the downtime as shaving a few extra seconds at this scale is unlikely to make a real difference.
 
 ### Pre-copy Improvements with Dynamic Downtimes
 
@@ -166,7 +149,7 @@ We achieve this by proposing a new API field called `maxDowntimeMs` which specif
 
 > Note that since users can specify a `maxDowntimeMs` lower than QEMU's default of 300ms, virt-launcher must set QEMU target downtime once at migration start to `min(maxDowntimeMs, 300ms)` so a user-configured cap below **300 ms** is honored during pre-copy.
 
-In **pre-copy only mode with no workload disruptions allowed**, after stall we track **implied downtime** each iteration: `impliedDowntimeMs ≈ remainingBytes / bandwidthBpms`. The switch/abort rules below apply **only at a local minimum** (thus transient bandwidth drops or dirty-rate spikes are not acted on).
+In **pre-copy only mode with no workload disruptions allowed**, after stall we track **implied downtime** each iteration: `impliedDowntimeMs ≈ remainingBytes / bandwidthBpms`. The switch/abort rules below apply **only at a local minimum**.
 
 **At a local minimum only:**
 - **If** `impliedDowntimeMs <= maxDowntimeMs`: We set QEMU's target downtime to `maxDowntimeMs` ("soft stop-and-copy"). Note that even though we set target downtime to `maxDowntimeMs`, typically we expect the actual downtime to be better due to switching at a local minimum. Nevertheless, since this does not guarantee an immediate switch-over, we further add a timeout for the switchover deadline as follows: `switchOverDeadline = elapsedTime + switchoverTimeout`. If QEMU fails to switchover by this deadline, it aborts.
@@ -182,20 +165,11 @@ Libvirt’s `bandwidth` in `DomainJobInfo` is effectively a **~100ms** snapshot,
 After triggering soft or hard stop-and-copy, `switchOverDeadline` is set to wall-clock `elapsedSeconds + switchoverTimeout` (default **60s**). If switchover does not complete by then, the migration aborts. This is a dedicated knob.
 
 > __Time Bases Note:__ 
-Stall-detection algorithm bookkeeping (outside-window min, stall detection, relaxation patience/deadlines, local-minima checks) uses libvirt job **`TimeElapsed`**. Completion-timeout triggers, switchover deadlines, and other timeout/budget deadline checks use **wall-clock** time from monitor start.
+Stall-detection algorithm bookkeeping (outside-window min, stall detection, local-minima checks) uses libvirt job **`TimeElapsed`**. Completion-timeout triggers, switchover deadlines, and other timeout/budget deadline checks use **wall-clock** time from monitor start.
 
-### Iterative Switch-over Relaxation
+### Adaptive Capabilities to Workload Phase Shifts
 
-If bandwidth drops or the workload shifts after stall, the level that set `bestRemainingBytes` may never recur; then `remainingBytes ≤ bestRemainingBytes` never holds and the job runs until completion timeout.
-
-To handle this case, we keep a `remainingBytesHistory` of every `remainingBytes` level observed **since stall was detected**, and **relax** by raising `bestRemainingBytes` to the **lowest value still in that history** (then dropping it from consideration) if the current target is not reached within the patience window.
-
-Concretely, at iteration boundary we:
-1. Let `patience` = `stallProgressTimeout` seconds.
-2. Wait up to `patience` seconds for `remainingBytes ≤ bestRemainingBytes × (1 + stallMargin/100)`.
-3. If still not converged, set `bestRemainingBytes` to the lowest value in `remainingBytesHistory` and remove that value from the history.
-4. Set `patience = patience * patienceWindowDecayFactor`.
-5. Repeat steps 2–4 until switch-over or timeout.
+After a sustained increase in dirty rate, the window minimum naturally rises as lower samples from the previous phase expire. A lower sample in a less write-intensive phase lowers the minimum as soon as it enters the window. Notice that this behavior provides this algorithm with robust capabilities for workload phase shifts.
 
 ### Switch-over Budget Check
 
@@ -232,7 +206,6 @@ During the design discussion, we have made mention of several hyper-parameters t
 * `stallMargin`
 * `ewmaAlpha`
 * `precopyPossibleFactor`
-* `patienceWindowDecayFactor`
 * `searchLocalMinima`
 * `progressTimeout` (legacy path only — unchanged semantics; see API Changes)
 
@@ -270,17 +243,13 @@ The mechanisms and definitions included in this VEP were inspired by real worklo
 ![Example 3 Redis](./ex-3-redis.png) 
 ![Example 4 Stressng](./ex-4-stressng.png) 
 ![Example 5 Kernel Compilation](./ex-5-kernel.png) 
-![Example 6 Redis](./ex-6-redis.png) 
-
-We go through each of these examples including the workload setup and how the presented stall detection algorithm might react to each of these scenarios in the below presentation:
-**Video Walkthrough**: https://youtu.be/T5_W7X7o70k
-**Presentation Slides**: https://docs.google.com/presentation/d/e/2PACX-1vQj2xFyHHLCKvjXjyFjH3DpIaLKsAGexadrPm1nmoLbtiidU-XJhSbDJzpvMdyAWISXYFAHfN6JMFhT/pub?start=false&loop=false&delayms=10000
+![Example 6 Redis](./ex-6-redis.png)
 
 
 ### Limitations & Risks
 
 In this section we acknowledge certain limitations of this approach and list scenarios where the current timeout approach wins:
-1. Network drops can cause the stall detection algorithm to trigger (due to remaining bytes increasing). While we won't trigger switchover until we get remaining bytes to be at least as low as the best previous iteration, nevertheless, it is possible for the switchover decision to trigger while pre-copy is still making improvements after network recovers. Perhaps future work can better address this edge case.
+1. Network drops can cause the stall detection algorithm to trigger (due to remaining bytes increasing). Switch-over can trigger once lower samples age out of the window, including while pre-copy is still making improvements after the network recovers. Perhaps future work can better address this edge case.
 2. A benefit of the current timeout approach in KubeVirt today can allow migration to continue for a long time. In some cases, this can be good because you can get lucky and a phase changes in underlying application can allow VM to convergence at the target downtime. Nevertheless, if we increase the duration of the `stallProgressTimeout` window, we can still trade-off migration time in hopes of getting lucky and switching-over without help.
 3. Since a large part of this design is to exploit fluctuations in dirty rates to trigger switchover at a local minimum, a significant risk factor with this design is that any delays in triggering the iteration boundary logic could trigger switchover too late to exploit that window. However, this is a quality risk. Not a correctness risk. The exact impact and severity of this risk is difficult to evaluate until after implementation.
 4. Remaining bytes estimate as reported via QMP in QEMU currently do not include remaining data from VFIO devices. In **alpha**, when stall detection is enabled on a VFIO VM, a warning is logged and post-copy switchover is skipped; switchover decisions may be suboptimal because VFIO state size is not considered. Full VFIO support is a **beta** requirement (QEMU 11.1+).
@@ -316,15 +285,27 @@ When stall detection is disabled, the iteration channel falls through to today's
 
 At each **pre-copy iteration boundary**, the monitor:
 
-1. **Track progress** — update `outsideWindowMin`: the smallest `remainingBytes` among iterations whose elapsed time is at least **`stallProgressTimeout`** in the past (see **Design §Defining Stall**).
-2. **Detect stall** — stalled when `remainingBytes ≥ outsideWindowMin × (1 − stallMargin/100)`.
-3. **Act on stall** — either switch immediately (`searchLocalMinima = false`) or wait for remaining bytes to dip near `bestRemainingBytes`, relaxing the target if that level does not return (see **Design §Iterative Switch-over Relaxation**).
+1. **Tracks progress** — record the current iteration, expire samples whose elapsed time is at least **`stallProgressTimeout`** in the past, and fold those samples into `outsideWindowMin` (see **Design §Defining Stall**).
+2. **Detects stall** — stalled when `remainingBytes ≥ outsideWindowMin × (1 − stallMargin/100)`.
+3. **Acts on stall** — either evaluate switch-over immediately (`searchLocalMinima = false`) or wait for remaining bytes to dip near the current window minimum.
+
+With `searchLocalMinima` enabled, feed samples into a monotonic deque from the first iteration. The deque keeps samples in increasing order of remaining bytes, with the minimum at the front. Expire old samples from the front, remove samples from the back whose remaining bytes are greater than or equal to the current sample's, then append the current sample. The current sample stays in the window at least as long and provides an equal or lower minimum. Keep the FIFO that supplies expired samples to `outsideWindowMin`, since the deque can discard samples before they qualify for the stall check.
 
 **Pseudocode** (iteration-boundary path only; `bandwidthBpms` comes from the poll loop's EWMA):
 
 ```
+minCandidates = empty deque
+
 ON_ITERATION_BOUNDARY(elapsedSeconds, remainingBytes):
     outsideWindowMin = updateOutsideWindowMin(elapsedSeconds, remainingBytes)
+    if searchLocalMinima:
+        cutoff = elapsedSeconds - stallProgressTimeout
+        while !minCandidates.empty() && minCandidates.front.elapsedSeconds <= cutoff:
+            minCandidates.popFront()
+        while !minCandidates.empty() && minCandidates.back.remainingBytes >= remainingBytes:
+            minCandidates.popBack()
+        minCandidates.pushBack({elapsedSeconds, remainingBytes})
+
     logMigrationInfo(...)
     checkCompletionTimeout(...)                 // see table below
 
@@ -333,51 +314,21 @@ ON_ITERATION_BOUNDARY(elapsedSeconds, remainingBytes):
     if !stallDetected:
         if outsideWindowMin != nil
            && remainingBytes >= outsideWindowMin * (1 - stallMargin/100):
-            onStallDetected(elapsedSeconds, remainingBytes)
-        return
-
-    onStalledIteration(elapsedSeconds, remainingBytes, bandwidthBpms)
-
-
-onStallDetected(elapsedSeconds, remainingBytes):
-    stallDetected = true
+            stallDetected = true
+        else:
+            return
 
     if !searchLocalMinima:
         trySwitchover(remainingBytes / bandwidthBpms)
         return
 
-    bestRemainingBytes = min(outsideWindowMin, min recent iterations in window)
-    remainingBytesHistory = empty list of post-stall remainingBytes observations
-    relaxationPatienceMs = stallProgressTimeout * 1000
-    relaxationDeadlineMs = elapsedMs + relaxationPatienceMs
-
-    if nearLocalMinimum(remainingBytes, bestRemainingBytes):
+    targetRemainingBytes = minCandidates.front.remainingBytes
+    if nearLocalMinimum(remainingBytes, targetRemainingBytes):
         trySwitchover(remainingBytes / bandwidthBpms)
 
 
-onStalledIteration(elapsedSeconds, remainingBytes, bandwidthBpms):
-    if !searchLocalMinima:
-        trySwitchover(remainingBytes / bandwidthBpms)
-        return
-
-    record remainingBytes in remainingBytesHistory
-
-    if nearLocalMinimum(remainingBytes, bestRemainingBytes):
-        trySwitchover(remainingBytes / bandwidthBpms)
-        return
-
-    if elapsedMs >= relaxationDeadlineMs:
-        bestRemainingBytes = lowest value in remainingBytesHistory
-        remove that value from remainingBytesHistory
-        relaxationPatienceMs *= patienceWindowDecayFactor
-        relaxationDeadlineMs = elapsedMs + relaxationPatienceMs
-
-    if nearLocalMinimum(remainingBytes, bestRemainingBytes):
-        trySwitchover(remainingBytes / bandwidthBpms)
-
-
-nearLocalMinimum(remainingBytes, bestRemainingBytes):
-    return remainingBytes <= bestRemainingBytes * (1 + stallMargin/100)
+nearLocalMinimum(remainingBytes, targetRemainingBytes):
+    return remainingBytes <= targetRemainingBytes * (1 + stallMargin/100)
 ```
 
 
@@ -501,7 +452,7 @@ Outline any alternative designs that have been considered
 
 3. **Geometric-series completion-time model** ([alternate proposal](https://docs.google.com/document/d/15P45MB9LtXTBKMfFkC2CLvEj-Hf9B6lY-W4DIEAq_5w/edit?tab=t.0#heading=h.sj3tv6yulsis)) was considered. It modeled pre-copy as a geometric series to project completion time and defined "stall" as when projected completion time exceeded the budget or dirty rate > bandwidth. The current design was favored because it also optimizes **switch-over timing** using remaining bytes and better handles dirty-rate and bandwidth variability. Moreover, this proposal also had the same concerns described in (2).
 
-4. **Iteration-count-based sampling and relaxation** (e.g. collect 5 samples, relax on a 5→4→3→2→1 iteration cadence) was dropped for **`stallProgressTimeout`-derived time windows** (job `TimeElapsed`): a fixed iteration count ignores iteration length. Time-based sampling **self-adjusts:** short iterations yield many samples when remaining-byte **swings are large**, where a **fine-grained** local minimum matters most; long iterations yield fewer samples—acceptable because **(a)** they average-out phase-scale dirty-rate variation (often seconds per phase based on Automatically Characterizing Large Scale Program Behavior, Sherwood et al. 2002), smoothing the trace, and **(b)** when remaining data and implied pause are already large, small **relative** swings matter less than near convergence.
+4. **Iteration-count-based sampling** (e.g. use the last 5 samples) was dropped for **`stallProgressTimeout`-derived time windows** (job `TimeElapsed`): a fixed iteration count ignores iteration length. Time-based sampling **self-adjusts:** short iterations yield many samples when remaining-byte **swings are large**, where a **fine-grained** local minimum matters most; long iterations yield fewer samples—acceptable because **(a)** they average-out phase-scale dirty-rate variation (often seconds per phase based on Automatically Characterizing Large Scale Program Behavior, Sherwood et al. 2002), smoothing the trace, and **(b)** when remaining data and implied pause are already large, small **relative** swings matter less than near convergence.
 
 5. **Iteration-based downtime ramp-up** was proposed in https://github.com/kubevirt/enhancements/pull/249. The main idea of this proposal was to ramp-up the max allowable downtime by some amount after x iterations. See discussions on the PR for further details.
 
@@ -518,21 +469,20 @@ Outline any alternative designs that have been considered
 Overview of how the design scales
 -->
 
-In the worst case, pre-stall bookkeeping scales with `stallProgressTimeout`, and post-stall history scales with how long the migration remains stalled. Defaults keep both small enough that cost is effectively constant in practice.
+The number of samples retained before and after stall is bounded by the `stallProgressTimeout` window.
 
 ### Justification
-Let *k* be the number of iterations inside the `stallProgressTimeout` window, and *n* the number of remaining-bytes samples retained in the post-stall min-heap. Then, per monitor-loop iteration:
-__Compute__: 
-- **O(k)** on the iteration stall is first detected — min over `minCandidates`
-- **O(log n)** per stalled iteration after that — min-heap `Push` of `remainingBytes`; on relaxation, `Pop` the lowest candidate
-- **O(1)** amortized before stall is detected (candidate append / age-out)
+Let *k* be the number of iterations inside the `stallProgressTimeout` window. Per iteration boundary:
+__Compute__:
+
+- **O(1)** to read the window minimum from the front of the deque
+- **O(1)** amortized to update the FIFO and deque, since each sample is inserted and removed at most once per queue
 
 __Memory__:
-- **O(k)** for `minCandidates` (bounded by the `stallProgressTimeout` window)
-- **O(n)** for `remainingBytesHistory` (grows with post-stall samples until values are popped during relaxation; not window-bounded)
 
-Moreover, since the shortest an iteration can last in theory is 300ms (otherwise switchover would have been triggered), we can have up to 3.3 records per second. With the default `stallProgressTimeout` of 40 seconds, the largest *k* can get is ~132 records. *n* is separately bounded by how long the job stays stalled before switch-over or abort.
+- **O(k)** for the FIFO and deque combined
 
+Notice that at an iteration cadence of 300 ms (QEMU's default downtime target is 300ms), the default 40-second window holds about 133 samples.
 
 
 ## Update/Rollback Compatibility
@@ -566,20 +516,7 @@ For example:
 
 Functional testing must reliably trigger stall under controlled conditions: a sustained high dirty-rate workload plus capped migration bandwidth so pre-copy plateaus predictably. Outcomes are verified via migration phase/mode and virt-launcher logs.
 
-Tests enable the `MigrationStallDetection` feature gate, drive dirty rates (e.g. `stress-ng`), and tune stall-detector hyper-parameters via `KUBEVIRT_MIGRATION_*` environment variables on virt-launcher. Injection uses a Kubernetes **Mutating Admission Policy** (MAP) that adds an `envFrom` ConfigMap to the compute container. Unlike traditional mutating webhooks, MAPs run in-process and are thus less susceptible to flakes, cheaper to run, and less complex to deploy (i.e., no SSL/secrets deployment).
-
-Env knobs used include:
-* `KUBEVIRT_MIGRATION_STALL_MARGIN`
-* `KUBEVIRT_MIGRATION_STALL_PROGRESS_TIMEOUT`
-* `KUBEVIRT_MIGRATION_SWITCHOVER_TIMEOUT`
-* `KUBEVIRT_MIGRATION_EWMA_ALPHA`
-* `KUBEVIRT_MIGRATION_PRECOPY_POSSIBLE_FACTOR`
-* `KUBEVIRT_MIGRATION_PATIENCE_WINDOW_DECAY_FACTOR`
-* `KUBEVIRT_MIGRATION_SEARCH_LOCAL_MINIMA`
-* `KUBEVIRT_MIGRATION_COMPLETION_TIMEOUT_FACTOR`
-* `KUBEVIRT_MIGRATION_DISABLE_MULTIFD` (test-oriented; helps honor `BandwidthPerMigration` with current QEMU multifd behavior)
-
-Individual scenarios override these so each test reaches its target path within timeouts (e.g. a shorter `stallProgressTimeout`, or an inflated `precopyPossibleFactor`).
+Tests enable the `MigrationStallDetection` feature gate and use `stress-ng` in the guest. A `MigrationPolicy` sets `bandwidthPerMigration`, which the source migration proxy enforces on the direct migration stream, including multifd traffic. Each scenario sets policy fields such as `maxDowntimeMs` and `completionTimeoutPerGiB` as needed.
 
 ### Tests to update at feature-gate graduation
 
