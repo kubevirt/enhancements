@@ -15,7 +15,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 
 - This VEP targets alpha for version: v1.9.0
 - This VEP targets beta for version: v1.10.0
-- This VEP targets GA for version:
+- This VEP targets GA for version: v1.11.0
 
 ### Release Signoff Checklist
 
@@ -24,7 +24,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Alpha target version is explicitly mentioned and approved
 - [x] (R) Beta target version is explicitly mentioned and approved
-- [ ] (R) GA target version is explicitly mentioned and approved
+- [x] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
@@ -193,6 +193,8 @@ features.
 
 - **21-04-2026:** Created [VEP proposal](https://github.com/kubevirt/enhancements/pull/286) and PoC PR
 - **14-06-2026:** [Merged initial implementation and API changes](https://github.com/kubevirt/kubevirt/pull/17551)
+- **22-07-2026:** Added preferences for RHEL and Fedora: https://github.com/kubevirt/common-instancetypes/pull/545
+- **19-11-2026:** Update VEP with GA target
 
 ## Graduation Requirements
 
@@ -219,7 +221,7 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 - [x] Added deprecation notice for `launchSecurity` field in `VirtualMachineInstanceSpec`
 
 ### Beta
-- [ ] `VirtualMachineClusterPreferences` for IBM Secure Execution are added to common-instancetypes
+- [x] `VirtualMachineClusterPreferences` for IBM Secure Execution are added to common-instancetypes
 
 ### GA
-- [ ] The feature is stable and production-ready
+- [x] The feature is stable and production-ready
