@@ -516,19 +516,7 @@ For example:
 
 Functional testing must reliably trigger stall under controlled conditions: a sustained high dirty-rate workload plus capped migration bandwidth so pre-copy plateaus predictably. Outcomes are verified via migration phase/mode and virt-launcher logs.
 
-Tests enable the `MigrationStallDetection` feature gate, drive dirty rates (e.g. `stress-ng`), and tune stall-detector hyper-parameters via `KUBEVIRT_MIGRATION_*` environment variables on virt-launcher. Injection uses a Kubernetes **Mutating Admission Policy** (MAP) that adds an `envFrom` ConfigMap to the compute container. Unlike traditional mutating webhooks, MAPs run in-process and are thus less susceptible to flakes, cheaper to run, and less complex to deploy (i.e., no SSL/secrets deployment).
-
-Env knobs used include:
-* `KUBEVIRT_MIGRATION_STALL_MARGIN`
-* `KUBEVIRT_MIGRATION_STALL_PROGRESS_TIMEOUT`
-* `KUBEVIRT_MIGRATION_SWITCHOVER_TIMEOUT`
-* `KUBEVIRT_MIGRATION_EWMA_ALPHA`
-* `KUBEVIRT_MIGRATION_PRECOPY_POSSIBLE_FACTOR`
-* `KUBEVIRT_MIGRATION_SEARCH_LOCAL_MINIMA`
-* `KUBEVIRT_MIGRATION_COMPLETION_TIMEOUT_FACTOR`
-* `KUBEVIRT_MIGRATION_DISABLE_MULTIFD` (test-oriented; helps honor `BandwidthPerMigration` with current QEMU multifd behavior)
-
-Individual scenarios override these so each test reaches its target path within timeouts (e.g. a shorter `stallProgressTimeout`, or an inflated `precopyPossibleFactor`).
+Tests enable the `MigrationStallDetection` feature gate and use `stress-ng` in the guest. A `MigrationPolicy` sets `bandwidthPerMigration`, which the source migration proxy enforces on the direct migration stream, including multifd traffic. Each scenario sets policy fields such as `maxDowntimeMs` and `completionTimeoutPerGiB` as needed.
 
 ### Tests to update at feature-gate graduation
 
