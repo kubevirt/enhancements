@@ -5,25 +5,25 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.9
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements](https://github.com/kubevirt/enhancements/issues/246)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements](https://github.com/kubevirt/enhancements/issues/246)
+- [x] (R) Alpha target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
 
 Enable optional compression for live migration data streams via
 `MigrationPolicy`, reducing bandwidth consumption and improving migration
-times. In Alpha the user selects the algorithm explicitly (`zstd`). The
-long-term goal is automatic enablement, at which point the algorithm
-selection moves to an advanced override or is removed entirely.
+times. The user selects the algorithm explicitly (`zstd`). Automatic
+enablement remains a longer-term goal; for Beta the explicit opt-in API
+is treated as stable.
 
 ## Motivation
 
@@ -47,15 +47,16 @@ bottleneck but not universally beneficial, hence explicit opt-in.
 
 - Expose compression in `MigrationPolicy` under `spec.experimental.compression`
 - Keep the default disabled
-- Gated behind a dedicated `MigrationCompression` Alpha feature gate
-- Path toward automatic enablement in future versions
+- Gated behind a dedicated `MigrationCompression` feature gate
+- Preserve a stable explicit opt-in API through Beta; evaluate automatic
+  enablement for GA
 
 ## Non Goals
 
-- Fine-grained tuning (compression level, thread count) in Alpha
-- User-facing documentation of tunables in Alpha
-- Automatic heuristic-based decisions in Alpha (dirty rates during migration
-  are 2–3× higher than pre-migration baseline, making predictions unreliable)
+- Fine-grained tuning (compression level, thread count) in Alpha/Beta
+- Automatic heuristic-based decisions in Alpha/Beta (dirty rates during
+  migration are 2–3× higher than pre-migration baseline, making
+  predictions unreliable)
 - Block (disk) migration compression
 
 ## Definition of Users
@@ -85,11 +86,9 @@ Compression is exposed as a field under `spec.experimental` in the
 propagation mechanics are defined by
 [VEP 293: Experimental Migration Options](https://github.com/kubevirt/enhancements/pull/295).
 
-Compression is gated behind its own Alpha feature gate,
-`MigrationCompression`.
-
 The compression field is a string enum: `"none"` (disabled) or `"zstd"`.
-When omitted (`nil`) or set to `"none"`, compression is disabled.
+When omitted (`nil`) or set to `"none"`, compression is disabled. This
+explicit opt-in remains the supported Beta API.
 
 ```go
 // +kubebuilder:validation:Enum=none;zstd
@@ -114,13 +113,17 @@ explicit mapping table and sets `VIR_MIGRATE_COMPRESSED` +
 | `experimental.compression: "zstd"` | `VIR_MIGRATE_COMPRESSED` flag + `VIR_MIGRATE_PARAM_COMPRESSION = "zstd"` |
 
 With multifd active (default when no CPU limit is set), zstd runs per
-multifd channel. Without multifd, QEMU falls back to single-threaded zstd.
+multifd channel. CPU-limited and dedicated-CPU VMs (typical Guaranteed
+QoS) disable multifd to protect the CPU cap; without multifd, zstd is
+not usable (parallel migration threads are forbidden). **Skip enabling
+compression for those VMs**.
 
 ### Interaction with existing features
 
 | Feature | Interaction |
 |---|---|
-| Multifd (parallel) | Compatible — zstd runs per channel |
+| Multifd (parallel) | Required for compression — zstd runs per channel |
+| Guaranteed QoS / CPU limit / dedicated CPU | Skip compression (no multifd) |
 | Auto-converge | Compatible — orthogonal |
 | Post-copy | Compatible — applies to pre-copy phase |
 | TLS | Compatible — compression before encryption |
@@ -150,15 +153,18 @@ characteristics. `MigrationPolicy` provides the right granularity — admins
 target specific namespaces or VM classes without risking cluster-wide
 regressions.
 
-### Why `spec.experimental`
+### Why `spec.experimental` and explicit algorithm selection
 
-The explicit algorithm selection is intended as a transitional API. The
-long-term goal is automatic enablement based on dirty rate, bandwidth, and
-convergence monitoring. If that proves reliable, compression becomes an
-implementation detail and the explicit knob either moves to an
-advanced-only section or is removed. The `spec.experimental` section and
-its lifecycle are defined by
+The `spec.experimental` section and its lifecycle are defined by
 [VEP 293](https://github.com/kubevirt/enhancements/pull/295).
+
+For Beta, the explicit `compression: zstd|none` knob is kept as the stable
+API. Automatic enablement based on dirty rate, bandwidth, and convergence
+was investigated as a Beta goal and is deferred to GA: pre-migration dirty
+rates are not reliable predictors, and removing or relocating the explicit
+algorithm would break the Beta stability guarantee. If automatic enablement
+proves reliable later, the explicit knob may move to an advanced-only
+section or be removed at GA after a deprecation cycle.
 
 ### Consideration for future improvements
 
@@ -172,9 +178,10 @@ transfer speed vs additional CPU usage.
 1. **Boolean toggle**: Simpler, but no room for additional algorithms.
 2. **Cluster-wide default in KubeVirt CR**: Risks regressions for
    CPU-constrained workloads. Can be reconsidered later.
-3. **Full configuration** (level, threads): Too much API surface for Alpha.
+3. **Full configuration** (level, threads): Too much API surface for Alpha/Beta.
 4. **Always enable**: CPU overhead makes this unsuitable as a default.
-5. **Automatic-only**: Dirty-rate predictions not reliable enough yet.
+5. **Automatic-only**: Dirty-rate predictions not reliable enough yet;
+   deferred past Beta to preserve a stable opt-in API.
 6. **xbzrle instead of zstd**: xbzrle is cache-based; zstd gives better
    general-purpose ratio and works naturally with multifd.
 
@@ -186,8 +193,6 @@ overhead is modest at zstd level 1 and bounded by migration bandwidth.
 ## Update/Rollback Compatibility
 
 - **Update**: Field defaults to `nil` (disabled). Existing migrations unaffected.
-- **Rollback**: Feature gate removal causes the field to be ignored.
-  No persistent state changes.
 - **Mixed-version**: Source virt-launcher controls compression. Target
   decompresses transparently.
 
@@ -197,34 +202,41 @@ overhead is modest at zstd level 1 and bounded by migration bandwidth.
    params include `Compression: "zstd"` when enabled.
 2. **E2E**: Migration succeeds with compression; verify non-zero compression
    bytes in job stats.
-3. **Negative**: `spec.experimental.compression` rejected when
-   `MigrationCompression` gate is disabled.
 
 ## Implementation History
 
-<!-- Updated as implementation progresses -->
+- 2026-05-01: VEP accepted — https://github.com/kubevirt/enhancements/pull/247
+- 2026-07-02: Alpha implementation merged — https://github.com/kubevirt/kubevirt/pull/17509
+- 2026-07-24: VEP updated to reflect dedicated FG — https://github.com/kubevirt/enhancements/pull/408
+- 2026-11-18: Beta graduation targeting (v1.11): record decision to keep explicit
+  opt-in API through Beta; defer automatic enablement to GA. Soak testing,
+  Prometheus compression metrics, user-guide docs, and early-adopter feedback
+  remain open Beta workstreams.
+- 2026-11-19: Guaranteed / CPU-limited VMs skip compression (no multifd).
 
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] Experimental migration options framework from
+- [x] Experimental migration options framework from
       [VEP 293](https://github.com/kubevirt/enhancements/pull/295)
-      (feature gate, `spec.experimental` section, propagation path)
-- [ ] `MigrationCompression` Alpha feature gate
-- [ ] `MigrationCompression` enum and `spec.experimental.compression` field
+      (`spec.experimental` section, propagation path)
+- [x] `MigrationCompression` enum and `spec.experimental.compression` field
       added to `ExperimentalMigrationOptions`
-- [ ] `virt-launcher` maps API enum to libvirt compression method and
+- [x] `virt-launcher` maps API enum to libvirt compression method and
       sets hypervisor flags
-- [ ] E2E test
+- [x] E2E test
 
 ### Beta
 
-- [ ] Soak testing confirming acceptable CPU overhead
-- [ ] Investigate automatic enablement (dirty-rate / bandwidth / convergence)
-- [ ] If viable: implement automatic, move explicit algorithm to
-      advanced override or remove
-- [ ] Compression metrics in Prometheus
+- [X] Soak testing confirming acceptable CPU overhead (Burstable only; Guaranteed
+      out of scope — no multifd; predictable, random, "typical", dirtying)
+- [x] Investigate automatic enablement (dirty-rate / bandwidth / convergence):
+      deferred to GA — keep explicit `compression: zstd|none` opt-in as the
+      stable Beta API
+- [ ] Compression metrics in Prometheus (today only log `CompressionRatio`)
+- [X] User-guide documentation for MigrationPolicy compression
+- [X] Early adopter commitment
 
 ### GA
 
