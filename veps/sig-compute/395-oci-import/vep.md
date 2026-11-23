@@ -19,7 +19,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Overview
 
-[VEP #256](../256-oci-export-proposal/oci-export-proposal.md) introduced
+[VEP #256](../256-oci-export-proposal/vep.md) introduced
 OCI artifact export for `VirtualMachines` and
 `VirtualMachineTemplates`, but explicitly deferred import as a follow-up
 design. Its graduation criteria for Beta/GA include "Import mechanism
@@ -140,8 +140,8 @@ process, with @0xFelix and @akalenyu as maintainers.
 ### OCI Artifact Format (reference to VEP #256)
 
 The import mechanism consumes artifacts in the format defined by
-[VEP #256](../256-oci-export-proposal/oci-export-proposal.md). See its
-[OCI Artifact Format Specification](../256-oci-export-proposal/oci-export-proposal.md#oci-artifact-format-specification)
+[VEP #256](../256-oci-export-proposal/vep.md). See its
+[OCI Artifact Format Specification](../256-oci-export-proposal/vep.md#oci-artifact-format-specification)
 for the full definition of artifact types, media types, layer annotations,
 and config blob structure.
 
@@ -190,8 +190,10 @@ type DataVolumeSourceRegistry struct {
     // Layer selects a specific layer from an OCI artifact manifest
     // by matching annotations on the manifest's layer descriptors.
     // The importer resolves the manifest (using Platform to select
-    // from an image index or verify a plain manifest), finds the
-    // matching layer, and treats its blob as raw data.
+    // from an image index; a set Platform is refused for a plain
+    // manifest), finds the matching layer, and treats its blob as
+    // raw data. Only the KubeVirt VM and VMTemplate artifactTypes
+    // are accepted.
     // Incompatible with pullMethod: node.
     // +optional
     Layer *LayerSelector `json:"layer,omitempty"`
@@ -208,8 +210,9 @@ type LayerSelector struct {
 
 Selection must resolve to exactly one layer. The import fails if no
 layer carries all the annotations in `matchAnnotations`, or if more
-than one does. An empty or absent `matchAnnotations` is rejected by the
-webhook.
+than one does. An empty or absent `matchAnnotations`, or an empty key in it, is
+rejected by the webhook. Layer selection requires an OCI image manifest
+with a KubeVirt VM or VMTemplate `artifactType`.
 
 The `matchAnnotations` map follows the convention of Kubernetes label
 selectors, and the selection by annotations itself follows podman's
@@ -230,7 +233,7 @@ CDI's registry import behavior changes as follows:
 
 | Step | Normal (container image) | With Layer (OCI artifact) |
 |------|--------------------------|---------------------------|
-| Manifest parsing | `image.FromSource()` | Fetch manifest; if image index, select by `Platform`; if plain manifest, verify `Platform` matches (fail on mismatch) |
+| Manifest parsing | `image.FromSource()` | Fetch manifest; if image index, select by `Platform`; if plain manifest, or an index entry declaring no platform, refuse a set `Platform` |
 | Layer selection | All layers, match by tar path | Match layer by annotations |
 | Blob fetch | Via layer iteration | `GetBlob()` by matched layer's digest |
 | Layer processing | `tar.NewReader()`, extract `disk/` files | Raw blob path: stream decompressed blob directly |
@@ -271,25 +274,29 @@ The repository follows the same pattern as `kubevirt/virt-template`:
 * A separate `kubevirt.io/virt-import-api` module and a client generated
   from `staging/src/kubevirt.io/virt-import-client-go`
 * A controller-runtime manager with leader election
-* A single Kustomize `default` overlay, from which `make build-installer`
-  renders the released manifest bundle
+* Kustomize overlays: `default`, from which `make build-installer` renders
+  the standalone manifest bundle, and `hco`, from which
+  `make build-installer-hco` renders the bundle HCO embeds
 
 Two images are built: `virt-import-controller` runs the reconciler, and
 `virt-import-fetcher` runs in the metadata-fetch Job, whose image the
-controller receives as a command line flag.
+controller reads from its `FETCHER_IMAGE` environment variable.
 
-The OCI media types and layer annotations the importer reads are constants in
-`kubevirt.io/virt-import-api`, matching VEP #256. The artifact format is shared
-with the exporter, the constants are a copy: `kubevirt/virt-import` does not
-depend on the `kubevirt.io/kubevirt` module. Promoting them to a shared
-package is a GA item.
+The OCI media types and layer annotations the importer reads are internal
+constants of `kubevirt/virt-import`, matching VEP #256; they are not part of
+the published `kubevirt.io/virt-import-api` module. The artifact format is
+shared with the exporter, the constants are a copy: `kubevirt/virt-import`
+does not depend on the `kubevirt.io/kubevirt` module. Promoting them to a
+shared package is a GA item.
 
 The controller does not access container registries directly. It spawns a
-metadata-fetch Job whose Pod runs `virt-import-fetcher` and mounts the
-referenced Secret and ConfigMap for registry authentication. The fetcher
-holds no API access, so the only Pod that mounts registry credentials
-contains an OCI client and nothing else, and the controller needs no
-cluster-wide Secret or ConfigMap read permissions.
+metadata-fetch Job whose Pod runs `virt-import-fetcher`. The Pod gets the
+registry credentials as environment variables from the referenced Secret
+(`secretKeyRef` on the `accessKeyId` and `secretKey` keys, CDI's format) and
+mounts the referenced CA ConfigMap. The fetcher holds no API access, so the
+only Pod that receives registry credentials contains an OCI client and
+nothing else, and the controller needs no cluster-wide Secret or ConfigMap
+read permissions.
 
 #### Required and Optional API Groups
 
@@ -297,13 +304,13 @@ cluster-wide Secret or ConfigMap read permissions.
 availability controller polls discovery and starts the import reconciler once
 the group appears. While it waits it patches pending `VirtualMachineImports`
 with `Ready=False` and `Progressing=True`, reason `Waiting`, naming the
-missing group.
+missing resources.
 
 `template.kubevirt.io` is optional. It is only needed when an artifact's
 `artifactType` names a `VirtualMachineTemplate`, and its absence fails that
-one import rather than blocking the controller. `VirtualMachineTemplates` are
-served from the manager's cache when the group is present at startup, and
-read uncached otherwise, so a group installed later needs no restart.
+one import rather than blocking the controller. `VirtualMachines` and
+`VirtualMachineTemplates` are always read uncached, so a group installed later
+needs no restart.
 
 #### CRD Definition
 
@@ -315,17 +322,20 @@ type VirtualMachineImportSpec struct {
     // TargetName is the name for the created VM or VMTemplate.
     // Defaults to the VirtualMachineImport CR name.
     // +optional
-    TargetName *string `json:"targetName,omitempty"`
+    TargetName string `json:"targetName,omitempty"`
     // StorageClassName overrides the default storage class for all
     // DataVolumes created during import.
     // +optional
-    StorageClassName *string `json:"storageClassName,omitempty"`
+    StorageClassName string `json:"storageClassName,omitempty"`
 }
 ```
 
 `VirtualMachineImportSpec` is immutable after creation, enforced by a CEL
 validation rule (`self == oldSelf`) on the `spec` field of the CRD schema. To
-change import parameters, delete the CR and create a new one.
+change import parameters, delete the CR and create a new one. Further CEL
+rules require a registry source and a `docker://` URL, and require
+`targetName`, `storageClassName`, `secretRef` and `certConfigMap` to be
+DNS-1123 subdomains.
 
 ```go
 type VirtualMachineImportSource struct {
@@ -340,11 +350,11 @@ type VirtualMachineImportRegistrySource struct {
     URL string `json:"url"`
     // SecretRef is the name of a Secret containing registry credentials.
     // +optional
-    SecretRef *string `json:"secretRef,omitempty"`
+    SecretRef string `json:"secretRef,omitempty"`
     // CertConfigMap is the name of a ConfigMap containing registry CA
     // certificates.
     // +optional
-    CertConfigMap *string `json:"certConfigMap,omitempty"`
+    CertConfigMap string `json:"certConfigMap,omitempty"`
     // Platform selects the architecture variant from a multi-arch
     // artifact.
     // +optional
@@ -353,7 +363,7 @@ type VirtualMachineImportRegistrySource struct {
 
 type PlatformOptions struct {
     // Architecture selects the platform variant (e.g. amd64, arm64).
-    Architecture *string `json:"architecture,omitempty"`
+    Architecture string `json:"architecture,omitempty"`
 }
 ```
 
@@ -361,15 +371,28 @@ type PlatformOptions struct {
 // VirtualMachineImportStatus reports observed import state.
 type VirtualMachineImportStatus struct {
     // Conditions represent the latest observations of the import.
+    // +listType=map
+    // +listMapKey=type
     Conditions []metav1.Condition `json:"conditions,omitempty"`
     // ArtifactInfo contains metadata read from the OCI artifact.
     // +optional
     ArtifactInfo *ArtifactInfo `json:"artifactInfo,omitempty"`
     // DiskImports tracks the status of each disk being imported.
+    // +listType=map
+    // +listMapKey=name
     DiskImports []DiskImportStatus `json:"diskImports,omitempty"`
-    // TargetRef references the created VM or VMTemplate.
+    // TargetRef references the created VM or VMTemplate in the namespace
+    // of the VirtualMachineImport.
     // +optional
-    TargetRef *corev1.ObjectReference `json:"targetRef,omitempty"`
+    TargetRef *corev1.TypedLocalObjectReference `json:"targetRef,omitempty"`
+    // ManifestConfigMapHash is the sha256 hash of the data of the
+    // manifest ConfigMap the controller created.
+    // +optional
+    ManifestConfigMapHash string `json:"manifestConfigMapHash,omitempty"`
+    // FetchRestarts counts how often fetching the artifact metadata
+    // started over because the result of a succeeded fetch was lost.
+    // +optional
+    FetchRestarts int32 `json:"fetchRestarts,omitempty"`
 }
 
 type ArtifactInfo struct {
@@ -377,8 +400,9 @@ type ArtifactInfo struct {
     ArtifactType string `json:"artifactType"`
     // Architecture is the resolved platform architecture.
     Architecture string `json:"architecture"`
-    // DiskCount is the number of disk layers in the artifact.
-    DiskCount int `json:"diskCount"`
+    // Digest is the digest the disks are imported from: the image index
+    // digest for a multi-arch artifact, otherwise the manifest digest.
+    Digest string `json:"digest"`
 }
 
 type DiskImportStatus struct {
@@ -390,8 +414,15 @@ type DiskImportStatus struct {
     // Phase mirrors cdiv1.DataVolumePhase values (e.g. "Succeeded",
     // "ImportInProgress", "Failed").
     Phase string `json:"phase"`
+    // Progress mirrors the DataVolume progress (e.g. "45.3%").
+    // +optional
+    Progress string `json:"progress,omitempty"`
 }
 ```
+
+The disk count is `len(diskImports)`. `kubectl get vmimport` prints the
+target name, the age, the status of the `Ready` and `Progressing` conditions
+and the reason of `Ready`.
 
 **Condition types and reasons:**
 
@@ -406,6 +437,13 @@ type DiskImportStatus struct {
 | `Ready` | `True` | `ImportComplete` | Target resource created |
 | `Ready` | `False` | `ImportFailed`  | Import failed (see message) |
 | `Ready` | `False` | `Waiting`       | The `cdi.kubevirt.io` API group is not available |
+| `Ready` | `False` | current phase   | Import in progress |
+
+While an import is in progress, `Ready` carries the reason of the current
+phase (`FetchingMetadata`, `ImportingDisks` or `CreatingTarget`). Transient
+errors, such as an unavailable webhook or API throttling, keep that reason,
+show the error in the `Ready` message and are retried with backoff.
+`ImportFailed` is only set on terminal errors.
 
 #### Import Flow
 
@@ -420,7 +458,7 @@ flowchart TD
         F2["Resolve platform, select manifest"]
         F3["Fetch manifest and config blob<br/>for the resolved platform"]
         F4["Validate artifact"]
-        F5["Write JSON to stdout: artifactType,<br/>config blob, layer info, architecture"]
+        F5["Write the result line to stdout: artifactType,<br/>digests, config blob, layer info, architecture"]
         F1 --> F2 --> F3 --> F4 --> F5
     end
 
@@ -445,62 +483,125 @@ flowchart TD
 ```
 
 **Platform resolution (fetcher step 2):** If the artifact is a plain Image
-Manifest, a set `platform.architecture` is verified against it and a mismatch
-fails the import, while an unset one uses the manifest as-is. If the artifact
-is an Image Index, a set `platform.architecture` selects the matching manifest
-and fails on either no match or multiple matches (e.g. same architecture,
-different variant); an unset one uses the only available manifest, or fails and
-asks the user to specify when the index holds several. Manifests with unknown
-or empty architecture or OS are skipped.
+Manifest (for example one copied without `--multi-arch=all`), its architecture
+is derived from the config blob exactly like the exporter does: the VM's
+`spec.template.spec.architecture`, for a template with parameter references
+replaced by the parameters' default values, and `amd64` if unset or
+unresolvable. A set `platform.architecture` must match it, otherwise the import
+fails; an unset one uses the manifest as-is. If the artifact is an Image Index,
+only `linux` manifests with a known architecture are considered, as CDI does. A
+set `platform.architecture` selects the matching manifest and fails on either
+no match or multiple matches (e.g. same architecture, different variant); an
+unset one uses the only available manifest, or fails and asks the user to
+specify when the index holds several.
 
 **Artifact validation (fetcher step 4):** Non-compliant artifacts fail the Job.
 The fetcher requires that:
 
 - `artifactType` is a known KubeVirt type
   (`application/vnd.kubevirt.virtualmachine.v1` or
-  `application/vnd.kubevirt.virtualmachinetemplate.v1`)
-- Each disk layer carries the `io.kubevirt.disk.name` and
-  `io.kubevirt.disk.size` annotations
-- Layer media types are supported
+  `application/vnd.kubevirt.virtualmachinetemplate.v1`), and an Image Index's
+  `artifactType`, if set, matches the manifest's
+- The manifest, index and config blob match their digests, the config media
+  type matches `artifactType`, and the config blob holds a `kubevirt.io/v1`
+  `VirtualMachine` or a `template.kubevirt.io/v1beta1`
+  `VirtualMachineTemplate` as `artifactType` names
+- An Image Index entry selected for the architecture is an OCI image manifest,
+  and its platform architecture matches the architecture in the config blob,
+  if that sets one
+- The config blob is at most 512 KiB
+- Each disk layer has the `application/vnd.kubevirt.disk.raw+zstd` media type
+  and carries the `io.kubevirt.disk.name` and `io.kubevirt.disk.size`
+  annotations
 - No volume name appears in more than one layer
-- `io.kubevirt.disk.size` is a valid Kubernetes resource quantity
+- `io.kubevirt.disk.size` is a valid, positive Kubernetes resource quantity
 - Every PVC volume in the config blob is named by exactly one disk layer's
   `io.kubevirt.disk.name`, and every disk layer names a PVC volume
+- A `VirtualMachine` has no `dataVolume` volumes
 
-All fetcher messages other than the stdout JSON are emitted to stderr.
+**Fetcher interface:** The fetcher takes the registry URL, the architecture,
+`--insecure-tls` and the CA directory as flags, and the credentials as the
+environment variables `ACCESS_KEY_ID` and `SECRET_KEY`. The URL is parsed like
+CDI does; a tag next to a digest is ignored, the digest decides. The
+controller passes `--insecure-tls` when the registry host is listed in CDI's
+`CDIConfig` `spec.insecureRegistries` (exact host match, as in CDI).
+
+**Fetcher output:** Logs and the result share stdout. The result is exactly
+one line starting with `{"fetchResult":`, the envelope
+`{"fetchResult":{...},"version":1}`, written last and only on success, with
+HTML escaping off. The controller ignores all other lines and fails on a
+malformed result line, an unknown `version`, or zero or several results. A
+result line over 2 MiB is an invalid artifact. The import fails when the
+target and the result together exceed 1 MiB, the most the ConfigMap holds. On failure the reason is
+written to the termination message. The fetcher exits with 2 for an invalid
+artifact or URL and with 1 otherwise. The Job has `backoffLimit` 3,
+`activeDeadlineSeconds` 600, and a `podFailurePolicy` that fails the Job on
+exit code 2 and ignores disruptions (`DisruptionTarget`).
 
 **DataVolume fields (controller step 3):** One DataVolume per disk layer, with:
 
 ```yaml
-source:
-  registry:
-    url: docker://<artifact-ref>
-    platform:
-      architecture: <resolved-arch>
-    layer:
-      matchAnnotations:
-        io.kubevirt.disk.name: <annotation value, passed through verbatim>
-    secretRef: <from spec, if set>
-    certConfigMap: <from spec, if set>
-storage:
-  resources:
-    requests:
-      storage: <disk-size>
-  storageClassName: <from spec, if set>
+metadata:
+  annotations:
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+spec:
+  source:
+    registry:
+      url: docker://<repository>@<pinned digest>
+      platform:  # only for an Image Index
+        architecture: <resolved-arch>
+      layer:
+        matchAnnotations:
+          io.kubevirt.disk.name: <annotation value, passed through verbatim>
+      secretRef: <from spec, if set>
+      certConfigMap: <from spec, if set>
+  storage:
+    resources:
+      requests:
+        storage: <disk-size, at least 1Mi>
+    storageClassName: <from spec, if set>
 ```
+
+The URL is pinned to the digest the fetcher resolved, so every disk is
+imported from the same artifact even if the tag moves: the Image Index
+digest plus `platform` for a multi-arch artifact, the manifest digest without
+`platform` for a plain manifest. The digest is reported in
+`status.artifactInfo.digest`. The PVCs are bound immediately, also on
+`WaitForFirstConsumer` storage classes. Disk sizes below 1Mi are rounded up
+to the smallest DataVolume CDI accepts.
 
 **Metadata persistence:** The controller reads the fetcher's output from the
 Job's Pod logs once, immediately after the Job succeeds. Target PVC names
 derive from the `VirtualMachineImport` alone, so the config blob is rewritten
 at that point and the ready-to-apply manifest stored in a `ConfigMap` owned
-by the CR. Later reconciles resume from it, so an import survives a controller
-restart and the wait for the DataVolumes, and it is garbage collected with
-the CR.
+by the CR, with the keys `target` (the rewritten object) and `result` (the
+fetch result without the config blob). Later reconciles resume from it, so an
+import survives a controller restart and the wait for the DataVolumes, and it
+is garbage collected with the CR. The Job is deleted only once the
+controller's cache shows the ConfigMap, so a lagging cache never starts a
+second fetch.
 
-**PVC naming convention:** `${RESOURCE_NAME}-${DISK_NAME}` (e.g.,
-`fedora-vm-rootdisk`), where `RESOURCE_NAME` is the `targetName` if set,
-otherwise the `VirtualMachineImport` CR name. `DISK_NAME` is the layer's
-`io.kubevirt.disk.name`.
+Because the controller creates the target with its own permissions, it
+records the sha256 hash of the ConfigMap data in
+`status.manifestConfigMapHash` before creating the ConfigMap. The import fails
+if the data no longer matches the hash, or if the stored object is not of the
+expected kind, name and namespace.
+
+If the Pod of a succeeded Job or its logs are gone before the result was
+read, the controller deletes the Job and fetches again, counting each restart
+in `status.fetchRestarts`. After three restarts the import fails.
+
+**Resource naming:** Names derive from the import and are stable across
+reconciles. A DataVolume and its PVC are named
+`${RESOURCE_NAME}-${HASH}` (e.g., `fedora-vm-1f0c3a7e`), where
+`RESOURCE_NAME` is the `targetName` if set, otherwise the
+`VirtualMachineImport` CR name, and `HASH` is derived from `RESOURCE_NAME`,
+the import's UID and the layer's `io.kubevirt.disk.name`, like the clone
+DataVolumes of a `VirtualMachineTemplateRequest`. This keeps names valid for
+any disk name and unique per import. The Job and the ConfigMap are named
+after the CR in the same way. `status.diskImports` maps each disk to its
+DataVolume. Everything the controller creates carries the
+`import.kubevirt.io/ImportUID` label.
 
 **Namespace scoping:** All resources created during import (metadata-fetch
 Job, ConfigMap, DataVolumes, PVCs, target VM or VMTemplate) are created in
@@ -510,52 +611,74 @@ is not supported.
 **Volume sources on imported VMs:** The export format (VEP #256) strips
 `dataVolumeTemplates` and replaces DataVolume volume sources with PVC
 references. Imported VMs therefore use `persistentVolumeClaim` volume
-sources pointing to the PVCs created during import. Non-PVC volumes
+sources pointing to the PVCs created during import, and a VM artifact with a
+`dataVolume` volume is invalid. Non-PVC volumes
 (cloud-init, ConfigMap, containerDisk, etc.) are preserved as-is from
 the config blob.
+
+**Volume sources on imported VMTemplates:** `persistentVolumeClaim` volumes
+are rewritten as for VMs. For a `dataVolume` volume whose
+`dataVolumeTemplate` clones a PVC, `spec.source.pvc` is set to the name and
+namespace of the imported PVC, so VMs created from the template clone the
+imported disks. Other `dataVolume` volumes are kept as they are. `dataVolumeTemplates` with other sources, such as a
+`DataSource`, are kept as they are and are not part of the layer mapping.
 
 **Error semantics:** Import is all-or-nothing. If the metadata-fetch Job
 or any DataVolume fails, the controller sets the `Ready` condition to
 `False` with reason `ImportFailed` and does not create the target VM or
-VMTemplate. Intermediate resources (Jobs, ConfigMaps, DataVolumes, PVCs)
-are cleaned up when the user deletes the `VirtualMachineImport` CR (see
-garbage collection below). A `VirtualMachineTemplate` artifact on a cluster
-without `template.kubevirt.io` fails the same way, with a message naming the
-missing API group.
+VMTemplate. A failed import keeps its intermediate resources (Jobs,
+ConfigMaps, DataVolumes, PVCs) until the user deletes the
+`VirtualMachineImport` CR (see garbage collection below). A
+`VirtualMachineTemplate` artifact on a cluster without `template.kubevirt.io`
+fails the same way, with a message naming the missing API group.
 
-**Naming collisions:** If any resource (DataVolume, PVC, VirtualMachine,
-or VirtualMachineTemplate) that the controller needs to create already
-exists in the namespace, the import fails. The controller does not
-overwrite or adopt existing resources.
+**Naming collisions:** If the target VM or VMTemplate already exists in the
+namespace and was not created by this import, the import fails. DataVolume,
+PVC, Job and ConfigMap names contain a hash of the import's UID, so they
+cannot collide with existing resources in practice; one that exists without
+this import's `ImportUID` label fails the import as well. The controller does
+not overwrite or adopt existing resources.
 
 **Garbage collection:** The controller uses a finalizer on the
-`VirtualMachineImport` CR. Behavior depends on the `Ready` condition:
+`VirtualMachineImport` CR. Behavior depends on whether the target exists:
 
-* **During import** (`Ready` is not `True`): deleting the CR triggers the
-  finalizer, which deletes all intermediate resources (metadata-fetch Job,
-  DataVolumes, and their PVCs). No VM or VMTemplate has been created yet.
-* **After successful import** (`Ready` is `True`): the controller removes
-  ownerReferences from PVCs (so they are no longer owned by their
-  DataVolumes), deletes the DataVolumes, and removes its finalizer. The
-  created VM or VMTemplate and its PVCs persist independently. Deleting
-  the `VirtualMachineImport` CR at this point only deletes the CR
-  itself.
+* **During import or after a failure** (no target created): deleting the CR
+  triggers the finalizer, which deletes all intermediate resources
+  (metadata-fetch Job, ConfigMap, DataVolumes, and their PVCs).
+* **After successful import** (`Ready` is `True`): the controller hands the
+  DataVolumes over to the created VM or VMTemplate by replacing their
+  controller reference, as `virt-template` does for the DataVolumes of a
+  `VirtualMachineTemplateRequest`, and deletes the Job and the ConfigMap. The
+  DataVolumes and their PVCs are then deleted with the target, like the disks
+  of a VM created with `dataVolumeTemplates`. The finalizer stays until the
+  CR is deleted, and deleting the CR at this point only deletes the CR itself.
+
+The target is found by `targetName` and the recorded `artifactType`, never
+through the ConfigMap, and only if it carries the import's `ImportUID` label.
+Keeping the DataVolumes follows KubeVirt's own `vmexport --manifest` flow and
+`VirtualMachineTemplateRequests`, which also keep DataVolumes whose source is
+gone; owning them by the target avoids leaking PVCs.
 
 #### RBAC
 
 **Controller RBAC:** The import controller requires permissions to:
 
-* Manage `VirtualMachineImport` CRs and their status (get, list, watch,
-  update, patch)
-* Create and manage Jobs and read Pod logs (for the metadata-fetch Job)
+* Read and patch `VirtualMachineImport` CRs and their status, and update
+  their finalizers
+* Create, read and delete Jobs, list and watch Pods and read Pod logs (for
+  the metadata-fetch Job)
 * Create, read and delete `ConfigMaps` (for the persisted metadata)
-* Create `VirtualMachines` and `VirtualMachineTemplates`
-* Create CDI `DataVolumes` for disk import
+* Read CDI's `CDIConfig` (for `insecureRegistries`)
+* Create, read, patch and delete CDI `DataVolumes` for disk import and the
+  handover to the target
+* Create and get `VirtualMachines` and `VirtualMachineTemplates`, and update
+  their `finalizers` subresource, so the DataVolumes can carry a controller
+  reference with `blockOwnerDeletion` to the target
 
-The controller does not need access to the `Secrets` and `ConfigMaps`
-referenced in the CR. The metadata-fetch Job's Pod mounts them by name,
-which requires no additional RBAC for the controller (same pattern as
-CDI's importer Pods).
+The controller needs no access to PVCs, nor to the `Secrets` and
+`ConfigMaps` referenced in the CR. The metadata-fetch Job's Pod references
+them by name, which requires no additional RBAC for the controller (same
+pattern as CDI's importer Pods).
 
 **User RBAC:** A `ValidatingAdmissionPolicy` with CEL expressions guards
 creation of `VirtualMachineImport` resources, ensuring the requesting
@@ -565,13 +688,20 @@ escalation where a user without those permissions could otherwise
 leverage the controller to create resources on their behalf.
 
 Users do not need `get` access to the referenced `secretRef` Secret.
-The metadata-fetch Job's Pod mounts the Secret by name without exposing
-its contents to the user. This follows the same pattern as CDI, where
-users reference a Secret in a `DataVolume` without needing read access
-to it.
+This follows CDI's trust model, where users reference a Secret in a
+`DataVolume` without needing read access to it: anyone allowed to create a
+`VirtualMachineImport` can send any Secret in the namespace to a registry of
+their choice.
 
 Aggregated `admin`, `edit` and `view` cluster roles are provided, as they are
 for the other KubeVirt resources.
+
+#### Known Limitations
+
+* The metadata-fetch Job does not use CDI's import proxy (`CDIConfig`
+  `status.importProxy`). On clusters that reach the registry only through a
+  proxy, imports fail while fetching the metadata. CDI's importer Pods are
+  not affected. Support is a follow-up.
 
 #### CLI: virtimportctl
 
@@ -589,13 +719,10 @@ $ virtimportctl create my-import \
 # Import a VMTemplate (auto-detected from artifact type)
 $ virtimportctl create tpl-import \
     --url=docker://registry.example.com/templates/fedora:v1
-
-# Check status
-$ virtimportctl status my-import
-
-# Delete import (keeps created VM/VMTemplate, cleans up DataVolumes)
-$ virtimportctl delete my-import
 ```
+
+`virtimportctl` only provides `create`. Imports are inspected and deleted
+with `kubectl get`, `describe` and `delete vmimport`.
 
 **Flags on `virtimportctl create`:**
 
@@ -616,22 +743,38 @@ its commands can be moved into `virtctl` and `virtimportctl` dropped.
 #### Standalone Installation
 
 `make build-installer` renders the `default` overlay into a single
-`virt-import.yaml` published with each release. Applying it installs the
-`VirtualMachineImport` CRD, the controller `Deployment`, its RBAC, the
-metrics `Service`, the `NetworkPolicy` and the `ValidatingAdmissionPolicy`.
+`install.yaml` published with each release. Applying it installs the
+`VirtualMachineImport` CRD, the controller and everything it needs.
 cert-manager issues the metrics serving certificate.
 
 #### HCO Integration
 
-`kubevirt/virt-import` provides a `csv-generator` in its controller image,
-as the other components HCO deploys do. HCO's manifest build calls it with
-the digest-pinned controller and fetcher images, so the controller and the
-`VirtualMachineImport` CRD become part of what HCO installs. There the
-metrics serving certificate is issued by the OpenShift service CA.
+`make build-installer-hco` renders the `hco` overlay into `install-hco.yaml`,
+published with each release next to `install.yaml` and listed in
+`CHECKSUMS.sha256`. HCO embeds it and deploys everything in it at runtime,
+the CRD included, the pattern `virt-operator` uses for `virt-template`. HCO
+does not merge a virt-import `ClusterServiceVersion`: with a CSV, OLM owns the
+`Deployment`, so HCO could not apply node placement, turn the component off
+or later pass the TLS profile, and a CSV cannot carry the
+`ValidatingAdmissionPolicy` guarding against privilege escalation or the
+aggregated roles.
 
-The `HyperConverged` API is unchanged. The controller is idle until a
-`VirtualMachineImport` exists, and access to the feature is governed by RBAC
-on `import.kubevirt.io/virtualmachineimports`.
+* **HyperConverged API:** a new alpha feature gate `deployVirtImport`, off by
+  default. The handlers only run when the HCO `Deployment` sets
+  `VIRT_IMPORT_CONTROLLER_IMAGE` and `VIRT_IMPORT_FETCHER_IMAGE`.
+* **What HCO deploys:** every object in the embedded bundle, in HCO's
+  namespace with HCO's labels and infra node placement, both images from
+  HCO's environment. HCO adds what the bundle cannot carry for its
+  environment, such as NetworkPolicies and TLS settings. HCO's `ClusterRole`
+  gains create on CRDs plus the rules of the virt-import role.
+* **Disable and uninstall:** turning the feature gate off or deleting the
+  `HyperConverged` CR deletes the CRD first, which removes all
+  `VirtualMachineImports`; VMs, templates and PVCs of finished imports are
+  kept. HCO removes the other objects only once the CRD is gone, so the
+  controller can still clear the finalizers.
+
+Access to the feature is governed by RBAC on
+`import.kubevirt.io/virtualmachineimports`.
 
 ## API Examples
 
@@ -675,16 +818,21 @@ spec:
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
-  name: fedora-vm-rootdisk
+  name: fedora-vm-1f0c3a7e
   namespace: default
+  annotations:
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+  labels:
+    import.kubevirt.io/ImportUID: <import UID>
   ownerReferences:
     - apiVersion: import.kubevirt.io/v1alpha1
       kind: VirtualMachineImport
       name: my-import
+      controller: true
 spec:
   source:
     registry:
-      url: docker://registry.example.com/vms/fedora:v1
+      url: docker://registry.example.com/vms/fedora@sha256:<index digest>
       secretRef: registry-credentials
       certConfigMap: registry-ca
       platform:
@@ -714,19 +862,21 @@ status:
   artifactInfo:
     artifactType: application/vnd.kubevirt.virtualmachine.v1
     architecture: amd64
-    diskCount: 2
+    digest: sha256:<index digest>
   diskImports:
-    - names: [rootdisk]
-      dataVolumeName: fedora-vm-rootdisk
+    - name: rootdisk
+      dataVolumeName: fedora-vm-1f0c3a7e
       phase: Succeeded
-    - names: [datadisk]
-      dataVolumeName: fedora-vm-datadisk
+      progress: 100.0%
+    - name: datadisk
+      dataVolumeName: fedora-vm-8d42b6c5
       phase: Succeeded
+      progress: 100.0%
   targetRef:
-    apiVersion: kubevirt.io/v1
+    apiGroup: kubevirt.io
     kind: VirtualMachine
     name: fedora-vm
-    namespace: default
+  manifestConfigMapHash: <sha256 of the ConfigMap data>
 ```
 
 ### Full round-trip example
@@ -737,7 +887,7 @@ $ virtctl vmexport create my-export --vm=fedora-vm
 $ virtctl vmexport download my-export --format=oci --output=fedora.oci.tar
 
 # Push to registry
-$ skopeo copy oci-archive:fedora.oci.tar \
+$ skopeo copy --multi-arch=all oci-archive:fedora.oci.tar \
     docker://registry.example.com/vms/fedora:v1
 
 # Cluster B: import
@@ -782,6 +932,16 @@ component part of the core deployment, costing a feature gate and a
 deployment toggle in the `KubeVirt` CR and a job to vendor the bundle on each
 release. It stays available if import becomes a core component later.
 
+### Deploy from a CSV generated by virt-import
+
+`kubevirt/virt-import` could ship a `csv-generator` in its controller image,
+as other components HCO deploys do, and HCO would merge the
+`ClusterServiceVersion` it prints. This was rejected because OLM then owns the
+`Deployment`, so HCO could not apply node placement, turn the component off
+or later pass the TLS profile, and because a CSV cannot carry the
+`ValidatingAdmissionPolicy` guarding against privilege escalation or the
+aggregated roles.
+
 ### Add a new CDI source type (DataVolumeSourceOCIArtifact)
 
 A dedicated `DataVolumeSourceOCIArtifact` could encapsulate all OCI
@@ -804,9 +964,9 @@ Minimal impact. Each import creates one `VirtualMachineImport` CR, one
 metadata-fetch Job, one `ConfigMap`, and one `DataVolume` per disk. The
 import controller is a single-replica deployment with leader election and
 standard watch/reconcile mechanics. DataVolume imports use CDI's existing
-scheduling and rate limiting. Intermediate resources (Jobs, ConfigMaps,
-DataVolumes, PVCs) are owned by the import CR and garbage collected on
-deletion.
+scheduling and rate limiting. The Job and the ConfigMap are deleted once the
+import completes; the DataVolumes and PVCs are then owned by the target.
+Without a target, all intermediate resources are deleted with the import CR.
 
 ## Update/Rollback Compatibility
 
@@ -821,14 +981,18 @@ Created VMs, templates and PVCs are unaffected.
 rollback mean applying a different release of the manifest bundle, and the
 CRs can be deleted before uninstalling.
 
-**HCO:** the component follows the HCO release, so a rollback to a release
-predating this feature takes the controller with it, stranding any imports in
-progress until it is reinstalled.
+**HCO:** the component follows the HCO release and the virt-import version HCO
+pins; HCO syncs the bundle from the matching virt-import release asset.
+Downstream builds can override the bundle like the KubeVirt feature gate
+file. Turning `deployVirtImport` off removes the CRD before the controller,
+so imports are cleaned up. A rollback to a release predating this feature
+takes the controller with it, stranding any imports in progress until it is
+reinstalled.
 
 The CDI `Layer` field is additive. On rollback to a CDI version without it,
-the API server prunes `layer` while decoding, so CDI imports the whole
-artifact as a container image and fails on its custom media types. With
-all-or-nothing semantics the whole import fails.
+the API server prunes `layer` while decoding. The controller reads each
+created DataVolume back, finds `layer` missing and fails the import with "the
+installed CDI does not support layer selection", before CDI imports anything.
 
 ### Version Compatibility
 
@@ -839,8 +1003,8 @@ versions it works with:
   the minimum CDI version providing it.
 * **KubeVirt:** the coupling is the OCI artifact format of VEP #256 and the
   API versions of the objects in the config blob, not a controller version.
-  An artifact carrying an API version the cluster does not serve fails that
-  one import.
+  Each release accepts the API versions it was built with, `kubevirt.io/v1`
+  and `template.kubevirt.io/v1beta1`, and rejects artifacts carrying others.
 * **HCO:** a single HCO release pins KubeVirt, CDI and the import controller
   together.
 
@@ -888,19 +1052,23 @@ versions it works with:
   verify `platform.architecture` selection works
 * **Error cases:** invalid artifact type, missing layer, unreachable
   registry, invalid credentials
-* **Cleanup:** delete import CR -> verify metadata-fetch Job, ConfigMap,
-  DataVolumes, and PVCs are garbage collected
+* **Cleanup:** delete import CR before it completes -> verify
+  metadata-fetch Job, ConfigMap, DataVolumes, and PVCs are garbage
+  collected; after it completes -> verify the DataVolumes are owned by the
+  target and deleting the CR keeps them
 
 ### Phase 3: HCO
 
-* `operator-sdk bundle validate` passes on the generated bundle
-* A `csv-generator` test asserts the emitted CSV and the dumped CRD
-* HCO's manifest build produces a bundle carrying the controller deployment
-  and the `VirtualMachineImport` CRD
+* `make build-installer-hco` renders `install-hco.yaml` in
+  `kubevirt/virt-import` CI
+* HCO deploys the embedded bundle with `deployVirtImport` on, and removes it,
+  CRD first, when the feature gate is turned off
 
 ## Implementation History
 
 * 2026-07-21: Initial proposal. PR: [#396](https://github.com/kubevirt/enhancements/pull/396).
+* 2026-11-23: Updated to match the Phase 2 implementation and the HCO
+  bundle.
 
 ## Graduation Requirements
 
@@ -936,8 +1104,10 @@ versions it works with:
 
 #### Phase 3: HCO
 
-- [ ] `csv-generator` in `kubevirt/virt-import`
-- [ ] HCO deploys the import controller and the `VirtualMachineImport` CRD
+- [ ] `install-hco.yaml` bundle published with each `kubevirt/virt-import`
+  release
+- [ ] HCO deploys the embedded bundle behind the `deployVirtImport` feature
+  gate
 
 ### Beta
 
@@ -949,10 +1119,10 @@ versions it works with:
 
 #### On-By-Default Readiness
 
-There is no feature gate to enable: a cluster that installs the component can
-use it, and HCO installs it in every distribution built on it. Graduating to
-beta therefore means declaring the API and the controller stable rather than
-flipping a default:
+Standalone has no feature gate: a cluster that installs the component can use
+it. Under HCO, `deployVirtImport` stays alpha and off by default. Graduating to
+beta therefore means declaring the API and the controller stable, not enabling
+the component by default:
 
 - [ ] No critical or high-severity bugs open against OCI import
 - [ ] E2e tests stable and gating in CI
@@ -961,7 +1131,7 @@ flipping a default:
 ### GA
 
 - [ ] OCI artifact format constants promoted to a package shared by the
-  exporter and the importer, replacing the copy in `virt-import-api`
+  exporter and the importer, replacing the copy in `kubevirt/virt-import`
 - [ ] Stable API with no breaking changes from beta
 - [ ] Production usage feedback incorporated
 - [ ] Node pull mode implemented or explicitly deferred with justification
