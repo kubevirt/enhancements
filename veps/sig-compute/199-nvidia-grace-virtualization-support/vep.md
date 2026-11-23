@@ -33,7 +33,7 @@ The Phase 1 contract is:
 - Automatic, platform-aware large-BAR `pcihole64` sizing from device BARs.
 - Admission validation for the Grace-specific configuration constraints introduced by Phase 1.
 
-EGM, vCMDQ, PCIe link speed/width modeling, PCIe switch topology mirroring, mixed GPU+NIC topologies, and any per-GPU PXB isolation work that goes beyond the kubevirt-aie baseline are explicitly **out of scope** for this VEP and will be specified in follow-up VEPs or design documents.
+EGM, PCIe link speed/width modeling, PCIe switch topology mirroring, mixed GPU+NIC topologies, and any per-GPU PXB isolation work that goes beyond the kubevirt-aie baseline are explicitly **out of scope** for this VEP and will be specified in follow-up VEPs or design documents.
 
 ## Motivation
 
@@ -70,7 +70,6 @@ Grace GPUs expose large 64-bit prefetchable PCI BARs that can exceed the default
 
 - Defining a user-visible API for Grace topology (GI cell counts, NUMA distances, MMIO sizing, per-GPU PCI placement). All of these are inferred from the host.
 - EGM (Extended GPU Memory) backing for guest memory.
-- vCMDQ hardware command queue virtualization.
 - PCIe link speed and width modeling on guest root ports.
 - PCIe switch topology mirroring (e.g. ConnectX/BlueField/NVMe behind a switch).
 - Mixed GPU + SR-IOV NIC topologies with independent isolation policies.
@@ -151,6 +150,14 @@ KubeVirt maintains a built-in table of recognized Grace GPU PCI vendor/device ID
 
 Devices matching IDs in `spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs` are treated identically to built-in Grace devices across admission validation, `virt-handler` classification, and `virt-launcher` domain generation.
 
+#### Additional PCI ID semantics
+
+The effective ID set is the union of the built-in Grace table and the configured additional IDs. Classification is resolved when `virt-launcher` starts the VMI, using the KubeVirt CR revision observed at that point. A VMI may therefore pass admission while an additional ID is configured and later reach `virt-launcher` after that ID has been removed from the CR; in that case the existing fail-closed sysfs verification in [Admission Validation](#admission-validation) applies unchanged — `virt-launcher` must fail to start the VMI with an actionable error rather than silently dropping Grace classification for the device. KubeVirt does not pin the admission-time ID set into the VMI.
+
+Administrators are responsible for verifying that any additional PCI ID identifies a device compatible with the Grace baseline. Adding an ID instructs KubeVirt to apply the Grace guest contract (SMMUv3 topology, GI NUMA cells, large-BAR aperture) to that device; it does not establish device compatibility and does not waive platform checks or runtime verification. Misconfigured IDs fail closed at launch, not silently.
+
+`additionalPCIDeviceIDs` is a list of exact `vendor:device` PCI ID pairs in hexadecimal, for example `10DE:3041`. Values are matched case-insensitively against sysfs `vendor`/`device` attributes. Malformed values, wildcards, class-based or subsystem selectors are rejected by CR validation. Entries that duplicate a built-in Grace ID or another entry (after case normalization) are rejected as redundant configuration. The list is additive only; it cannot remove or override built-in Grace IDs.
+
 Node labels are not the classification mechanism. They may help scheduling, but Grace activation depends on the feature gate, the requested host-device resource, and runtime verification of the assigned PCI device.
 
 There is **no Grace-specific user-facing VMI API** in Phase 1. Grace handling is activated when all of the following are true:
@@ -159,7 +166,7 @@ There is **no Grace-specific user-facing VMI API** in Phase 1. Grace handling is
 2. The VMI requests one or more Grace-class GPU host devices through the existing host-device API.
 3. `virt-launcher` detects a Grace-capable host and matching Grace GPU devices.
 
-No annotation is required to opt a VMI into Grace handling. The previously proposed `alpha.kubevirt.io/graceVirtualization` annotation is removed from this VEP. Sub-feature toggles such as EGM and vCMDQ are deferred to follow-up VEPs.
+No annotation is required to opt a VMI into Grace handling. The previously proposed `alpha.kubevirt.io/graceVirtualization` annotation is removed from this VEP. Sub-feature toggles such as EGM are deferred to follow-up VEPs.
 
 ### Phase 1 Guest Contract
 
@@ -181,21 +188,24 @@ not prescribe a numbering scheme.
 ```xml
 <devices>
   <iommu model='smmuv3'>
-    <driver pciBus='...' accel='on' ats='...' ril='...' ssidSize='...' oas='...'/>
+    <driver pciBus='...' accel='on' ats='on' cmdqv='on'/>
   </iommu>
 </devices>
 ```
 
-`pciBus` is derived from the guest PCI bus/controller allocated by the VEP 115 placement logic. `accel='on'` is required for the Phase 1 Grace contract; VEP 199 does not define a non-accelerated SMMUv3 fallback.
+`pciBus` is derived from the guest PCI bus/controller allocated by the VEP 115 placement logic. `accel='on'` is required for the Grace contract; VEP 199 does not define a non-accelerated SMMUv3 fallback. `ats='on'` (PCIe Address Translation Services) is set explicitly as it is orthogonal to SMMU property detection.
 
-The remaining SMMUv3 attributes are implementation-owned domain XML details. Where possible, KubeVirt should infer them from host IOMMU/device capabilities and the libvirt/QEMU platform defaults. The values used by the current kubevirt-aie baseline, such as `ats='on'`, `ril='off'`, `ssidSize='20'`, and `oas='48'`, may be used as alpha defaults for qualified Grace systems, but they are not user-visible API and are not stable VEP-level constants. If QEMU/libvirt grow reliable auto defaults for these attributes, KubeVirt may omit explicit values and let the lower layers select them.
+KubeVirt does not hardcode SMMUv3 address-size attributes (`oas`, `ril`, `ssidSize`). When `accel='on'` is present in the IOMMU driver element, QEMU 10.1.0+ with `QEMU_CAPS_ARM_SMMUV3_ACCEL` (exposed via libvirt 12.5.0+) probes OAS, RIL, and SSIDSize directly from the host SMMUv3 hardware registers, removing the need for hardcoded, platform-specific values. Earlier kubevirt-aie baselines hardcoded `oas='48'`, `ril='off'`, and `ssidSize='20'` for Grace Blackwell and Vera Rubin; these are superseded by the auto-detection mode and are not carried upstream.
+
+### vCMDQ (Tegra241 CMDQV)
+
+For Grace Blackwell VMs, KubeVirt sets `cmdqv='on'` on the SMMUv3 IOMMU driver element. CMDQV (Command Queue Virtualization) is a Tegra241 SoC hardware feature providing a direct hardware-accelerated path for GPU TLB invalidations into the SMMUv3, eliminating CPU-mediated software TLB shootdowns and reducing GPU memory operation latency. The `cmdqv` attribute is exposed by libvirt 12.5.0+ (from the upstreamed Tegra241 CMDQV QEMU support). On hosts or builds without CMDQV support, `cmdqv` is omitted and KubeVirt relies on the standard SMMUv3 command queue.
 
 Notes:
 
 - VEP 199 owns the Grace guest-visible SMMUv3 topology.
 - VEP 266 owns the generic IOMMUFD path: device-plugin allocation, FD delivery, per-`<hostdev>` IOMMUFD binding, and the domain-level `<iommufd>` association.
-- `cmdqv` is not set in Phase 1. vCMDQ is deferred to a follow-up VEP.
-- If the selected node cannot provide the required VEP 266 IOMMUFD transport, KubeVirt must fail closed with an actionable error. Phase 1 does not define a silent downgrade to non-accelerated SMMUv3 for Grace passthrough.
+- If the selected node cannot provide the required VEP 266 IOMMUFD transport, KubeVirt must fail closed with an actionable error. There is no silent downgrade to non-accelerated SMMUv3 for Grace passthrough.
 
 ---
 
@@ -293,7 +303,7 @@ KubeVirt's generic PCI device plugin can provide these resources. An external pr
 
 Admission classifies a requested `spec.domain.devices.hostDevices[].deviceName` as Grace-class only when KubeVirt host-device configuration maps that resource name to a known Grace GPU PCI vendor/device ID—either from KubeVirt's built-in table or configured via `spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs`—for example through `permittedHostDevices.pciHostDevices[].resourceName` and `pciVendorSelector`. Admission does not classify Grace devices from resource-name patterns or node labels. After scheduling, `virt-launcher` must verify the allocated BDF through sysfs `vendor`/`device` before applying Grace-specific topology. If the allocated device does not match the expected Grace PCI ID (built-in or configured), KubeVirt must fail closed with an actionable error. Node labels may be used only for scheduling or operator policy.
 
-Future features (EGM, vCMDQ, mixed GPU+NIC topology, etc.) are not part of this VEP and have no admission rules here.
+Future features (EGM, mixed GPU+NIC topology, etc.) are not part of this VEP and have no admission rules here.
 
 Admission validation is intentionally limited to information available before the VMI is scheduled. Host-specific discovery failures (for example missing GI sysfs data on a selected node, unreadable BAR resources, or incomplete distance vectors) are reported by `virt-launcher` during domain conversion.
 Those failures should be surfaced with actionable events and logs. Grace platform defaults may be used only for explicitly documented alpha fallback paths such as GI grouping or distance construction; IOMMUFD availability is not optional for the Phase 1 guest contract.
@@ -329,7 +339,7 @@ spec:
 
 ### Grace Baseline VMI (single representative example)
 
-A representative Phase 1 VMI: a Grace Blackwell node with up to four GPUs passed through using the standard host device API. No Grace-specific annotation, no EGM, no vCMDQ, no SR-IOV NICs in this scope. SMMUv3, GI cells, and the 64-bit PCI hole are populated by `virt-launcher`.
+A representative Phase 1 VMI: a Grace Blackwell node with up to four GPUs passed through using the standard host device API. No Grace-specific annotation, no EGM, no SR-IOV NICs in this scope. SMMUv3 (including vCMDQ), GI cells, and the 64-bit PCI hole are populated by `virt-launcher`.
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -388,7 +398,7 @@ spec:
         claimName: pvc-rootdisk
 ```
 
-This is intentionally the only VMI example in the VEP. EGM-backed, vCMDQ-enabled, and mixed GPU+NIC examples are deferred to the VEPs that introduce those features.
+This is intentionally the only VMI example in the VEP. EGM-backed and mixed GPU+NIC examples are deferred to the VEPs that introduce those features.
 
 ---
 
@@ -400,7 +410,7 @@ The implementation emits or consumes the following libvirt domain XML as interna
 
 | Domain XML | Ownership | Purpose |
 | --- | --- | --- |
-| `<iommu model='smmuv3'>` with `<driver pciBus='...' .../>` | VEP 199; validated in the downstream kubevirt-aie baseline | Emits guest-visible SMMUv3 instances for PCIe buses carrying assigned Grace GPUs. |
+| `<iommu model='smmuv3'>` with `<driver pciBus='...' accel='on' ats='on' cmdqv='on'/>` | VEP 199; validated in the downstream kubevirt-aie baseline | Emits guest-visible SMMUv3 instances for PCIe buses carrying assigned Grace GPUs, with QEMU host capability probing for address-size attributes and vCMDQ command-queue virtualization. |
 | `<acpi nodeset='...'>` | VEP 199 | Binds each Grace GPU `<hostdev>` to the derived guest GI NUMA cell range. |
 | `<pcihole64 unit='KiB'>` | VEP 199 behavior using existing domain XML support | Sets the auto-sized 64-bit PCI MMIO aperture for large GPU BARs. |
 | `<distances>` and NUMA `<cell>` attributes | VEP 115, consumed and extended by VEP 199 for Grace GI cells. | Expresses guest NUMA cells and remapped distance vectors, including Grace GI cells. |
@@ -415,8 +425,6 @@ If an upstream implementation lacks any required internal libvirt XML structs, t
 The following items appeared in earlier VEP-199 drafts but are removed from the Phase 1 contract. They are deferred until the Phase 1 baseline lands and the relevant pieces are ready for their own focused design discussion:
 
 - **EGM (Extended GPU Memory).** Guest memory backed by `/dev/egmN`, `<memory model='egm'>` device elements, and EGM-specific allocation policy.
-
-- **vCMDQ (hardware command queue virtualization).** SMMUv3 `cmdqv='on'` and the associated host kernel, QEMU, and guest-driver prerequisites.
 
 - **PCIe link speed and width modeling.** Per-root-port `x-speed` / `x-width` overrides derived from the host PCI path.
 
@@ -462,7 +470,7 @@ VEP 199 does not introduce new control-plane or data-plane components. It adds a
 
 ### Unit tests
 
-- SMMUv3 emission: one `<iommu model='smmuv3'>` per Grace GPU bus, with `accel='on'`, no `cmdqv`, and inferred or documented alpha-default values for implementation-owned attributes such as `ats`, `ril`, `ssidSize`, and `oas`.
+- SMMUv3 emission: one `<iommu model='smmuv3'>` per Grace GPU bus, with `accel='on'`, `ats='on'`, `cmdqv='on'`, and no hardcoded `ril`/`ssidSize`/`oas` (left to QEMU host capability probing).
 - GI discovery from sysfs fixtures: per-GPU GI grouping, deterministic remapping onto guest cell IDs, behavior under partial GPU passthrough, and the documented fallback path.
 - Distance matrix construction from host distance vectors and the host-to-guest cell mapping.
 - `pcihole64` auto-sizing from synthetic `/sys/bus/pci/devices/<bdf>/resource` fixtures, including platform-aware alignment margins or floors.
@@ -475,10 +483,17 @@ VEP 199 does not introduce new control-plane or data-plane components. It adds a
 
 ## Implementation History
 
+- 2026-09-10: Initial proposal.
+- 2026-11-23: Beta update — configurable additional Grace PCI IDs
+  (`spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs`), SMMUv3 auto
+  property detection (dropping hardcoded `oas`/`ril`/`ssidSize` in favour of
+  `QEMU_CAPS_ARM_SMMUV3_ACCEL` probing), and vCMDQ (`cmdqv='on'`) upstreamed from
+  the kubevirt-aie baseline (kubevirt-aie PRs #74, #75).
+
 ## Platform Prerequisites
 
 - ARM64 Grace Hopper or Grace Blackwell host with SMMUv3 nested translation support and IOMMUFD enabled in the host kernel (Linux >= 6.2 for IOMMUFD, see [VEP 266](https://github.com/kubevirt/enhancements/issues/266)).
-- NVIDIA-patched QEMU and libvirt providing SMMUv3 nested translation, per-bus `<iommu model='smmuv3'>`, `<acpi nodeset='...'>` on `<hostdev>`, and the domain-level `<iommufd>` element. The Phase 1 baseline does not require vCMDQ, EGM, or vGPU support in QEMU/libvirt.
+- NVIDIA-patched QEMU and libvirt providing SMMUv3 nested translation, per-bus `<iommu model='smmuv3'>`, `<acpi nodeset='...'>` on `<hostdev>`, and the domain-level `<iommufd>` element. SMMUv3 auto property detection requires QEMU 10.1.0+ (`QEMU_CAPS_ARM_SMMUV3_ACCEL`) and libvirt 12.5.0+; vCMDQ requires the same libvirt with `cmdqv` attribute support. The baseline does not require EGM or vGPU support in QEMU/libvirt.
 - These NVIDIA patches are being upstreamed; until acceptance they remain a platform prerequisite for Grace deployments.
 
 ## Graduation Requirements
@@ -493,7 +508,9 @@ VEP 199 does not introduce new control-plane or data-plane components. It adds a
 
 ### Beta
 
-- NVIDIA QEMU/libvirt patches required by Phase 1 are accepted upstream.
+- NVIDIA QEMU/libvirt patches required by the guest contract are accepted upstream.
+- SMMUv3 auto property detection (`accel='on'`, no hardcoded `oas`/`ril`/`ssidSize`) and vCMDQ (`cmdqv='on'`) emitted for Grace Blackwell VMs.
+- `spec.configuration.graceIOVirtualization.additionalPCIDeviceIDs` accepted by CR validation.
 - Operational documentation for cluster operators of Grace hosts.
 - Extended testing on Grace Hopper, GB200, and GB300.
 
