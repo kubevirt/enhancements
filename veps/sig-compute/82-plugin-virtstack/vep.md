@@ -247,27 +247,29 @@ The `virt-launcher` plugin will run the Command API server listening on a UNIX s
 
 ### Pluggable Admission Webhooks
 
-The design for virtualization-stack-specific admission webhooks remains to be determined. Three options are under consideration:
+Admission webhooks are fully pluggable per CRD. A cluster administrator supplies the mutating and validating admission webhooks or Kubernetes admission policies required by the custom virtualization stack for specific CRDs.
 
-#### Option 1: Reuse Structured Plugins
+#### Admission Ownership
 
-Use the admission policies and webhooks already defined by the [KubeVirt Structured Plugins VEP](https://github.com/kubevirt/enhancements/blob/main/veps/sig-compute/190-kubevirt-structured-plugins/vep.md#admission-policies-and-webhooks). A virtualization stack provider would register its mutating and validating admission policies or webhooks through the existing `Plugin` CR. The Structured Plugins mechanism would track the referenced resources and include their readiness when determining whether the plugin is ready, while the stack provider remains responsible for deploying them.
+With `PluggableVirtualizationStack` disabled, KubeVirt installs its existing admission webhooks unchanged. With the feature gate enabled, `virt-operator` omits the installation of admission webhooks for the following CRDs/subresources, because the implementation of those webhooks assumes Libvirt/QEMU as the underlying virtualization components.
 
-This option reuses an existing extension mechanism and avoids introducing a separate admission contract for virtualization stacks. It requires defining how a `VirtualizationStackPlugin` is associated with the corresponding Structured Plugin and ensuring that its admission logic applies only to VMIs that select that stack.
+1. VirtualMachineInstance
+2. VirtualMachine
+3. VirtualMachine.Status
+4. VirtualMachineInstanceReplicaSet
+5. VirtualMachinePool
+6. VirtualMachineInstancePreset
 
-#### Option 2: Extend the Core Webhooks Through RPC
+CRDs whose webhook logic is agnostic of virtualization stack would continue to be installed by `virt-operator`.
 
-Keep the core mutating and validating webhook logic in the existing `virt-api` component and move only virtualization-stack-specific logic into an RPC service. This service could be part of the same cluster-wide Service used by the `virt-controller` plugin. For both mutation and validation, `virt-api` would first run the default core logic and then invoke the plugin RPC for the selected virtualization stack.
+When `PluggableVirtualizationStack` FG is enabled, the cluster admin deploys and manages replacement admission resources for the above CRDs/subresources through the standard Kubernetes APIs - using either Admission Webhooks or Policies.
 
-This option preserves KubeVirt's core admission behavior for every stack and limits the plugin contract to stack-specific extensions, but it requires defining how core and plugin mutations, validation failures, timeouts, and availability errors are composed.
+#### Installation and Administrative Responsibility
 
-#### Option 3: Make Webhooks Fully Pluggable per CRD
+The operator installation provides the `KubeVirt` CRD. Workload CRDs such as VM and VMI are installed when `virt-operator` reconciles a `KubeVirt` CR. Administrators may install custom admission webhooks and policies after KubeVirt is up; their readiness is not a prerequisite for KubeVirt core readiness.
 
-Allow a cluster administrator to choose, for selected CRDs, between KubeVirt's default webhook and an alternate stack-provided webhook. For example, a virtualization stack could replace the complete validating webhook, mutating webhook, or both for `VirtualMachineInstance` resources.
+The administrator is responsible for installing and verifying all required admission components before allowing VM/VMI workloads, and for maintaining that protection during upgrades. KubeVirt documentation must make clear that its readiness does not imply that a custom stack's admission is installed or ready.
 
-This option gives plugin authors full control over admission behavior and avoids constraining them to extensions supported by the core webhook. However, it also requires a stronger compatibility contract so that alternate webhooks preserve KubeVirt API invariants, upgrade behavior, and interactions with other admission integrations.
-
-A follow-up design decision will select one of these models and define registration, ordering, and failure handling.
 
 ## VirtualizationStackPlugin CRD
 
@@ -310,13 +312,14 @@ A cluster administrator creates the `VirtualizationStackPlugin` resource to regi
 
 ### Deployment and Readiness Lifecycle
 
-During the alpha stage, this architecture is enabled through the `PluggableVirtualizationStack` feature gate. The deployment proceeds as follows:
+During the alpha stage, this architecture is enabled through the `PluggableVirtualizationStack` feature gate. With the gate disabled, KubeVirt uses the existing default stack. With it enabled, a custom stack is required and there is no default-stack fallback. A typical deployment proceeds as follows:
 
-1. The cluster administrator deploys KubeVirt with the feature gate enabled. Core components start and remain ready while waiting for a virtualization stack to be registered.
-2. The administrator deploys the stack-provided components: the controller plugin Deployment and Service only for the cluster-service model, the `virt-runtime` DaemonSet, and any optional admission webhooks.
+1. The cluster administrator deploys KubeVirt with the feature gate enabled. Core components start and remain ready while waiting for a virtualization stack to be registered. The operator installs workload CRDs but omits the designated default-stack admission entries.
+2. The administrator deploys the stack-provided components: the controller plugin Deployment and Service only for the cluster-service model, the `virt-runtime` DaemonSet, and the admission webhooks or policies required by the stack.
 3. The administrator creates a `VirtualizationStackPlugin` resource declaring either the controller CEL expression or cluster Service, and the node-local runtime socket name. Plugin workloads and the registration may be created in either order because discovery is retried.
-4. `virt-controller` watches the registration. For CEL, it loads and checks the expression for internal execution. For a cluster service, it repeatedly resolves the referenced Service and negotiates a compatible plugin API. For each VMI, it first renders the default launcher pod and then invokes the selected plugin model with the VMI, default pod, and renderer context. If the plugin is unavailable or invocation fails, `virt-controller` remains ready, but pod creation for VMIs selecting that stack is blocked and reconciliation is retried with an event or condition reported on the VMI.
+4. `virt-controller` watches the registration. For CEL, it loads and checks the expression for internal execution. For a cluster service, it repeatedly resolves the referenced Service and negotiates a compatible plugin API. For each VMI, it first renders the default launcher pod and then invokes the selected plugin model with the VMI, default (Libvirt/QEMU-based) pod, and renderer context. If registration is missing, the plugin is unavailable, or invocation fails, `virt-controller` remains ready, but pod creation is blocked with an event or condition reported on the VMI. Reconciliation is retried; the default pod is never used as a fallback.
 5. Each `virt-handler` discovers the registered runtime through its published UNIX socket, negotiates a compatible API, calls `GetNodeLabels()`, and applies the returned labels to its node. A failure to discover the required runtime keeps the existing `kubevirt.io/schedulable` label set to `false`; successful discovery allows it to be set to `true`.
+6. Before allowing VM/VMI workloads, the administrator verifies that the stack components, registration, and required admission webhooks or policies are ready. This is an administrative responsibility, not a KubeVirt readiness check.
 
 ```mermaid
 sequenceDiagram
@@ -334,6 +337,9 @@ sequenceDiagram
   Admin->>API: Deploy runtime DaemonSet and optional controller Service/Deployment
   Runtime->>Runtime: Publish node-local UNIX socket
 
+  Admin->>API: Install custom admission webhooks or policies
+  Note over Admin,Operator: Administrator verifies admission readiness; core does not wait for it
+
   Admin->>API: Create VirtualizationStackPlugin
 
   API-->>Controller: Observe plugin registration
@@ -350,7 +356,7 @@ sequenceDiagram
   Runtime-->>Handler: Return stack capability labels
   Handler->>API: Apply labels and set kubevirt.io/schedulable=true
 
-  Note over Controller,Handler: Stack can serve VMIs when the controller plugin is usable and compatible nodes advertise its runtime
+  Note over Admin,Handler: Administrator allows workloads after verifying admission and stack readiness
 ```
 
 When multiple stacks can be independently available on the same node, stack-specific availability labels will supplement `kubevirt.io/schedulable`. Failure of one runtime will then prevent scheduling only VMIs that select that stack, rather than making the node unavailable to every stack.
@@ -421,7 +427,7 @@ Following precedents such as CSI Sanity and CNI conformance testing, this suite 
 
 ### End-to-End and Functional CI
 
-The main KubeVirt functional and end-to-end regression suite will continue to run against the default Libvirt/QEMU plugin. That is to say that KubeVirt will continue to treat LibVirt/QEMU/KVM as the primary virtualization stack and upstream releases will contain components that work with it. 
+The main KubeVirt functional and end-to-end regression suite will continue to run against the default Libvirt/QEMU stack with `PluggableVirtualizationStack` disabled. KubeVirt will continue to treat Libvirt/QEMU/KVM as the primary virtualization stack and upstream releases will contain components that work with it. Feature-gate-enabled coverage will use a registered custom stack and its admission components.
 
 ### Mock Plugin
 
@@ -438,13 +444,16 @@ The design must preserve two invariants:
 
 The Command and Notify APIs remain the stable, unchanged wire boundary between `virt-handler` and `virt-launcher`, whether the launcher is the pre-plugin implementation or a stack-specific image. Plugin dispatch in `virt-handler` is a control-plane decision and does not change communication with an already-running launcher.
 
-This VEP introduces one additional rollout risk: a node may receive a new `virt-handler` before its `virt-runtime`, or a selected stack's plugin, is ready. During Alpha, if the feature gate is enabled but no plugin is registered or ready for a stack, `virt-handler` falls back to the internal default function. This provides graceful degradation during rollout windows.
+When the feature gate is enabled, a node may receive a new `virt-handler` before its required `virt-runtime` is ready. Plugin-dependent operations must wait or report an availability error; they must never fall back to the default Libvirt/QEMU implementation. Missing plugin registration is an administrator configuration error, while temporary unavailability is retried.
+
+During upgrades, `virt-operator` must preserve the admission ownership selected by the feature gate: omitted default-stack webhook entries must not be recreated by reconciliation or certificate rotation, and administrator-managed admission resources must not be modified or removed. Administrators are responsible for upgrading their admission components to preserve the KubeVirt API contract. This separation avoids operator ownership conflicts, but does not by itself guarantee compatibility with every KubeVirt release or make switching operating modes safe.
 
 Required compatibility coverage includes:
 
 - A mixed-version test in which a new `virt-handler` manages a pre-plugin-refactor `virt-launcher`, verifying unchanged Command and Notify API behavior.
 - A migration test in which a VM with a pre-plugin `virt-launcher` migrates to a node running the new `virt-handler`, verifying that the target uses the same stack and image as the source.
 - A rolling-upgrade test that upgrades the `virt-handler` DaemonSet while live VMs run on old and new nodes, verifying that no VM is disrupted.
+- An operator upgrade and reconciliation test verifying that custom-stack mode continues to omit the designated default-stack webhook entries, retains stack-independent entries, and leaves administrator-managed admission resources unchanged.
 
 ## Graduation Requirements
 
@@ -453,13 +462,15 @@ Required compatibility coverage includes:
 - [ ] Preserve the existing default Libvirt/QEMU/KVM pod renderer in `virt-controller` as the input-producing step for the controller plugin. Refactor the default stack logic in `virt-handler` into self-contained internal functions, one per capability that will become a plugin RPC, without changing behavior. Existing end-to-end tests must pass unmodified before introducing dispatch.
 - [ ] Introduce the `PluggableVirtualizationStack` feature gate and guard all plugin-dispatch paths with it.
 - [ ] Define and register the `VirtualizationStackPlugin` CRD.
-- [ ] Implement conditional dispatch in `virt-controller`: always render the default launcher pod first; when the feature gate is enabled and a matching plugin is registered, invoke its declared CEL or cluster-service model and use the returned final pod. Otherwise, use the default pod unchanged. In `virt-handler`, invoke the internal default function when the feature gate is disabled or no matching plugin is registered, and otherwise route the call to the runtime plugin.
+- [ ] Implement conditional dispatch in `virt-controller`: with the feature gate disabled, use the default launcher pod unchanged; with it enabled, render the default pod only as input to the registered plugin and create the pod returned by its declared CEL or cluster-service model. Missing registration or plugin failures must block pod creation without default-stack fallback. In `virt-handler`, use the internal default functions only when the gate is disabled, and otherwise route plugin-dependent operations to the runtime plugin.
 - [ ] Verify through an explicit regression test that disabling the feature gate preserves pre-VEP behavior.
-- [ ] Verify that enabling the feature gate without registering a plugin continues to resolve VMIs through the default-function fallback.
+- [ ] Verify that enabling the feature gate without registering a plugin reports a configuration error and prevents workload execution without default-stack fallback, while core components remain ready.
+- [ ] Define the retained and omitted admission entries, including operations and subresources, and verify that the operator reconciles the correct set for the feature gate.
+- [ ] Document that administrators may install custom admission after KubeVirt becomes ready and are responsible for admission readiness before allowing VM/VMI workloads. Verify that core readiness does not depend on custom admission readiness.
 - [ ] Implement a second virtualization stack plugin, such as Cloud Hypervisor, including its controller plugin, `virt-runtime`, and stack-specific `virt-launcher`. Verify end-to-end functionality.
 - [ ] Add mock-plugin call-verification tests for `virt-controller` and `virt-handler` as described in the Testing Strategy.
 - [ ] Provide a conformance test suite and ensure the new plugin passes it.
-- [ ] Continue running end-to-end CI against the default virtualization stack with the feature gate both enabled and disabled, with no regressions.
+- [ ] Continue running end-to-end CI against the default virtualization stack with the feature gate disabled, and against the custom stack and its admission components with the gate enabled.
 
 ### Beta
 
@@ -489,4 +500,4 @@ To be defined in a follow-up revision.
 
 - Should `GetHypervisorDevice` return one device or a list of devices? Candidate stacks such as Cloud Hypervisor and OpenVMM should be checked for requirements involving multiple host devices, or no hypervisor device, before the RPC is finalized at Beta.
 
-- How should plugin absence and unreachability affect a VMI? If no `VirtualizationStackPlugin` exists for the requested stack, the cause is a static configuration error that could be rejected at admission time. If a matching resource exists but its endpoint is temporarily unreachable, reconciliation should retry with backoff. These cases should have distinct condition reasons and may require different escalation-to-`Failed` policies.
+- Which condition reasons and escalation-to-`Failed` policies should distinguish missing plugin registration from temporary plugin unreachability? Both prevent workload execution without default-stack fallback, but missing registration is a configuration error and temporary unreachability is retried.
