@@ -382,8 +382,9 @@ and `Platform is in Setup Mode`.
 
 #### Constraints
 
-- `enrolledKeys: false` is only valid when `secureBoot: true`. Setting it
-  without Secure Boot is rejected by the admission webhook.
+- An explicit `enrolledKeys` value (true or false) is only valid when
+  Secure Boot is enabled (`nil` `secureBoot` counts as enabled). Otherwise
+  the combination is rejected by the admission webhook.
 - `enrolledKeys: false` requires the `FirmwareAutoSelection` feature gate.
   Without auto-selection, libvirt cannot match the `enrolled-keys=no`
   descriptor; the admission webhook rejects the combination.
@@ -393,8 +394,11 @@ and `Platform is in Setup Mode`.
 - Guest-enrolled keys live in NVRAM. Without `persistent: true` they are lost
   on every restart and the guest re-enters Setup Mode. With `persistent: true`,
   an NVRAM file that already holds the Microsoft keys is not modified —
-  flipping `enrolledKeys` on a running VM with existing persistent NVRAM does
-  not remove pre-enrolled keys.
+  flipping `enrolledKeys` on a VM with existing persistent NVRAM only takes
+  effect on the next start, and does not remove pre-enrolled keys.
+  Conversely, switching back from `false` to `true` on a persistent NVRAM
+  holding guest-enrolled keys keeps those keys; the Microsoft certificates
+  do not return.
 - The `enrolledKeys` field is distinct from the non-Secure-Boot EFI use of
   `enrolled-keys=no` described in [Non-Secure-Boot EFI](#non-secure-boot-efi).
   That case uses `enrolled-keys=no` to select a no-SB firmware; this case
@@ -406,7 +410,9 @@ and `Platform is in Setup Mode`.
 If the `FirmwareAutoSelection` feature gate is disabled after a VMI with
 `enrolledKeys: false` has already been admitted, virt-launcher will fail to
 start the VMI with an explicit error rather than silently booting with the
-enrolled Microsoft keys.
+enrolled Microsoft keys. The same check covers migration targets via
+`prepareMigrationTarget`, so migrating a Setup Mode VMI after the gate has
+been disabled fails instead of landing on enrolled keys.
 
 ### Code Changes
 
