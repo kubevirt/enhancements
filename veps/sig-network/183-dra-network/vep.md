@@ -168,7 +168,7 @@ Webhook validations ensure:
 1. Networks with `resourceClaim` source must map to interfaces using a network binding plugin.
 2. Each network must reference a unique `claimName` + `requestName` combination.
    No two DRA entities (networks, hostDevices, or GPUs) can share the same tuple, because each interface/network pair must map to exactly one device allocation.
-3. Reject mixing `multus` and `resourceClaim` network sources in the same VMI.
+3. A single network source is set per network.
 4. Both `claimName` and `requestName` must be non-empty.
 
 ### Component Changes
