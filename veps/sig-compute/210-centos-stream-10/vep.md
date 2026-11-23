@@ -205,7 +205,6 @@ gantt
 - k8s-1.37 kubevirtci provider introduced on CentOS Stream 10
 - k8s-1.37 `always_run` lanes use CentOS Stream 10 userspace
 - Older lanes (k8s-1.35, k8s-1.36) remain on CentOS Stream 9
-- CentOS Stream 9 userspace formally deprecated in release notes
 - Nightly and released container artifacts remain on CentOS Stream 9
 
 #### Phase 2: CS10 Lanes Expand (v1.11)
@@ -216,6 +215,7 @@ gantt
 - k8s-1.35 (CS9) dropped from CI
 - Postsubmit and release pipelines updated to dual-publish container images
 - Publish CentOS Stream 10 nightly and release artifacts (`-cs10` tagged variants) alongside default CS9 artifacts
+- CentOS Stream 9 userspace formally deprecated in release notes
 
 #### Phase 3: Full Switchover (v1.12)
 
@@ -339,10 +339,10 @@ Cluster administrators should verify that any security scanning or compliance to
 - [x] k8s-1.37 kubevirtci provider on CentOS Stream 10
 - [x] k8s-1.37 `always_run` lanes using CentOS Stream 10 userspace
 - [x] No CentOS Stream 10 specific test failures on k8s-1.37 lanes
-- [ ] CentOS Stream 9 userspace deprecated in release notes
 
 ### Beta (v1.11)
 
+- [ ] CentOS Stream 9 userspace deprecated in release notes
 - [ ] k8s-1.38 lane introduced on CentOS Stream 10
 - [ ] Majority of `always_run` lanes running on CentOS Stream 10
 - [ ] No CentOS Stream 10 specific test failures
