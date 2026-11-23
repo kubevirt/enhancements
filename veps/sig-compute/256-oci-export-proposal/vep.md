@@ -390,7 +390,7 @@ $ virtctl vmexport download my-tpl-export \
 # Then push to a registry with standard tools:
 $ oras copy --from-oci-layout ./fedora.oci.tar:latest \
     registry.example.com/templates/fedora:v1
-$ skopeo copy oci-archive:fedora.oci.tar \
+$ skopeo copy --multi-arch=all oci-archive:fedora.oci.tar \
     docker://registry.example.com/templates/fedora:v1
 ```
 
