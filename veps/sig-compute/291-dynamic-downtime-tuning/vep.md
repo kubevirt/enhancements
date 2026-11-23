@@ -4,16 +4,16 @@
 
 ### Target releases
 
-- This VEP targets alpha for version: v1.9
-- This VEP targets beta for version:
+- This VEP targets alpha for version: v1.10
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
 
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
-- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [x] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements](https://github.com/kubevirt/enhancements/issues/291)
+- [x] (R) Alpha target version is explicitly mentioned and approved
 - [ ] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
@@ -25,6 +25,8 @@ Improve live migration convergence by gradually increasing QEMU's
 The feature is activated by the presence of `spec.experimental.downtimeTuning`
 in a `MigrationPolicy`. It ramps `max_downtime` up to the `maxDowntimeMs`
 ceiling (see [VEP 252](https://github.com/kubevirt/enhancements/pull/252)).
+For Beta the presence-based opt-in and low-level tunables remain the
+stable API; cluster-wide / always-on defaults are deferred to GA.
 
 ## Motivation
 
@@ -66,16 +68,17 @@ the existing time-based logic still applies.
 
 - Activate via presence of `spec.experimental.downtimeTuning` in
   `MigrationPolicy`, gated behind a dedicated `MigrationDowntimeTuning`
-  Alpha feature gate
+  feature gate
 - Use `maxDowntimeMs` (top-level field per
   [VEP 252](https://github.com/kubevirt/enhancements/pull/252)) as the
   ceiling for the ramp
-- Keep disabled by default
 - Preserve all existing timeout, progress, and abort semantics as fallback
+- Preserve low-level tunables under `spec.experimental.downtimeTuning`
+  as the stable Beta API; evaluate always-on defaults for GA
 
 ## Non Goals
 
-- Cluster-wide default in KubeVirt CR in Alpha
+- Cluster-wide default in KubeVirt CR in Alpha/Beta
 - Replacing post-copy / pause / auto-converge mechanisms
 - Bandwidth or CPU throttling
 - Changing migration behavior for any user who does not opt in
@@ -105,9 +108,11 @@ kubevirt/kubevirt.
 
 Downtime tuning is activated by the presence of
 `spec.experimental.downtimeTuning` in a `MigrationPolicy`, gated
-behind its own Alpha feature gate, `MigrationDowntimeTuning`.
-Either `MigrationDowntimeTuning` or `MigrationStallDetection`
-permits setting `maxDowntimeMs`.
+behind its own feature gate, `MigrationDowntimeTuning` (Alpha in v1.10;
+Beta target v1.11). The gate remains present through Beta and is
+enabled by default once graduated to Beta. Either
+`MigrationDowntimeTuning` or `MigrationStallDetection` permits setting
+`maxDowntimeMs`.
 
 The algorithm ramps `max_downtime` up to the `maxDowntimeMs` ceiling —
 a field in `MigrationPolicySpec` / `MigrationConfiguration`.
@@ -123,7 +128,12 @@ Parameters under `spec.experimental.downtimeTuning`:
 | `startAfterIteration` | 3       | Start cooldown after this iteration                  |
 | `cooldownSeconds`     | 10      | Minimum seconds between increases                    |
 
-An empty `downtimeTuning: {}` enables tuning with all defaults.
+An empty `downtimeTuning: {}` enables tuning with all defaults. For
+Beta these low-level fields remain under `spec.experimental` rather
+than being dropped, so operators can override the ramp without a
+breaking API change.
+
+The effective downtime is recorded in `kubevirt_vmi_migration_last_downtime_duration_seconds` metric.`
 
 ### Implementation and algorithm
 
@@ -194,6 +204,11 @@ hits the completion timeout.
 **With tuning**: `max_downtime` catches up to `estimated_downtime`
 at ~600ms — sub-second switchover, bounded by the ceiling.
 
+### Adoption note
+
+The feature is available in Openshift Virtualization 5.0 as development preview, with a predefined
+configuration for higher maximum downtime.
+
 ### Benchmark results
 
 Tested on 1 Gbps network, 8 GiB OCP HCP worker node VM (idle hosted
@@ -218,6 +233,66 @@ converges with tuning at ~1s downtime; fails to converge without.
 **Idle VM** (CentOS Stream 10, no workload): tuning adds no overhead
 and actually achieves lower downtime (129ms vs 244ms) thanks to the
 lower initial `target_downtime` of 150ms vs QEMU's default 300ms.
+
+## Performance characteristics
+
+Beta soak on bare metal (Xeon Silver 4210R; Burstable VM, **5 GiB / 4 vCPU**;
+1 GbE class link). Focus: **guest downtime** and convergence under a
+steady dirty cache workload, with an elevated `maxDowntimeMs` ceiling
+so stop-and-copy can succeed.
+
+**Method.** Same Gaussian hot-spot Valkey + memtier family as
+https://github.com/kubevirt/kubevirt/pull/17544 (and compression VEP
+Typical 2): `--ratio 5:1 --key-pattern G:G --key-minimum 1
+--key-maximum 2000000` (`--key-stddev 3000`), `--data-size-range
+256-16384 -R`, `-t 12 -c 50 --pipeline=10`; guest never fills
+`maxmemory`. Policy `maxDowntimeMs=10000`. Three identical suites, each
+**80/80 Succeeded** (configs: downtime-tuning **dt**, stall-detector
+**sd**, and the same with zstd). Metrics from final migration info
+(`Downtime`, duration). Table stats pool **n=60** per config
+(min / **mean** / max).
+
+Without a high enough ceiling this workload aborts: estimated downtime
+stays ~4.5–5 s, so default / low `maxDowntimeMs` (900, even 2500) fails
+the stall-detector 1.5× gate; only a ceiling ≳ est. downtime (or a
+downtime-tuning ramp whose ceil reaches it) converges.
+
+| Config | Guest downtime (ms) | Duration (s) |
+|---|---|---|
+| **dt** (tuning, no compression) | 4200 / **4435** / 4996 | 41.8 / **58.7** / 74.4 |
+| **sd** (stall detector, no compression) | 4304 / **4525** / 4756 | 66.8 / **86.0** / 136.8 |
+| **dt-zstd** | 230 / **274** / 456 | 16.4 / **20.9** / 22.1 |
+| **sd-zstd** | 237 / **275** / 509 | 47.5 / **67.2** / 116.2 |
+
+**Summary.** With a ceiling that covers the dirty-driven estimate,
+migrations converge with measured guest downtime ~**4.4 s** uncompressed
+(matching the ~4.5–5 s estimate) instead of aborting under QEMU’s default
+300 ms / a too-low policy max. Compression is orthogonal but dominant for
+pause length here: zstd drops downtime to ~**0.27 s** for both controllers.
+
+**Downtime tuning vs stall detection.** Both only succeed when the policy
+ceiling is in the right ballpark for the dirty-driven estimate (here
+≳ ~5 s uncompressed; too-low `maxDowntimeMs` aborts either path). Under the
+same high ceiling, **guest downtime is essentially the same** (dt vs sd
+within ~2%; zstd pair ~275 ms mean). On this suite, tuning also finished
+sooner in wall-clock time (mean **58.7 s** vs **86.0 s** uncompressed;
+**20.9 s** vs **67.2 s** with zstd) — how much sooner(or later) depends on the
+ramp (`steps` / cooldown): an intermediate step that meets the estimate
+lets QEMU stop-and-copy earlier than stall detection.
+
+They differ in *how* they open the switchover window. **Tuning** ramps
+`max_downtime` from a low `initialMs` in cooldown-spaced steps, so QEMU can
+stop-and-copy as soon as an intermediate step covers the estimate — often
+earlier migration completion, and sometimes a pause below the full ceiling.
+The tradeoff is that those steps are **predetermined**: the allowed
+downtime jumps in fixed increments, so the switchover level is whatever
+step first clears the estimate, not necessarily the smallest pause that
+would have worked. **Stall detection** waits until the estimate fits
+`maxDowntimeMs` (with its 1.5× gate), then soft-stops in one shot — fewer
+moving parts, and the decision tracks the live estimate more directly
+(closer to the minimal admissible downtime at that moment), at the cost of
+staying in precopy until that threshold is met. On this suite the measured
+pauses still landed in the same band.
 
 ## API Examples
 
@@ -300,31 +375,35 @@ per step. No new API resources or watches.
 
 ## Implementation History
 
-<!--
-For example:
-01-02-1921: Implemented mechanism for doing great stuff. PR: <LINK>.
-03-04-1922: Added support for doing even greater stuff. PR: <LINK>.
--->
+- 2026-04-30: VEP accepted — https://github.com/kubevirt/enhancements/pull/249
+- 2026-07-24: VEP updated to reflect dedicated FG — https://github.com/kubevirt/enhancements/pull/409
+- 2026-07-31: Alpha implementation merged — https://github.com/kubevirt/kubevirt/pull/17480
+  (`MigrationDowntimeTuning` Alpha feature gate, `spec.experimental.downtimeTuning`, e2e)
+- 2026-11-18: User-guide docs merged — https://github.com/kubevirt/user-guide/pull/1026
+- 2026-11-18: Beta graduation targeting (v1.11): correct Alpha target to v1.10
+- 2026-11-23: Document Beta soak performance characteristics (hot-spot downtime)
 
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] `maxDowntimeMs` top-level field available as the ceiling (per
+- [x] `maxDowntimeMs` top-level field available as the ceiling (per
       [VEP 252](https://github.com/kubevirt/enhancements/pull/252))
-- [ ] `MigrationDowntimeTuning` Alpha feature gate
-- [ ] `DowntimeTuningPolicy` struct under `spec.experimental.downtimeTuning`;
+- [x] `MigrationDowntimeTuning` Alpha feature gate
+- [x] `DowntimeTuningPolicy` struct under `spec.experimental.downtimeTuning`;
       its presence activates the tuning algorithm
-- [ ] `virt-launcher` runs tuning algorithm in monitoring loop
-- [ ] E2E test
-- [ ] User guide docs
+- [x] `virt-launcher` runs tuning algorithm in monitoring loop
+- [x] E2E test
+- [x] User guide docs
 
 ### Beta
 
-- [ ] Low-level tunables remain in `spec.experimental` or are dropped
-- [ ] Soak testing across workload profiles (idle, moderate, heavy)
-- [ ] Prometheus metric for downtime adjustments
-- [ ] Feature gate enabled by default
+- [x] Low-level tunables remain in `spec.experimental` (kept)
+- [X] Soak testing across workload profiles (idle, moderate, heavy)
+- [X] Prometheus metric for downtime adjustments (final effective downtime tracked)
+- [X] Early adopter commitment
+- [X] Graduate `MigrationDowntimeTuning` feature gate Alpha → Beta
+      (enabled by default; gate remains through Beta)
 
 ### GA
 
