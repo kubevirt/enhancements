@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.9, v1.10
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ## Release Signoff Checklist
@@ -15,7 +15,7 @@ Items marked with (R) are required *prior to targeting a milestone / release*.
 - [x] (R) Enhancement issue created, which links to VEP dir
   in [kubevirt/enhancements] (not the initial VEP PR)
 - [x] (R) Target version is explicitly mentioned and approved
-- [ ] (R) Graduation criteria filled
+- [x] (R) Graduation criteria filled
 
 ## Overview
 
@@ -34,8 +34,8 @@ The artifacts can be downloaded as
 [OCI image layout](https://github.com/opencontainers/image-spec/releases/tag/v1.1.1)
 archives for local handling with standard tools (oras, skopeo, podman,
 crane), and then pushed to an OCI-compliant registry for distribution across
-clusters. Direct registry push from the export pod may be added in a future
-version.
+clusters. Alternatively, a `VirtualMachineExport` can push the artifact
+directly to an OCI registry.
 
 ## Motivation
 
@@ -71,10 +71,17 @@ By packaging VMs and VM templates as OCI artifacts, we get:
 * Extend `VirtualMachineExport` to accept `VirtualMachineTemplate` as a
   source kind, with the export controller resolving template volume sources
 
+### Phase 3 - Beta
+
+* Report OCI artifact readiness in the `OCIReady` condition independently of
+  the `Ready` condition
+* Push the OCI artifact from the export pod directly to an OCI registry
+* Extend `virtctl vmexport create` with registry push flags
+
 ## Non Goals
 
-* Direct registry push from the export pod (deferred to a future version)
-* Import of OCI artifacts into the cluster (deferred to a follow-up design)
+* Proxy configuration for the registry push egress
+* Import of OCI artifacts into the cluster (covered by VEP #395)
 * Support for multi-VM appliances (single VM or template per artifact)
 * Guest-level operations such as sysprep or sealing during export
 * Live export of running VMs
@@ -86,6 +93,10 @@ By packaging VMs and VM templates as OCI artifacts, we get:
   disks to an OCI artifact so I can migrate it to another cluster.
 * As a VM owner, I want to push my VM to an OCI registry so another cluster
   can pull and import it.
+* As a VM owner, I want to push my VM to a private OCI registry that requires
+  credentials and uses a custom CA.
+* As a VM owner, I want to download the raw disk images of my VM as soon as
+  the export server is up, without waiting for the OCI digest computation.
 * As a VM template owner, I want to push a `VirtualMachineTemplate` to an
   OCI registry so I can share it across clusters.
 * As a VM template owner, I want to download a template as a file so I can
@@ -102,10 +113,11 @@ By packaging VMs and VM templates as OCI artifacts, we get:
 
 ### Feature Gate
 
-The OCI export functionality is gated behind a new `OCIExport` feature gate
-in the `KubeVirt` CR. When disabled, the export server returns 404 for
-`/export.oci.tar` requests and `VirtualMachineExport` rejects
-`VirtualMachineTemplate` as a source kind.
+The OCI export functionality is gated behind the `OCIExport` feature gate
+in the `KubeVirt` CR. The gate is Alpha in v1.9 and v1.10 and Beta in v1.11.
+When disabled, the export server returns 404 for `/export.oci.tar` requests,
+and `VirtualMachineExport` rejects `VirtualMachineTemplate` as a source kind
+and rejects `spec.target`.
 
 ### OCI Artifact Format Specification
 
@@ -318,6 +330,179 @@ to record both the compressed size and digest without storing the output.
 The OCI layout URL is added to `status.links` as a new
 `ExportManifestType` constant (`"oci"`). The URL is included in both
 internal and external links, accessible through `virt-exportproxy`.
+In serve mode the link is only present while the `OCIReady` condition is
+`True`. Push exports publish no links.
+
+### `OCIReady` Condition
+
+The `OCIReady` condition reports whether the OCI artifact is available:
+downloadable from `/export.oci.tar` when serving, or stored in the target
+registry when pushing. It is set for every source kind that supports OCI
+when the `OCIExport` feature gate is enabled.
+
+In serve mode the `Ready` condition reflects only that the export server is
+serving. The export server readiness endpoint does not wait for pass 1, so
+raw and gzip downloads become available as soon as the server is up.
+
+The export server exposes a status endpoint, `/oci/status`, on the same TLS
+port. Like the readiness endpoint it requires no token and returns no export
+data, only the pass 1 state (`Pending`, `Ready` or `Failed`) and an error
+message on failure. `virt-controller` verifies the server certificate
+against the export CA it manages.
+
+While the exporter pod is ready and `OCIReady` has reason `DigestsPending`,
+the export controller queries the status endpoint and requeues the export on
+a fixed interval. Polling stops once the digests are computed or pass 1
+failed. When the exporter pod is recreated, for example on certificate
+rotation, pass 1 runs again and `OCIReady` returns to `DigestsPending`.
+
+| Mode  | Status  | Reason            | Meaning                                         |
+|-------|---------|-------------------|-------------------------------------------------|
+| Serve | `False` | `DigestsPending`  | Pass 1 is computing the digests                 |
+| Serve | `True`  | `DigestsComputed` | `/export.oci.tar` can be downloaded             |
+| Serve | `False` | `DigestsFailed`   | Pass 1 failed, the message holds the error      |
+| Push  | `False` | `Pushing`         | The exporter pod is pushing the artifact        |
+| Push  | `True`  | `Pushed`          | The artifact is stored in the target registry   |
+| Push  | `False` | `PushFailed`      | The push failed, the message holds the error    |
+
+The status endpoint adds a connection from `virt-controller` to the exporter
+pod. Clusters restricting traffic to exporter pods with a `NetworkPolicy` need
+to allow it in addition to the traffic from `virt-exportproxy`.
+
+### Registry Push
+
+A `VirtualMachineExport` with `spec.target.registry` set pushes the OCI
+artifact to an OCI registry instead of serving downloads. Pushing is
+available for all source kinds that support OCI: `VirtualMachine`,
+`VirtualMachineSnapshot` and `VirtualMachineTemplate`. The pushed artifact is
+identical in format to the `/export.oci.tar` download.
+
+#### API
+
+The following fields are added to both `export.kubevirt.io/v1` and
+`export.kubevirt.io/v1beta1`:
+
+```go
+// +kubebuilder:validation:XValidation:rule="!has(self.target) || self.source.kind in ['VirtualMachine', 'VirtualMachineSnapshot', 'VirtualMachineTemplate']",message="target requires a VirtualMachine, VirtualMachineSnapshot or VirtualMachineTemplate source"
+type VirtualMachineExportSpec struct {
+    // ... existing fields
+
+    // Target configures a destination the export is pushed to instead of
+    // serving download links.
+    // +optional
+    Target *VirtualMachineExportTarget `json:"target,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="has(self.registry)",message="registry is required"
+type VirtualMachineExportTarget struct {
+    // Registry pushes the export as an OCI artifact to an OCI registry.
+    // +optional
+    Registry *VirtualMachineExportRegistryTarget `json:"registry,omitempty"`
+}
+
+type VirtualMachineExportRegistryTarget struct {
+    // URL is the target reference, e.g.
+    // docker://registry.example.com/vms/fedora:v1. The tag defaults to
+    // latest when omitted.
+    // +kubebuilder:validation:MaxLength=2048
+    // +kubebuilder:validation:XValidation:rule="self.startsWith('docker://')",message="url must use the docker:// scheme"
+    URL string `json:"url"`
+    // SecretRef is the name of a Secret in the export namespace containing
+    // the registry credentials in the keys accessKeyId and secretKey.
+    // +optional
+    // +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="secretRef must be a valid Secret name"
+    SecretRef *string `json:"secretRef,omitempty"`
+    // CertConfigMap is the name of a ConfigMap in the export namespace
+    // containing CA certificates for the registry.
+    // +optional
+    // +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="certConfigMap must be a valid ConfigMap name"
+    CertConfigMap *string `json:"certConfigMap,omitempty"`
+    // InsecureSkipTLSVerify disables TLS verification for the registry
+    // and allows pushing to it over plain HTTP.
+    // +optional
+    InsecureSkipTLSVerify *bool `json:"insecureSkipTLSVerify,omitempty"`
+}
+
+type VirtualMachineExportStatus struct {
+    // ... existing fields
+
+    // Registry holds the result of a registry push.
+    // +optional
+    Registry *VirtualMachineExportRegistryStatus `json:"registry,omitempty"`
+}
+
+type VirtualMachineExportRegistryStatus struct {
+    // URL is the reference the artifact was pushed to.
+    URL string `json:"url"`
+    // Digest is the digest of the pushed image index.
+    Digest string `json:"digest"`
+}
+```
+
+The URL scheme and the credential Secret format match the CDI registry
+source, so the same Secret can be used to push an artifact and to import it
+again.
+
+The new fields are validated with CEL rules in the CRD schema wherever
+possible. Only the `OCIExport` feature gate check is done in the admission
+webhook.
+
+The docs of `spec.ttlDuration` and `status.ttlExpirationTime` are updated:
+for push exports the TTL counts from push completion.
+
+#### Exporter Pod
+
+In push mode the export controller configures the exporter pod with:
+
+* The target URL and the TLS verification setting as environment variables
+* The `accessKeyId` and `secretKey` keys of the credential Secret as
+  environment variables, referenced with `secretKeyRef`
+* The CA ConfigMap mounted as a volume
+
+The pod needs network access to the target registry.
+
+#### Push Flow
+
+The export server pushes with the registry client from
+`go.podman.io/image/v5` (new dependency). The client computes the digest of
+a blob while uploading it, so each disk is read and compressed only once and
+the two-pass approach is not needed:
+
+1. Compress each disk with zstd and upload it as a blob, recording the
+   returned digest and size
+2. Upload the config blob
+3. Upload the image manifest, built from the recorded descriptors
+4. Upload the image index and tag it with the target tag
+
+#### Lifecycle and Status
+
+A push export is one-shot and follows the lifecycle of offline backup push
+exports, except for the TTL:
+
+* The pod runs until the push finishes. While pushing, the export is not
+  deleted on TTL expiry and the pod is not recreated on certificate
+  rotation. The pod is owned by the export and deleted with it.
+* While pushing, the phase is `Pending`, `Ready` is `False`, `OCIReady` is
+  `False` with reason `Pushing`, and `status.ttlExpirationTime` is unset.
+* If the pod cannot start, for example because of a missing Secret or
+  ConfigMap, `Ready` is `False` with reason `PodPending` and the export is
+  kept until the user deletes it.
+* On success the pod writes the index digest to its termination message and
+  exits. The controller sets `status.registry`, `OCIReady` to `True` with
+  reason `Pushed` and the phase to `Terminated`. `status.ttlExpirationTime`
+  is set to the completion time plus `spec.ttlDuration` (default 2h), after
+  which the export is deleted.
+* On failure the pod writes the error to its termination message and exits
+  with an error. The controller sets `OCIReady` to `False` with reason
+  `PushFailed` and the error message, and `Ready` to `False` with reason
+  `PodFailed`. The phase stays `Pending`. The export and the failed pod are
+  kept until the user deletes the export.
+
+#### Credentials
+
+The credential Secret must be in the namespace of the `VirtualMachineExport`.
+It is consumed by the exporter pod and never read by the export controller.
+This is the same trust model as the CDI registry source `secretRef`.
 
 ### Architecture: Extend `VirtualMachineExport`
 
@@ -334,7 +519,7 @@ for distribution.
   `spec.source.kind` (with `apiGroup: template.kubevirt.io`)
 * Export controller resolves template DataVolumeTemplates to PVCs
 * `status.links` for template exports only includes the OCI layout URL
-* `virtctl vmexport` gets OCI download subcommands
+* `virtctl vmexport` gets `--vmtemplate` and `--format=oci`
 
 ### End-to-End Flow
 
@@ -351,6 +536,14 @@ Create VirtualMachineExport
                                       /volumes/disk1/disk.img    (VM, VMS)
                                       /volumes/disk1/disk.img.gz (VM, VMS)
                                       /export.oci.tar            (VM, VMS, VMT)
+
+Create VirtualMachineExport
+  source: VM, VMS or VMT           Export controller creates exporter pod
+  target:                            with registry settings
+    registry:                      Export server pushes the artifact
+      url: docker://...              to the registry and exits
+                                   Export controller sets status.registry
+                                     and phase Terminated
 ```
 
 ### Export Controller: `VirtualMachineTemplate` Source Handler
@@ -392,6 +585,11 @@ $ oras copy --from-oci-layout ./fedora.oci.tar:latest \
     registry.example.com/templates/fedora:v1
 $ skopeo copy oci-archive:fedora.oci.tar \
     docker://registry.example.com/templates/fedora:v1
+
+# Or push directly from the cluster:
+$ virtctl vmexport create my-vm-push --vm=my-vm \
+    --registry-url=docker://registry.example.com/vms/my-vm:v1 \
+    --registry-secret=registry-credentials
 ```
 
 **New flags on `virtctl vmexport create`:**
@@ -400,11 +598,26 @@ $ skopeo copy oci-archive:fedora.oci.tar \
 |----------------|---------|----------------------------------------------------------------------------------------------|
 | `--vmtemplate` | -       | Source `VirtualMachineTemplate` name (mutually exclusive with `--vm`, `--snapshot`, `--pvc`) |
 
+**Registry push flags on `virtctl vmexport create`:**
+
+| Flag                        | Default | Description                                              |
+|-----------------------------|---------|----------------------------------------------------------|
+| `--registry-url`            | -       | Push target, sets `spec.target.registry.url`             |
+| `--registry-secret`         | -       | Credential Secret, sets `spec.target.registry.secretRef` |
+| `--registry-cert-configmap` | -       | CA ConfigMap, sets `spec.target.registry.certConfigMap`  |
+| `--registry-insecure`       | `false` | Sets `spec.target.registry.insecureSkipTLSVerify`        |
+
+The other registry flags require `--registry-url`. `--registry-url` cannot
+be combined with `--pvc`.
+
 **Extended flags on `virtctl vmexport download`:**
 
 | Flag       | Default | Description                                        |
 |------------|---------|----------------------------------------------------|
 | `--format` | `gzip`  | Download format: `raw`, `gzip`, or `oci` (new) |
+
+With `--format=oci`, `download` waits for `OCIReady` to be `True`, fails on
+`DigestsFailed` and rejects exports with `spec.target`.
 
 ### RBAC
 
@@ -417,11 +630,7 @@ export controller `ClusterRole`:
   verbs: [ "get", "list", "watch" ]
 ```
 
-### Verifying Exported Artifacts
-
-Until a dedicated import mechanism exists, a verification script based on
-existing CLI tools will be provided to validate the OCI layout structure
-and confirm that exported disks can be re-imported.
+Registry push requires no additional controller permissions.
 
 ## API Examples
 
@@ -439,6 +648,52 @@ spec:
     kind: VirtualMachineTemplate
     name: fedora-template
   ttlDuration: 4h
+```
+
+### Push a `VirtualMachine` to a registry with credentials
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-credentials
+  namespace: my-vms
+type: Opaque
+stringData:
+  accessKeyId: myuser
+  secretKey: mypassword
+---
+apiVersion: export.kubevirt.io/v1
+kind: VirtualMachineExport
+metadata:
+  name: my-vm-push
+  namespace: my-vms
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: my-vm
+  target:
+    registry:
+      url: docker://registry.example.com/vms/my-vm:v1
+      secretRef: registry-credentials
+      certConfigMap: registry-ca
+  ttlDuration: 1h
+```
+
+Status after a successful push:
+
+```yaml
+status:
+  phase: Terminated
+  ttlExpirationTime: "2026-12-01T13:00:00Z"
+  registry:
+    url: docker://registry.example.com/vms/my-vm:v1
+    digest: sha256:abc...
+  conditions:
+  - type: OCIReady
+    status: "True"
+    reason: Pushed
 ```
 
 ## Alternatives
@@ -523,21 +778,42 @@ which matters for large disk images. The tradeoff is an external dependency
 (`github.com/klauspost/compress/zstd`), but this library is widely used and
 well-maintained.
 
+### Use `CDIConfig` insecure registries for registry push
+
+Instead of the per-export `insecureSkipTLSVerify` field, the export
+controller could read `CDIConfig.spec.insecureRegistries`, which
+virt-controller already watches, and disable TLS verification for push
+targets whose host is in that list. The same admin-managed list would then
+cover registry push and CDI registry import, and is already exposed by HCO
+as `spec.storageImport.insecureRegistries`. Push to insecure registries
+would require CDI to be installed, and the list, documented as allowing
+image pulls, would also apply to pushes.
+
 ## Scalability
 
 Minimal impact. The export controller adds one new source handler for
 `VirtualMachineTemplate`. The actual export work is handled by the existing
 per-export pod infrastructure with TTL-based cleanup.
 
+The `OCIReady` status endpoint is only queried while pass 1 runs, one
+request per export and interval.
+
 ## Update/Rollback Compatibility
 
-Both changes are additive:
+All changes are additive:
 
 * The OCI endpoint adds a new handler to the export server. Rolling back
   means `/export.oci.tar` is not available; existing raw/gzip downloads
   are unaffected.
 * The `VirtualMachineTemplate` source kind is rejected as unknown on
   rollback. Existing VM, snapshot, and PVC exports are unaffected.
+* After a rollback the older schema drops `spec.target` and
+  `status.registry`, so an older controller handles a stored push
+  export as a download export and starts serving it with the TTL counted
+  from creation.
+* With the decoupled `OCIReady` condition, `Ready` no longer waits for the
+  digest computation. Clients waiting for the OCI download wait for
+  `OCIReady` instead of `Ready`.
 
 The OCI artifact format is versioned via the `artifactType` media type.
 Format changes are handled by introducing a new artifact type version.
@@ -545,9 +821,19 @@ Format changes are handled by introducing a new artifact type version.
 ## Functional Testing Approach
 
 * Unit tests: manifest/index generation, config blob serialization, TAR
-  layout structure, template source handler resolution
+  layout structure, template source handler resolution, status endpoint,
+  `OCIReady` transitions, push against a test registry
 * Functional tests: VM and template export, TTL expiration,
   error cases (missing/unready template, inaccessible PVCs)
+* Functional tests for Beta:
+  * `Ready` before `OCIReady`, `DigestsFailed` on a pass 1 failure
+  * Push of VM, snapshot and template exports to a registry without
+    credentials, with credentials, with a custom CA and with TLS
+    verification disabled
+  * Pushed artifacts verified with standard tools (skopeo, oras)
+  * Push failures (wrong credentials, unreachable registry) reported as
+    `PushFailed`
+  * Round-trip export and import with VEP #395
 
 ## Implementation Phases
 
@@ -569,6 +855,12 @@ This phase works entirely within the existing `VirtualMachine` source kind.
   DataVolumeTemplates to PVCs
 * OCI manifest and config blob generation for the template artifact type
 * `--vmtemplate` flag on `virtctl vmexport create`
+
+### Phase 3: Beta
+
+* `/oci/status` endpoint and decoupled `OCIReady` condition
+* Registry push API, export server push and push lifecycle
+* Registry flags on `virtctl vmexport create`
 
 ## Graduation Requirements
 
@@ -597,7 +889,26 @@ This phase works entirely within the existing `VirtualMachine` source kind.
 - [ ] `virtctl vmexport create --vmtemplate` functional
 - [ ] Unit and functional tests pass
 
-### Beta / GA (future)
+### Beta (v1.11)
 
-- [ ] Import mechanism implemented (separate design)
+- [ ] `Ready` independent of pass 1, `OCIReady` reports `DigestsPending`,
+  `DigestsComputed` and `DigestsFailed`
+- [ ] `oci` link only published in serve mode while `OCIReady` is `True`
+- [ ] Registry push via `spec.target.registry` for `VirtualMachine`,
+  `VirtualMachineSnapshot` and `VirtualMachineTemplate` sources, with and
+  without credentials, with a custom CA and with TLS verification disabled
+- [ ] Push result reported in `status.registry` and `OCIReady`, failures
+  reported as `PushFailed`
+- [ ] Registry flags on `virtctl vmexport create` functional
+- [ ] `virtctl vmexport download --format=oci` waits for `OCIReady`
+- [ ] Import mechanism implemented (VEP #395)
 - [ ] Round-trip export/import tested for both VMs and templates
+- [ ] OCI export functional tests gating on CI
+- [ ] User guide documentation published
+- [ ] `OCIExport` feature gate moved to Beta
+
+### GA
+
+- [ ] No API changes during Beta
+- [ ] Feedback from production use
+- [ ] Import mechanism (VEP #395) ready for production round trips
