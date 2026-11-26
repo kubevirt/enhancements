@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.10
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -13,7 +13,7 @@
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [X] (R) Enhancement issue created: https://github.com/kubevirt/enhancements/issues/359
-- [ ] (R) Alpha target version is explicitly mentioned and approved
+- [X] (R) Alpha target version is explicitly mentioned and approved
 - [ ] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
@@ -433,14 +433,34 @@ or controllers.
 
 ## Implementation History
 
+### v1.10 (Alpha)
+
+- [#19233](https://github.com/kubevirt/kubevirt/pull/19233) decouples defaults, mutators, and TemplateService from `*virtconfig.ClusterConfig`.
+- [#19234](https://github.com/kubevirt/kubevirt/pull/19234) adds `pkg/render`. virt-controller uses `NewVMI`. `PodFromVM` and `PodFromVMI` render a Pod with no cluster.
+- [#19385](https://github.com/kubevirt/kubevirt/pull/19385) applies caller-supplied instancetype and preference specs offline. `inferFromVolume` is rejected.
+
+The package is still `kubevirt.io/kubevirt/pkg/render`. The user-guide page is not written yet.
+
+### v1.11 (Beta)
+
+Target: make the offline and in-cluster preparation one shared flow, and finish the Beta graduation checks.
+
+- Online and offline renderers that share VM-to-VMI preparation. virt-controller uses the online renderer and does not call the offline `VMIFromVM`. Sketch: [#19565](https://github.com/kubevirt/kubevirt/pull/19565).
+- Drop the direct `pkg/virt-config` dependency from `pkg/render`.
+- Equivalence test that fails when the online and offline VMI preparation diverge.
+- `TemplateService` uses `status.runtimeUser` as the Pod UID.
+- One `ApplyToVMI` implementation under `pkg/instancetype`, used by the controller and by offline render.
+
+Moving the package to `staging/src/kubevirt.io/render` stays a GA item.
+
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] `PodFromVM`, `PodFromVMI`, and `VMIFromVM` functions implemented
-- [ ] `Options` struct covers launcher image, feature gates (including
+- [X] `PodFromVM`, `PodFromVMI`, and `VMIFromVM` functions implemented
+- [X] `Options` struct covers launcher image, feature gates (including
   `DisabledFeatureGates`), export image, and run-as user
-- [ ] Unit tests cover common VM configurations (ContainerDisk, PVC, HostDisk,
+- [X] Unit tests cover common VM configurations (ContainerDisk, PVC, HostDisk,
   CloudInit, multiple networks)
 - [ ] Basic documentation added to kubevirt.io user guide
 
