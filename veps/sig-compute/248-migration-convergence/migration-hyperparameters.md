@@ -11,14 +11,13 @@ This document argues for **reasonable starting defaults** for the knobs used by 
 | Knob | Existing | Where configured                                                                      | Proposed default | Role (short) |
 |------|----------|---------------------------------------------------------------------------------------|------------------|--------------|
 | `progressTimeout` | Yes | `migrationConfiguration` (GA: exposed in `MigrationPolicy` as well)                   | **150s** | Legacy path: abort when remaining bytes did not decrease; at GA repurposed as `stallProgressTimeout` (**custom values overridden**) |
-| `stallProgressTimeout` | No | `MigrationPolicy.spec.experimental.stallDetector` (GA: repurposed `progressTimeout`)  | **40s** | Sliding window for stall detection; initial relaxation patience |
+| `stallProgressTimeout` | No | `MigrationPolicy.spec.experimental.stallDetector` (GA: repurposed `progressTimeout`)  | **40s** | Sliding window for stall detection and local-minimum selection |
 | `switchoverTimeout` | No | `MigrationPolicy.spec.experimental.stallDetector` (GA: promotion under consideration) | **60s** | Budget after switchover is triggered |
 | `completionTimeoutPerGiB` | Yes | `migrationConfiguration` / `MigrationPolicy`                                          | **150 s/GiB** (unchanged) | Hard migration budget; stall detection usually ends jobs earlier |
 | `maxDowntimeMs` | No (added by this VEP) | `migrationConfiguration` / `MigrationPolicy` (permanent)                              | **900 ms** | After stall, max acceptable final pause for pre-copy-only paths without post-copy / workload disruption |
 | `stallMargin` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **4** (integer %; applied as `/100`) | Relative band around best remaining bytes for stall and switch-over |
 | `ewmaAlpha` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **0.4** | EWMA weight on each bandwidth sample vs history |
 | `precopyPossibleFactor` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **1.5** | Pre-copy-only: abort if implied downtime > `maxDowntimeMs ×` this factor |
-| `patienceWindowDecayFactor` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **0.5** | Multiplier for relaxation patience after each missed window (no minimum floor) |
 | `searchLocalMinima` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **true** | If **false**, switch-over as soon as stall is detected (no local-minimum wait) |
 | `completionTimeoutFactor` | No | `MigrationPolicy.spec.experimental.stallDetector`                                     | **2.0** | Scales completion-deadline budget checks |
 
@@ -203,14 +202,6 @@ The trade-off is standard for EWMAs: a **larger** `ewmaAlpha` **follows new samp
 In **pre-copy-only** mode with no post-copy and no workload disruption, if implied downtime is only slightly above `maxDowntimeMs`, the algorithm may **keep trying** in hope a later iteration improves; if it is **far** above, the migration is treated as **hopeless** and aborted immediately. `precopyPossibleFactor` is the multiplier on `maxDowntimeMs` that defines that “hopeless” line (`maxDowntimeMs × precopyPossibleFactor`).
 
 There is **no strong empirical argument** for a particular value here yet—**1.5×** is an **engineering default** that sounded reasonable: far enough from `maxDowntimeMs` to avoid aborting borderline cases, tight enough not to burn the full completion budget on migrations that are unlikely to become acceptable. Treat it as **placeholder tuning** until cluster data exists.
-
-### `patienceWindowDecayFactor`
-
-After stall, if remaining bytes never re-enters the band around `bestRemainingBytes`, the design **relaxes** the switch-over target by promoting `bestRemainingBytes` to the **lowest post-stall level still recorded in history** (see the parent VEP), but only after a **patience** window. Each time that window expires without convergence, patience is multiplied by **`patienceWindowDecayFactor`** before the next relaxation step.
-
-This is again a **downtime vs total migration time** trade-off: a **larger** factor (slower decay) waits longer on each relaxation target, which may yield a slightly better switch-over but extends wall-clock time; a **smaller** factor steps through relaxed targets **faster**, shortening the migration at the cost of possibly switching on a less favorable local minimum.
-
-**0.5** (halve the patience each round) felt **reasonable**: patience for successive relaxation targets decays **fast enough** that the job does not sit too long on a `bestRemainingBytes` level that the workload or network may never hit again, while still giving each level a meaningful window anchored initially to `stallProgressTimeout`. Notice that there is **no minimum floor** on patience and this is intentional.
 
 ### `searchLocalMinima`
 
