@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: 1.9.0, 1.10.0
-- This VEP targets beta for version:
+- This VEP targets beta for version: 1.11.0
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -14,7 +14,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 - [X] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
 - [X] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [X] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 - [X] (R) Graduation criteria filled
 
@@ -239,6 +239,7 @@ Same as Alternative 3, but paused flag via sentinel file (Alternative 2 approach
 - 2026-04-16: Added section on upstream [Kubernetes KEP #5002](https://github.com/kubernetes/enhancements/issues/5002) (hot disable of probes) and documented the migration path.
 - 2026-04-21: Updated based on enp0s3 feedback: clarified why GuestAgentPing-only scope (customer requirements + reduced implementation risk), expanded annotation vs. API field rationale to acknowledge pause as desired state, fixed diagram formatting with code fences.
 - 2026-04-24: Removed internal operations (fsfreeze, snapshot, backup) from supported use cases. Auto-pause during internal operations is now explicitly unsupported — annotation is user-driven only. Replaced dedicated `SetGuestAgentPaused` gRPC RPC with reading annotation from the VMI JSON already delivered by `SyncVirtualMachine` — zero protocol changes, level-triggered state, and rollback-safe (old virt-handler sends VMI without annotation → auto-unpause).
+- 2026-11-23: Targeted Beta for KubeVirt 1.11.0; remaining graduation criteria are tracked below.
 
 ## Graduation Requirements
 
@@ -250,6 +251,7 @@ Same as Alternative 3, but paused flag via sentinel file (Alternative 2 approach
 
 **Beta:**
 - [X] Guest OS update workflow docs
+- [X] Annotation API and behavior are stable for beta
 
 **GA:**
 - [ ] Stable for ≥2 releases, no regressions
