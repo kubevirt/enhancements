@@ -6,7 +6,7 @@
 
 - This VEP targets alpha for version: v1.6
 - This VEP targets beta for version: v1.8
-- This VEP targets GA for version: v1.10
+- This VEP targets GA for version: v1.11
 
 ### Release Signoff Checklist
 
@@ -316,7 +316,9 @@ Since virt-launcher drops the root user, this method is secure. However, KubeVir
 ## Update/Rollback Compatibility
 
 ### passt network binding plugin
-The `passt` network binding plugin is superseded by the core `passtBinding` binding. The plugin code will be removed in v1.11.
+The `passt` network binding plugin is superseded by the core `passtBinding` binding. The plugin code currently serves as
+an example only as it is useful for testing the entire network binding plugin framework. It may be removed in the future
+in favor of another example plugins.
 To move a VM from the plugin to the core binding, the interface spec is changed from `binding: { name: passt }` to `passtBinding: {}`, and the VM is restarted.
 
 ## Functional Testing Approach
@@ -336,7 +338,7 @@ The `passtBinding` e2e tests cover:
 - `passt` was a core network binding, [removed](https://github.com/kubevirt/kubevirt/pull/11915) in KubeVirt v1.3 when Network Binding Plugins were introduced. It was re-introduced as a network binding plugin.
 - Alpha: `vhost-user` support and seamless TCP migration via `passt-repair` integration in virt-handler, gated by the `passtIPStackMigration` feature gate; `passt` delivered as a network binding plugin (sidecar container + CNI).
 - Beta (v1.8): the `passt` binding is migrated into the KubeVirt core and exposed in the API as `passtBinding` (since the original `passt` `InterfaceBindingMethod` was deprecated in v1.3), gated by the new `PasstBinding` feature gate.
-- GA (v1.10): bug fixes and graduation.
+- GA (v1.11): bug fixes and graduation.
 
 ## Graduation Requirements
 
