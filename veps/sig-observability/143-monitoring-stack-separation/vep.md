@@ -14,7 +14,7 @@ For example, during the planning phase for version v1.123, do **not** target bet
 -->
 
 - This VEP targets alpha for version: v1.9
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -312,13 +312,221 @@ appending a request and a response field, as above; the collection, caching, agg
 and scrape paths are unchanged by such an addition.
 
 `guestGetDevices` carries the output of the `guest-get-devices` agent command: driver name, version,
-date and PCI device/vendor ID per device. It is Windows-only, and its payload is cached with a 30
+date and PCI device/vendor ID per device. It is Windows-only, and its payload is cached with a five
 minute time-to-live, driver information being mostly static for the life of a VM. It is added for
 [VEP #385](../385-guest-device-info/vep.md), which describes the metric built on it.
 
 An agent command the guest does not implement - `guest-get-devices` on a Linux guest, for example -
-yields an empty payload and a successful response, cached for the normal time-to-live. It does not
-mark the VMI's stats response unsuccessful, and it is not re-executed on every scrape.
+must yield an empty payload and a successful response, cached for the normal time-to-live. It must
+not mark the VMI's stats response unsuccessful, and it must not be re-executed on every scrape.
+
+### Guest Agent Command Cost and Safety
+
+#### Call rate is bounded by the cache, not by the scrape interval
+
+`virt-launcher` holds one time-defined cache per agent command. The caches are lazy: no background
+goroutine refreshes them, so a command that no caller requests is never executed, and a command that
+every caller requests still reaches the guest agent at most once per time-to-live per VMI. A client
+polling `GetVMStats` every second for `guestGetMemoryBlocks` triggers one agent call every 30
+minutes.
+
+This bound is a property of `virt-launcher`, not of the caller. It holds for any client holding a
+valid certificate for the `virt-handler` stats endpoint, including clients that are not the
+`kubevirt-observability-controller`. That is the primary safety argument for this path, and it is
+stronger than any per-command measurement, because it does not assume the caller behaves well.
+
+#### Per-command justification
+
+Categories are plumbed in `virt-launcher` but only executed when a caller requests them. The
+`kubevirt-observability-controller` resolves its request set per VMI from the enabled metric
+allowlist, the guest OS family and the reported agent version, so a command is only issued when a
+metric that consumes it is enabled and the guest can answer it.
+
+Every category below carries monitoring value. Those with a metric consumer are already in use,
+in either the `kubevirt-observability-controller` or core KubeVirt; those listing none consume no
+resources by being present, because the caches are lazy, so a category nobody requests is never
+executed and costs nothing beyond a map entry. They are listed so a future VEP proposing a metric
+has a starting point rather than re-deriving it.
+
+| Agent command | Agent since | Platforms | Cache | Metric consumer | Monitoring value |
+|---|---|---|---|---|---|
+| `guest-get-fsinfo` | 2.2 | Windows, Linux, FreeBSD | 5 min | `kubevirt_vmi_filesystem_capacity_bytes`, `kubevirt_vmi_filesystem_used_bytes` | Guest filesystem fill level is invisible from the host, which only sees block device usage. The sole source for alerting before a guest runs out of disk, and already shipped in `virt-handler` behind an existing alert. |
+| `guest-get-devices` | 5.2 | Windows | 5 min | `kubevirt_vmi_guest_device_driver_timestamp_seconds` | VirtIO driver name, version and date per device, so operators can find Windows guests on outdated drivers. Added by [VEP #385](../385-guest-device-info/vep.md) and consumed by its alert. No libvirt equivalent exists. |
+| `guest-get-osinfo` | 2.10 | all | 5 min | `kubevirt_vmi_guest_os_info` | Guest OS, kernel release and distribution, so fleet dashboards can group VMs by OS and find end-of-life or unpatched images. |
+| `guest-network-get-interfaces` | 1.1 | Windows, Linux | 5 min | `kubevirt_vmi_guest_interface_info` | Maps guest-side interface names, IP and hardware addresses to the VMI, which is what lets a network alert resolve to an address an operator can act on. |
+| `guest-get-host-name` | 2.10 | all | 5 min | `kubevirt_vmi_guest_hostname` | The name the guest believes it has, which is how in-guest agents and logs identify themselves and therefore the join key back to a VMI. |
+| `guest-get-timezone` | 2.10 | all | 5 min | `kubevirt_vmi_guest_timezone` | A wrong or drifting guest timezone silently misaligns in-guest timestamps against cluster metrics, a common and hard-to-diagnose cause of correlation gaps. |
+| `guest-get-load` | 10.0 | Windows, Linux | 20 s | `kubevirt_vmi_guest_load_1m`, `kubevirt_vmi_guest_load_5m`, `kubevirt_vmi_guest_load_15m` | Guest load average, separating a VM that is busy from one merely allocated. Already a shipped core metric, collected today by the existing poller rather than through `GetVMStats`, so it must migrate rather than be justified afresh. |
+| `guest-get-users` | 2.10 | Windows, Linux | 1 min | `kubevirt_vmi_guest_user_count` | Active login sessions separate an idle VM from one in use, supporting right-sizing and unexpected-access alerting. |
+| `guest-get-time` | 1.5 | all | 1 min | none | Guest clock offset against the host, which detects time drift before it breaks certificates, authentication and log correlation. |
+| `guest-get-vcpus` | 1.5 | Windows, Linux | 1 min | none | Which vCPUs the guest has brought online, confirming whether a CPU hotplug was actually taken up. |
+| `guest-get-cpustats` | 7.1 | Linux | 20 s | none | Per-CPU user, system, idle and I/O wait time inside the guest, distinguishing guest CPU pressure from host steal time. |
+| `guest-get-diskstats` | 7.1 | Linux | 20 s | none | Guest-side I/O counts and service times, separating guest I/O behaviour from host block device throughput. |
+| `guest-get-disks` | 5.2 | Windows, Linux | 5 min | none | Physical disks and partitions with SMART data, surfacing failing storage as the guest sees it. |
+| `guest-network-get-route` | 9.1 Linux, 11.0 Windows | Windows, Linux | 5 min | none | Guest routing table, explaining guest-side connectivity failures that look like network problems from outside. |
+| `guest-get-memory-block-info` | 2.3 | Linux | 1 min | none | Guest memory block size, a single small value. The cheap companion needed to interpret `guest-get-memory-blocks`. |
+| `guest-get-memory-blocks` | 2.3 | Linux | 30 min | none | Online state of each hotpluggable memory block, confirming whether a memory hotplug was onlined by the guest. The only command whose cost scales with guest size; see the note below. |
+
+Agent version and platform availability are taken from the
+[QEMU Guest Agent Protocol Reference](https://qemu-project.gitlab.io/qemu/interop/qemu-ga-ref.html).
+The version column matters for more than documentation: the controller's minimum of 5.2 for
+`guest-get-devices` matches the reference exactly, and the same gate should apply to any future
+category introduced recently. `guest-get-load` is the clearest example, introduced in agent 10.0.
+
+#### How the controller narrows the request set
+
+The table above is the widest set any VMI can produce. The
+`kubevirt-observability-controller` narrows it per VMI through five independent gates, each of
+which can only remove categories. A category survives to the wire only if every gate allows it.
+
+1. **Collection is opt-in.** The `--enable-vmstats` flag defaults to off. With it off the
+   controller never contacts the stats endpoint.
+2. **The metric allowlist.** A category is allowed only if at least one metric that consumes it is
+   enabled. If the allowlist keeps no stats metric at all, the poller is never started, so an
+   operator can disable guest agent collection entirely by metric name without disabling the
+   controller.
+3. **Guest agent presence.** If the VMI does not report `status.guestOSInfo.id`, no guest category
+   is requested and only the libvirt categories are. That field is populated by KubeVirt's own
+   libvirt guest info poller, so the controller issues no agent command until KubeVirt has already
+   confirmed a working agent. A VM with no guest agent installed therefore never receives one.
+4. **Guest OS family.** Beyond the four categories common to all guests, `guest-get-users` is
+   requested only for Windows guests and `guest-network-get-interfaces` only for Linux guests. The
+   family is read from the same reported OS id, so a command is not sent to a guest whose OS cannot
+   answer it.
+5. **Guest agent version.** `guest-get-devices` is requested only when the reported agent version
+   is 5.2 or newer, parsed from the version string the stats response carries. When the version is
+   not yet known the controller requests a category that will cause the next response to report it,
+   rather than probing with the command itself. An agent older than 5.2 is never asked.
+
+Collection runs on a 30 second interval, at most 10 nodes concurrently, with a 30 second timeout
+per node. Requests for all VMIs on a node are batched into one call to that node's `virt-handler`.
+Those three numbers interact, and the interaction is the controller's own scalability limit. A
+poll cycle visits every node holding a VMI, ten at a time, and the next tick does not start until
+the current cycle finishes.
+
+#### Overlap with the existing agent poller
+
+`virt-launcher` already runs an agent poller for every VMI with a connected agent, independently
+of this feature and of whether monitoring is installed, because it populates VMI status and the
+guest agent subresources. Seven of the eight categories in use overlap with what it already
+collects, and the two paths each issue their own agent commands:
+
+| Agent command | Already collected by the poller as | Poller interval |
+|---|---|---|
+| `guest-get-users` | `virDomainGetGuestInfo(USERS)` | 10 s |
+| `guest-get-osinfo`, `guest-get-host-name`, `guest-get-timezone`, `guest-network-get-interfaces` | `virDomainGetGuestInfo(INTERFACES, OS, HOSTNAME, TIMEZONE)` | 120 s |
+| `guest-get-load` | `virDomainGetGuestInfo(LOAD)` | 120 s |
+| `guest-get-fsinfo` | `guest-get-fsinfo`, issued directly | 300 s |
+
+The incremental cost is therefore small, and for `guest-get-users` the new path is an order of
+magnitude slower than the poller it duplicates. For beta the duplication is accepted rather than
+removed, since resolving it means refactoring a path that feeds core VMI status.
+
+For GA the poller should be replaced by this mechanism rather than run alongside it. Its consumers
+can read the agent data caches directly in-process, or go through the `GetVMStats` endpoint,
+leaving one agent collection path in `virt-launcher`. The next section covers what that requires.
+
+#### After beta: replace the agent poller with this mechanism
+
+The intended end state is a single agent collection path in `virt-launcher`, and the mechanism
+introduced by this VEP is the one that should survive. The existing agent poller is then removed
+and its consumers move onto the agent data caches, either by reading them directly in-process,
+which suits the status path, or through the `GetVMStats` endpoint, which suits anything already
+remote.
+
+The new mechanism is the better base for three reasons. It caches raw agent payloads rather than
+the fixed set of fields libvirt's guest info call models. It carries a per-command time-to-live
+rather than one interval per worker group, so each command can be refreshed at a rate that matches
+how fast its data actually changes. And adding a command becomes a table entry rather than a new
+poller worker and a new conversion function.
+
+This is deliberately not beta work. It changes a path that populates `vmi.status.guestOSInfo`,
+`vmi.status.interfaces` and `vmi.status.fsFreezeStatus`, so it carries regression risk for
+networking, snapshot and backup flows that a monitoring graduation should not take on. The
+following must be settled first:
+
+- **The caches must become unconditional.** They are created only when the `VMStatsCollector`
+  feature gate is enabled. Core VMI status cannot depend on a monitoring feature gate, so the
+  caches must exist for every VMI before anything in the status path reads them.
+- **Categories that drive status need background refresh.** The agent data caches are lazy and
+  refresh only when read. Status updates are push-driven today, so any category feeding status
+  needs its cache kept warm rather than waiting for a scrape.
+
+#### Measurements
+
+Measured on the code at main, with the feature gate enabled, on a
+single worker of a three-master two-worker cluster.
+
+| | |
+|---|---|
+| KubeVirt | `e5be198b0b` |
+| Kubernetes | v1.35.8 |
+| Node | GCP `n2-standard-4`, 4 vCPU, 16GiB, hardware virtualisation available |
+| Guest | Fedora, 1GiB, QEMU guest agent connected |
+
+Timings are `virt-launcher`'s own, logged per command at verbosity 2, so they exclude
+client and transport overhead.
+
+**Per-command cost.** Each category was requested on its own, cold once and then ten times
+in a row.
+
+| Agent command | Cold ms | Warm median ms | Payload bytes |
+|---|---|---|---|
+| `guest-get-osinfo` | 4.527 | 0.002 | 325 |
+| `guest-get-host-name` | 4.167 | 0.002 | 38 |
+| `guest-get-timezone` | 4.528 | 0.002 | 36 |
+| `guest-get-fsinfo` | 4.977 | 0.002 | 554 |
+| `guest-network-get-interfaces` | 4.828 | 0.002 | 686 |
+| `guest-get-users` | 4.583 | 0.002 | 13 |
+| `guest-get-devices` | 4.683 | **4.104** | 0 (expected fail) |
+| `domainStats` | 13.254 | 0.130 | 12 |
+| `dirtyRate` | 1205.319 | 0.055 | 0 |
+
+Every agent command costs roughly 4 to 5 milliseconds when it reaches the guest and
+2 microseconds when served from cache, a factor of about two thousand.
+
+**The rate bound holds.** Thirty requests were issued over thirty seconds for each category,
+well inside every window. Agent round trips were counted by duration, since a cache hit
+returns in microseconds.
+
+| Category | Window | Requests | Agent round trips |
+|---|---|---|---|
+| `guest-get-osinfo` | 5 min | 30 | 0 |
+| `guest-get-fsinfo` | 5 min | 30 | 0 |
+| `guest-get-users` | 1 min | 30 | 0 |
+| `guest-network-get-interfaces` | 5 min | 30 | 0 |
+
+This is the central safety claim of the design and it is confirmed. Request rate does not
+reach the guest.
+
+**Failures are not absorbed, and are not subject to the cache window.** Eight requests for
+`guest-get-devices` against a Linux guest produced eight agent round trips, where one is expected.
+
+The error returned is `virError(Code=113, ...)`, which is `VIR_ERR_AGENT_COMMAND_FAILED`,
+carrying the agent's own text "The command guest-get-devices has not been found". The
+implementation tests for `VIR_ERR_ARGUMENT_UNSUPPORTED`, `VIR_ERR_OPERATION_UNSUPPORTED` and
+`VIR_ERR_NO_SUPPORT`, which are codes 74, 84 and 3. The code it actually receives is 113, so
+the check can never match and the empty-success path is unreachable.
+
+[kubevirt/kubevirt#19632](https://github.com/kubevirt/kubevirt/pull/19632) fixes this by treating
+`VIR_ERR_AGENT_COMMAND_FAILED` as a rejection the cache should absorb, so a command the guest
+rejects records an empty result and is not re-issued until its window elapses. That closes the
+case measured here. It does not change the behaviour for errors the guest agent did not produce,
+such as `VIR_ERR_AGENT_UNRESPONSIVE` below, which are still surfaced and still leave the cache
+unstamped.
+
+**A missing guest agent is cheap.** When the
+agent channel is not connected libvirt does not wait out its five second timeout. It returns
+immediately with `VIR_ERR_AGENT_UNRESPONSIVE`, code 86, "QEMU guest agent is not connected".
+
+| Case | Per command | Whole request, 7 categories |
+|---|---|---|
+| Healthy guest, warm cache | 0.002 ms | 4.4 ms |
+| No guest agent at all | 0.37 to 0.70 ms | 3.4 to 6.0 ms |
+
+The five second libvirt timeout therefore applies only when an agent is connected but fails to
+answer, not when it is absent. Each of the seven commands still fails against an agentless guest,
+so the response carries seven errors, but the request completes in milliseconds.
 
 ### 3. Recording Rules and Alerts Migration
 
@@ -440,6 +648,11 @@ install the new controller before upgrading to this release.
 - Response size may increase per call since multiple data types are returned, but total bytes
   transferred remains the same (or decreases slightly due to reduced framing overhead).
 - Selective serialization ensures the server only marshals requested fields.
+- Guest agent collection cost does not scale with the scrape interval. Each command reaches the
+  agent at most once per time-to-live per VMI, so the dominant cost is the number of VMIs per node,
+  not the polling rate. See
+  [Guest Agent Command Cost and Safety](#guest-agent-command-cost-and-safety) for the per-command
+  justification, the known gaps in that bound, and the measurements planned before beta.
 
 ## Update/Rollback Compatibility
 
@@ -482,12 +695,6 @@ compatibility.
   - `kubevirt-observability-controller` can remain installed (but no metrics will be
     collected), or be uninstalled.
 
-## Functional Testing Approach
-
-<!--
-An overview on the approaches used to functional test this design)
--->
-
 ## Implementation History
 
 <!--
@@ -516,12 +723,12 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 
 ### Alpha
 
-- [ ] Feature gate `VMStatsCollector` guards KubeVirt-side code changes
+- [x] Feature gate `VMStatsCollector` guards KubeVirt-side code changes
   (gRPC refactor in `virt-handler`/`virt-launcher`)
-- [ ] `GetVMStats` RPC implemented in `virt-launcher` and called by `virt-handler`
+- [x] `GetVMStats` RPC implemented in `virt-launcher` and called by `virt-handler`
   with fallback to legacy RPCs
-- [ ] Cluster-state metrics emitted by the new controller (subset of metrics migrated)
-- [ ] Unit and integration test coverage for the new RPC and controller
+- [x] Cluster-state metrics emitted by the new controller (subset of metrics migrated)
+- [x] Unit and integration test coverage for the new RPC and controller
 
 ### Beta
 
@@ -529,7 +736,14 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
 - [ ] Recording rules and alert management fully owned by the new controller
 - [ ] E2E tests covering upgrade/rollback scenarios and gRPC fallback
 - [ ] Legacy individual monitoring RPCs deprecated in documentation
-- [ ] Performance benchmarks comparing per-scrape latency before and after
+- [x] Guest agent collection: every requested category has a documented metric consumer, and
+      categories without one are not requested
+- [ ] Guest agent collection: failures respect the per-command window, so no command can be
+      re-issued on every scrape
+- [ ] Guest agent collection: a bounded overall deadline per `GetVMStats` call, and no collection
+      against paused, non-running or migrating VMIs
+- [x] Measurements published for every requested category, covering the healthy guest, the
+      unresponsive agent, and freeze and thaw contention
 
 ### GA
 
@@ -541,3 +755,6 @@ Refer to https://github.com/kubevirt/community/blob/main/design-proposals/featur
   rules, and alerts
 - [ ] Upgrade/rollback tests pass across two consecutive releases
 - [ ] Documentation updated with new architecture diagrams and operator guide
+- [ ] The `virt-launcher` agent poller is replaced by the agent data caches, leaving one agent
+      collection path, per
+      [After beta: replace the agent poller with this mechanism](#after-beta-replace-the-agent-poller-with-this-mechanism)
