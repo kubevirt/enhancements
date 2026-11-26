@@ -25,7 +25,7 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 VirtIO driver versions drift apart across a fleet of Windows VMs, invisibly to the cluster. This
 VEP surfaces the driver information the QEMU guest agent already reports:
 
-- A metric carrying driver name, version and date per device, for fleet-wide inventory
+- A metric carrying driver name and version per device, for fleet-wide inventory
 - An alert for VMs whose drivers are behind
 
 What counts as "behind" is a support-policy decision KubeVirt cannot make, so the comparison is
@@ -47,12 +47,12 @@ The data is already reachable: QEMU added `guest-get-devices` in 5.2 for this pu
 
 ## Goals
 
-- Driver name, version and date are queryable from Prometheus for every device a Windows VM reports
-- Devices not running a current version are identified per device and per Windows release, against a
-  definition of current that KubeVirt does not supply
-- That definition is supplied and revised as data at runtime, without rebuilding or reconfiguring
+- Driver name and version are queryable from Prometheus for every device a Windows VM reports
+- Devices running a driver older than a minimum version are identified per device and per Windows
+  release, against minimums that KubeVirt does not supply
+- Those minimums are supplied and revised as data at runtime, without rebuilding or reconfiguring
   KubeVirt
-- The metric supports user-written conditions beyond the built-in one, age-based or version-specific
+- The metric supports user-written version conditions beyond the built-in one
 - No metric already reported for a VM changes
 
 ## Non Goals
@@ -95,7 +95,7 @@ The data is already reachable: QEMU added `guest-get-devices` in 5.2 for this pu
 | Repo | Carries                                                                       |
 |---|-------------------------------------------------------------------------------|
 | [kubevirt/kubevirt](https://github.com/kubevirt/kubevirt) | One more guest agent category on the stats path VEP #143 defines              |
-| [kubevirt/kubevirt-observability-controller](https://github.com/kubevirt/kubevirt-observability-controller) | Metrics, ConfigMap defining current driver versions, recording rule and alert |
+| [kubevirt/kubevirt-observability-controller](https://github.com/kubevirt/kubevirt-observability-controller) | Metrics, ConfigMap defining minimum driver versions, recording rule and alert |
 | [kubevirt/monitoring](https://github.com/kubevirt/monitoring) | Runbook                                                                       |
 
 The next section, [kubevirt/kubevirt Changes](#kubevirtkubevirt-changes), is
@@ -193,12 +193,12 @@ Unit:
   leaving every other category in the response intact
 - A second request within the time-to-live does not re-issue the command to the guest
 
-### Beta Checklist
+### Alpha Checklist
 
-- [ ] Unsupported agent commands no longer fail a VMI's whole stats response, and are cached per TTL
+- [x] Unsupported agent commands no longer fail a VMI's whole stats response, and are cached per TTL
       rather than retried every scrape
-- [ ] `guest-get-devices` added as a VMStatsCollector category, end to end
-- [ ] Unit tests for the unsupported-command handling, per Testing above
+- [x] `guest-get-devices` added as a VMStatsCollector category, end to end
+- [x] Unit tests for the unsupported-command handling, per Testing above
 - [ ] Windows lane test asserting a Windows VMI's stats response carries device data
 
 Dependencies, owned by VEP #143:
@@ -214,7 +214,7 @@ above and emits one sample per device.
 
 ### Metric Definition
 
-**Name:** `kubevirt_vmi_guest_device_driver_date_seconds`
+**Name:** `kubevirt_vmi_guest_device_driver_build_number`
 
 **Type:** Gauge, one sample per device per VM, emitted by `kubevirt-observability-controller`
 alongside its other guest-agent-derived metrics. A VM reporting no device data produces no samples.
@@ -229,13 +229,18 @@ alongside its other guest-agent-derived metrics. A VM reporting no device data p
 | `device_id` | `1041` | `id.device-id` (decimal to hex, no 0x prefix) |
 | `guest_os_version_id` | `2022` | the VMI's reported guest OS version |
 
-**Value:** Driver date as Unix epoch seconds (converted from the nanosecond timestamp).
-
-The date as value enables `time() - value` arithmetic for age-based queries (precedent:
-`kubevirt_vmi_migration_start_time_seconds`).
+**Value:** The build number of `driver_version`.
 
 Omitted by design: `vendor_id`, always `1af4` or `1b36` because QEMU hard-codes the filter, and
 `device_type`, always `pci`.
+
+### Driver Build Number
+
+A Windows driver version has four unsigned 16-bit decimal components. For virtio-win, the last
+component is the driver build and increases with every build within one virtio-win stream; the
+first three are not needed to order builds. `100.103.104.30200` is build `30200`, and `100.103.104.30201` is newer. A version without
+exactly four 16-bit decimal components has no build number and produces no sample. Build numbers are
+compared only within one device and Windows release.
 
 ### Driver Version Reference ConfigMap
 
@@ -247,8 +252,8 @@ does not create it; only an annotated example ships in the controller's docs.
   ConfigMaps and needs `list` and `watch` added
 - An explicit schema `version` is required and rejected if unrecognized, so a later change cannot be
   misparsed by an older controller
-- Several `driverVersion` entries may share a `(deviceID, guestOSVersionID)` key, so any of them
-  counts as current. This lets a distribution accept multiple versions during a rollout
+- Each `(deviceID, guestOSVersionID)` key has exactly one minimum `driverVersion`, and every
+  `driverVersion` must have a build number
 - `deviceID` is normalized by the same helper the device metric uses to render the agent's decimal
   `id.device-id` as hex; drift between the two would silently match nothing
 - `kubevirt_guest_device_driver_config_invalid` is `1` while a ConfigMap present in the cluster is
@@ -256,42 +261,42 @@ does not create it; only an annotated example ships in the controller's docs.
 
 ### Reference Metric
 
-**Name:** `kubevirt_guest_device_driver_latest_version_info`
+**Name:** `kubevirt_guest_device_driver_minimum_build_number`
 
-**Type:** Gauge, value always `1`, emitted by `kubevirt-observability-controller` from the ConfigMap
-alone
+**Type:** Gauge, emitted by `kubevirt-observability-controller` from the ConfigMap alone. The value is
+the build number of the minimum version.
 
 **Labels:**
 
 | Label | Example | Source |
 |-------|---------|--------|
 | `device_id` | `1041` | `devices[].deviceID`, normalized |
-| `guest_os_version_id` | `2022` | `devices[].current[].guestOSVersionID` |
-| `driver_version` | `100.95.104.26200` | `devices[].current[].driverVersion` |
+| `guest_os_version_id` | `2022` | `devices[].minimum[].guestOSVersionID` |
+| `driver_version` | `100.103.104.30200` | `devices[].minimum[].driverVersion` |
 | `device_name` | `VirtIO network device` | `devices[].deviceName` |
 
 ### Recording Rule and Alert
 
 Both are registered in the controller, which VEP #143 makes the owner of `PrometheusRule` content.
-`vmi:kubevirt_vmi_guest_device_driver_outdated:info` yields one series per outdated (VMI, device)
-pair:
+`vmi:kubevirt_vmi_guest_device_driver_build_number:max` yields one series per outdated (VMI, device
+ID, driver version), valued at the installed build number:
 
 ```promql
 max by (namespace, name, device_id, driver_name, driver_version, guest_os_version_id) (
-    kubevirt_vmi_guest_device_driver_date_seconds
-  and on (device_id, guest_os_version_id)
-    kubevirt_guest_device_driver_latest_version_info
-  unless on (device_id, guest_os_version_id, driver_version)
-    kubevirt_guest_device_driver_latest_version_info
+  kubevirt_vmi_guest_device_driver_build_number
+)
+< on (device_id, guest_os_version_id) group_left
+max by (device_id, guest_os_version_id) (
+  kubevirt_guest_device_driver_minimum_build_number
 )
 ```
 
-Keep only devices the mapping covers for that VM's Windows release, then drop those listed as
-current. What remains is covered-but-not-current. A device the mapping does not list, or a VM
-reporting no `guest_os_version_id`, matches nothing and so never alerts.
+A device whose installed build is below the minimum for that device and the VM's Windows release is
+kept; an equal or newer build is not. A device the mapping does not list, a VM reporting no
+`guest_os_version_id`, or a version without a build number matches nothing and so never alerts.
 
-- Both set operators tolerate duplicates on the right, so multiple controller replicas emitting the
-  reference metric cannot abort the rule
+- `max by` on the right makes the reference unique per match key, so multiple controller replicas
+  emitting it cannot abort the rule
 - `max by` strips `node` and every `kubernetes_vmi_label_*`, so the series cannot inherit
   user-defined cardinality
 
@@ -300,7 +305,7 @@ The alert is added to the controller's VM workload alerts:
 | Field | Value |
 |-------|-------|
 | Alert | `OutdatedGuestDeviceDrivers` |
-| Expr | `vmi:kubevirt_vmi_guest_device_driver_outdated:info{namespace!=''}` |
+| Expr | `vmi:kubevirt_vmi_guest_device_driver_build_number:max{namespace!=''}`, with the `vm` label added like every VM alert |
 | For | `1h` |
 | `severity` | `warning` |
 | `operator_health_impact` | `none` |
@@ -313,7 +318,8 @@ kubevirt/monitoring.
 
 | Risk | Mitigation |
 |---|---|
-| **Operational.** A mapping listing a version no VM runs alerts the whole fleet at once, since the alert fires per (VM, device) pair | The `1h` `for` duration and Alertmanager grouping. Steady state is zero series, so a sudden fleet-wide firing signals the mapping changed, not the fleet |
+| **Operational.** Raising a minimum above what the fleet runs alerts the whole fleet at once, since the alert fires per (VM, device) pair | The `1h` `for` duration and Alertmanager grouping. Steady state is zero series, so a sudden fleet-wide firing signals the mapping changed, not the fleet |
+| **Correctness.** The comparison relies on virtio-win's numbering, where the last version component orders builds. A driver numbered differently would be compared wrongly | The mapping lists only drivers its author chose, normally the distributor's own virtio-win drivers. The example ConfigMap documents the numbering assumption. Builds from different streams, e.g. upstream and a downstream rebuild, are not comparable, so one mapping holds minimums from one stream |
 | **Operational.** A botched mapping edit could make active alerts look resolved | An invalid mapping retains the last valid one; `kubevirt_guest_device_driver_config_invalid` exposes that state for alerting |
 | **UX.** With no mapping the rule is permanently empty, which is indistinguishable from a misconfiguration | Documented explicitly, plus an annotated example mapping so the reason for the silence is discoverable |
 | **Security.** Driver inventory is disclosed to anyone who can read the metrics, including which VMs run a version with a published vulnerability | Not a new class of exposure: `kubevirt_vmi_guest_os_info` already reports guest OS and kernel version through the same endpoint under the same controls |
@@ -325,24 +331,24 @@ kubevirt/monitoring.
 ### Metric Output
 
 ```
-kubevirt_vmi_guest_device_driver_date_seconds{
+kubevirt_vmi_guest_device_driver_build_number{
   node="worker-1", namespace="default", name="win-vm-1",
   driver_name="Red Hat VirtIO Ethernet Adapter",
   driver_version="100.95.104.26200",
   device_id="1041", guest_os_version_id="2022"
-} 1721001600
+} 26200
 ```
 
 ### Example PromQL Queries
 
 Inventory, filtered by any label - here one device across the fleet:
 ```promql
-kubevirt_vmi_guest_device_driver_date_seconds{device_id="1041"}
+kubevirt_vmi_guest_device_driver_build_number{device_id="1041"}
 ```
 
-Find VMs with drivers older than 1 year:
+Find VMs running a network driver older than build `26200`, without a mapping:
 ```promql
-(time() - kubevirt_vmi_guest_device_driver_date_seconds) > (365 * 24 * 3600)
+kubevirt_vmi_guest_device_driver_build_number{device_id="1041"} < 26200
 ```
 
 ### Reference ConfigMap
@@ -356,18 +362,17 @@ metadata:
   namespace: virt-observability-controller-system
 data:
   drivers.yaml: |
-    version: v1alpha1
+    version: v1alpha2
     devices:
       - deviceID: "1041"
         deviceName: "VirtIO network device"   # informational only
-        current:
+        minimum:
           - guestOSVersionID: "2022"
-            driverVersion: "100.95.104.26200"
-          - guestOSVersionID: "2022"
-            driverVersion: "100.95.104.26100"
-          - guestOSVersionID: "2019"
-            driverVersion: "100.94.104.25200"
+            driverVersion: "100.103.104.30200"
 ```
+
+With this mapping, `win-vm-1` above alerts: build `26200` is below the minimum `30200` for Windows
+Server 2022.
 
 ## Alternatives
 
@@ -379,10 +384,11 @@ The collection-side alternatives are in [kubevirt/kubevirt Changes](#rejected-al
 |---|---|
 | Derive the requested stats categories from the metrics allowlist, so a narrowed deployment never issues the command | The feature is on by default, so enablement must not depend on a control most deployments leave unset. As an optimization it saves one agent call per Linux VM per 30 minutes, and belongs in VEP #143's scope |
 | Add driver info as labels on `kubevirt_vmi_info` | Multiple devices per VM would duplicate the entire `kubevirt_vmi_info` series per device, inflating the central VMI info metric |
-| Follow the `_info` convention: value always `1`, driver date as a label | More consistent with other KubeVirt info metrics, but loses `time() - value` arithmetic for the age queries documented above |
+| Also expose the driver date, as a metric value or label | virtio-win stamps every driver of a release with the same date, so it orders nothing the build number does not, and doubles the device series |
 | Fire the alert on `time() - <driver date>` exceeding a threshold | A stable device's current driver can be over a year old, so any threshold produces false positives |
-| Carry the current driver's release date in the mapping and flag anything older | Requires a date maintained per entry, and an arithmetic comparison demands unique matching on both sides where the set operators used here tolerate duplicates for free |
-| Write the recording rule as `unless` alone, without the `and` that keeps only mapped devices | Flags every device the mapping does not cover, which on a default installation is the entire fleet |
+| Carry the current driver's release date in the mapping and flag anything older | Requires a date maintained per entry |
+| List the current versions per device and flag any version not listed | Flags newer drivers, and drivers that differ only in components that do not order builds |
+| Compare all four version components | 64 bits exceed what a float64 sample holds exactly, so it needs two samples per device and a two-stage comparison, while the last component alone already orders virtio-win builds |
 | Rewrite the recording rule expression from the mapping instead of exposing a reference metric | Makes rule content dynamic and untestable by upstream CI, and reloads the rule group on every edit |
 
 ## Scalability
@@ -431,21 +437,22 @@ only consequence would be the series disappearing.
 ### The Happy Path
 
 A Windows VM with a running guest agent reports its VirtIO devices, one series per device appears,
-and a mapping listing a different version for one of them fires `OutdatedGuestDeviceDrivers` for
-that VM and device and nothing else.
+and a mapping with a minimum above one device's installed build fires `OutdatedGuestDeviceDrivers`
+for that VM and device and nothing else.
 
 | Segment | Tier | Covers |
 |---|---|---|
-| Payload to device series | unit | A captured response parses into the expected label sets, driver-date values and series count |
-| Device series plus mapping to a firing alert | rule tests (promtool) | Over synthetic series: an outdated device produces exactly one series; a current one and an uncovered one produce none |
-| Mapping ConfigMap to reference metric | functional, Linux guests | Applying, mutating and deleting the mapping is reflected in `kubevirt_guest_device_driver_latest_version_info` |
+| Payload to device series | unit | A captured response parses into the expected label sets, build values and series count |
+| Device series plus mapping to a firing alert | rule tests (promtool) | Over synthetic series: a build below the minimum produces exactly one series; an equal build, a newer build and an uncovered device produce none |
+| Mapping ConfigMap to reference metric | functional, Linux guests | Applying, mutating and deleting the mapping is reflected in `kubevirt_guest_device_driver_minimum_build_number` |
 
 ### Edge and Regression Cases
 
 Unit:
 
-- A mapping with an unrecognized schema version is rejected, the previous one retained, and the
-  invalid-config gauge set
+- A mapping with an unrecognized schema version, two minimums for one key, or a `driverVersion`
+  without a build number is rejected, the previous one retained, and the invalid-config gauge set
+- The build number parser accepts exactly four 16-bit decimal components and returns the last
 - The mapping loader and the metric normalize device identifiers identically, so an entry written in
   the mapping's form matches a device reported in the agent's form
 
@@ -463,31 +470,36 @@ Functional, against a cluster with Linux guests only:
 ## Implementation History
 
 - 2026-07-09: VEP created: [#386](https://github.com/kubevirt/enhancements/pull/386)
+- 2026-11-23: Alert on drivers below a minimum: [#532](https://github.com/kubevirt/enhancements/pull/532)
+- 2026-11-24: Implemented in kubevirt/kubevirt-observability-controller#38, HCO ConfigMap migrated in
+  kubevirt/hyperconverged-cluster-operator#4755
 
 ## Graduation Requirements
 
 ### Alpha
 
-N/A - this VEP enters at beta alongside VEP #143. See Target releases.
-
-### Beta
+Ships while VEP #143 is alpha. See Target releases.
 
 kubevirt/kubevirt-observability-controller:
 
-- [ ] Device metric, one series per device per VM, labelled with `guest_os_version_id`
-- [ ] ConfigMap loader, with `deviceID` normalization shared with the metric, and `list`/`watch`
+- [x] Device metric, one series per device per VM, labelled with `guest_os_version_id`
+- [x] ConfigMap loader, with `deviceID` normalization shared with the metric, and `list`/`watch`
       added to the ClusterRole
-- [ ] Reference metric and `config_invalid` gauge
-- [ ] The recording rule and the `OutdatedGuestDeviceDrivers` alert
-- [ ] promtool harness ported in, with tests for the rule and alert
-- [ ] Unit and functional tests, per Functional Testing Approach
-- [ ] Example ConfigMap in the docs
+- [x] Reference metric and `config_invalid` gauge
+- [x] The recording rule and the `OutdatedGuestDeviceDrivers` alert
+- [x] promtool harness ported in, with tests for the rule and alert
+- [x] Unit and functional tests, per Functional Testing Approach
+- [ ] Example ConfigMap in the docs, stating that minimums compare the last version component
 - [ ] Operator documentation, including that the metric is Windows-only and the alert needs a
       ConfigMap the distributor or administrator supplies
 
 kubevirt/monitoring:
 
-- [ ] `OutdatedGuestDeviceDrivers` runbook merged
+- [x] `OutdatedGuestDeviceDrivers` runbook merged
+
+### Beta
+
+Graduates with VEP #143, with no feature gate of its own.
 
 #### On-By-Default Readiness
 
@@ -516,4 +528,4 @@ A way to disable it if it misbehaves:
 - [ ] Feedback gathered on the ConfigMap schema, including whether `guest_os_version_id` is granular
       enough or a `guest_os_kernel_release` dimension is needed
 - [ ] TTL refined if operational experience calls for it
-- [ ] ConfigMap schema promoted to `version: v1`, with documented `v1alpha1` compatibility
+- [ ] ConfigMap schema promoted to `version: v1`, with documented `v1alpha2` compatibility
