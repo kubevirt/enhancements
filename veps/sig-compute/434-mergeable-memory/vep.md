@@ -5,7 +5,7 @@
 ### Target releases
 
 - This VEP targets alpha for version: v1.10
-- This VEP targets beta for version:
+- This VEP targets beta for version: v1.11
 - This VEP targets GA for version:
 
 ### Release Signoff Checklist
@@ -13,8 +13,8 @@
 Items marked with (R) are required *prior to targeting to a milestone / release*.
 
 - [x] (R) Enhancement issue [#434](https://github.com/kubevirt/enhancements/issues/434) created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
-- [ ] (R) Alpha target version is explicitly mentioned and approved
-- [ ] (R) Beta target version is explicitly mentioned and approved
+- [x] (R) Alpha target version is explicitly mentioned and approved
+- [x] (R) Beta target version is explicitly mentioned and approved
 - [ ] (R) GA target version is explicitly mentioned and approved
 
 ## Overview
@@ -261,23 +261,27 @@ no quarantine/flake attributed to this feature.
 
 ## Implementation History
 
-N/A — no implementation has merged yet.
+- 2026-09-30: Annotation and converter support merged ([kubevirt/kubevirt#19033](https://github.com/kubevirt/kubevirt/pull/19033)).
 
 ## Graduation Requirements
 
 ### Alpha
 
-- [ ] Conversion disables guest-RAM merging when
+- [X] Conversion disables guest-RAM merging when
       `kubevirt.io/mergeable-memory: "false"` and does not when the
       annotation is omitted
-- [ ] Unit tests listed above pass
+- [X] Unit tests listed above pass
 
 ### Beta
 
-- [ ] Functional tests listed above pass, including migration
+- [ ] Functional tests listed above pass
 - [ ] User guide documents the annotation, its default, and that it is not
       confidential computing related
 - [ ] No open functional or security bugs against the annotation
+
+#### On-By-Default Readiness
+
+No feature gate. The annotation is always honored; default behavior is unchanged.
 
 ### GA
 
