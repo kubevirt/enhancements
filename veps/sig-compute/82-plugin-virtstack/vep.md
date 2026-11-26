@@ -1,0 +1,534 @@
+# VEP 82: Plugin-based generalization of KubeVirt's virtualization stack #82
+
+## Release Signoff Checklist
+
+Items marked with (R) are required *prior to targeting to a milestone / release*.
+
+- [ ] (R) Enhancement issue created, which links to VEP dir in [kubevirt/enhancements] (not the initial VEP PR)
+- [ ] (R) Target version is explicitly mentioned and approved
+- [ ] (R) Graduation criteria filled
+
+## Overview
+
+At present KubeVirt can only be used to create and manage virtual machines (VMs) via Libvirt on the QEMU virtual-machine monitor (VMM), with only the hypervisor being configurable between KVM and MSHV. However, this design is limited and hard to maintain because in the wider industry, there are an increasing number of VMMs and hypervisors available - such as Cloud Hypervisor, OpenVMM (VMMs) and HyperV and Xen (hypervisor). Adding and maintaining support for so many backends in-tree in the core KubeVirt repository would make the code difficult to maintain. Furthermore, the dependence of KubeVirt on LibVirt forces any VMM that could be used to have a LibVirt driver, which is untenable.
+
+Therefore, to maximize the adoption of alternative virtualization stacks within KubeVirt, the most preferable design is to decouple it entirely from the underlying virtualization stack (virt-stack) components - and make the virt-stack pluggable. Core KubeVirt would provide the orchestration-related functionalities and offload virtualization-related functionalities to the plugin.
+
+This VEP builds on the Hypervisor Generalization VEP ([#98](https://github.com/kubevirt/enhancements/pull/98)) and continues the discussion carried out in [VEP #83](https://github.com/kubevirt/enhancements/pull/83).
+
+## Motivation
+
+There are multiple reasons to decouple KubeVirt from the underlying virtualization stack components, and **not mandate** the use of Libvirt as an intermediate layer between KubeVirt and the virt-stack.
+
+- **Customer scenarios require different virtualization stack components**: Given the increasing number of virtualization stack components available today, different customers of KubeVirt would require specific components to cater to their unique needs. Decoupling KubeVirt from Libvirt/QEMU would allow them to use their preferred virtualization stack components. The existence of projects such as [kubeswift](https://github.com/kubeswift-io/kubeswift/) and [virtink](https://github.com/smartxworks/virtink) demonstrate that VMs on alternate virt-stacks are desirable in a K8s environment.
+
+- **Maintaining multiple virtualization stacks in-tree is unmaintainable**: Implementing support for different virtualization stacks directly in the core KubeVirt repository would significantly increase code complexity, testing burden, and maintenance overhead. A plugin-based architecture allows each virtualization stack implementation to be developed and maintained independently, reducing the maintenance burden on the core KubeVirt project.
+
+- **Limitations and overhead imposed by Libvirt**: Libvirt is a management wrapper which executes functions in its API by calling into the underlying VMM. Such functions can be directly invoked against the VMM by virt-launcher, thereby saving the overhead imposed by the Libvirt daemon. The use of Libvirt as the intermediate VM management layer restricts the virtualization stacks that can be used to only those that have a Libvirt driver. For example, OpenVMM does not have a Libvirt driver, and hence cannot be easily integrated into KubeVirt. Libvirt is implemented in C, and a programming language providing easier memory safety would reduce security risks. The plan for incorporating Rust into Libvirt has had relatively slow progress.
+Furthermore, although libvirt provides a useful unified Domain definition across virtualization stacks, it is redundant in the presence of KubeVirt’s own VirtualMachineInstance definition.
+Additionally, KubeVirt only utilizes around 20% (~57/292) of all the Libvirt APIs available –leaving Libvirt significantly underutilized while virt-launcher still incurs the overhead of running the Libvirt daemon.
+
+### Areas of Tight Coupling Between KubeVirt and Libvirt/QEMU/KVM
+
+- **Hardcoded Libvirt/QEMU in launcher pod rendering logic**: The launcher pod rendering logic in `virt-controller` assumes the presence of a Libvirt daemon and QEMU process in the virt-launcher. Additionally, it also adds fields to the pod spec that are refer to Libvirt and QEMU, e.g., volume `libvirt-runtime`.
+
+- **Hardcoded Libvirt/QEMU in virt-handler**: `virt-handler`'s privileged operations on the `virt-launcher` container makes hardcoded assumptions about the virt-stack. E.g., to update the `memlock` limit of a VM's VMM process, the `virt-handler` logic explicitly looks for a `virtqemud` or `qemu-system-x86` process.
+
+- **Libvirt/QEMU-specific guest agent status determination**: Virt-Handler checks the state of the Libvirt channel "org.qemu.guest_agent.0” to determine if the guest agent is connected. It also assumes that the guest agent is QEMU Guest Agent and compares the list of supported commands with the set of required commands to determine if the agent is supported.
+
+- **KubeVirt’s virt-launcher is built for Libvirt/QEMU**: Although interaction with virt-launcher takes place through well-defined interfaces (Command and Notify API in handler-launcher-communication), it is not possible to build a virt-launcher component wherein the implementation of those interfaces can be backed by an alternative virtualization stack.
+
+- **Node Labeling invokes Libvirt's QEMU driver**: During the initialization of KubeVirt’s virt-handler component on a given node, it generates labels for that node based on the node’s virtualization capabilities. The virt-handler component queries node’s virtualization capabilities by running a virt-launcher container and invoking multiple Libvirt APIs, which in turn query the QEMU VMM. In addition to virtualization capabilities, the node topology is also queried from Libvirt, although that is not tied to the virtualization stack nor used for node labeling.
+
+- **KubeVirt's v1 API**: Libvirt/QEMU semantics are embedded throughout KubeVirt's CRDs and cluster configuration. For example, `Machine.Type` is documented as a "QEMU machine type", `CPU.Model` refers to the Libvirt CPU model map, `CPUFeature.Policy` uses Libvirt policy names verbatim, and `Disk.IO` specifies which QEMU disk I/O mode should be used. Cluster configuration also exposes `OVMFPath`, `EmulatedMachines`, and `MachineType` as first-class fields. Consequently, the KubeVirt v1 API is effectively a Libvirt/QEMU abstraction in several areas, rather than a virtualization-stack-neutral API.
+
+- **Internal Libvirt domain XML’s mirror `api.Domain` data structure**: KubeVirt thoroughly uses the api.Domain data structure to internally represent a virtual machine instance. This definition is meant to mirror Libvirt’s domain definition.
+
+## Relationship to KubeVirt Structured Plugins
+
+KubeVirt Structured Plugins provide extension points for adding out-of-tree functionality to specific parts of KubeVirt. They augment the behavior of the core implementation rather than replace its virtualization stack. Virtualization stack plugins define a different boundary: they replace the Libvirt/QEMU-specific implementation across the relevant KubeVirt components with an implementation for another virtualization stack.
+
+The mechanisms are therefore orthogonal. A virtualization stack plugin supplies the base VMM and runtime integration, while Structured Plugins may extend the functionality of whichever virtualization stack is selected.
+
+## Goals
+
+- Allow a cluster administrator to deploy KubeVirt core using upstream manifests and virtualization stack plugins and be able to launch and manage VMs.
+
+- Refactor KubeVirt to decouple it from Libvirt, QEMU and KVM/MSHV and invoke all virtualization related functionality via Plugin APIs.
+
+- Introduce a dedicated `VirtualizationStackPlugin` CRD for selecting and configuring virtualization stack plugins.
+
+- Streamline the process of building and deployment of KubeVirt for alternative virtualization stacks.
+
+- Ensure backward compatibility with existing KubeVirt deployments. Cluster administrators must be able to upgrade to the latest version of KubeVirt incorporating the proposed changes, while retaining the ability to create virtual machines using the default Libvirt/QEMU/KVM-based architecture without requiring API modifications.
+
+## Non Goals
+
+- Heterogeneous virtualization stacks in the same cluster or same node is out of scope for this VEP. Supporting that would make the VEP much more complex.
+
+- This VEP will not make changes to the KubeVirt API to make it virt-stack-agnostic. This VEP proposes to continue using the v1 API, even though it is heavily inspired by Libvirt, since it is general enough to express features provided by other virt-stacks.
+
+- This VEP will not generalize the internal representation of a running VM, i.e., the `api.Domain` data structure. It is general enough to use for representing VMs in other virt-stacks. The plugin author would need to write an adapter to and from `api.Domain` to their stack's VM representation.
+
+- Implementation of the proposed plugin components (e.g., virt-launcher and admission webhooks) for alternative virtualization stacks is not covered by this VEP.
+
+## Definition of Users
+
+The proposed plugin-based virtualization stack architecture is intended for advanced users and integrators of KubeVirt who require flexibility beyond the default Libvirt/QEMU-based stack. This includes:
+
+- Platform engineers and infrastructure teams deploying KubeVirt in environments where alternative virtualization stacks (e.g., Cloud Hypervisor, Firecracker) are preferred due to performance, security, or hardware compatibility requirements.
+
+- Distributors and downstream projects that package KubeVirt as part of a larger platform and need to support custom hypervisor backends.
+
+## User Stories
+
+### The Platform Operator (Infrastructure Admin)
+
+- User Story: "As a platform operator, I want to deploy lightweight microVMs (e.g., Cloud Hypervisor) alongside containerized workloads to increase tenant density and reduce resource overhead on my nodes."
+
+- Benefit: Flexibility to choose the virtualization stack that best fits the hardware and performance requirements of the organization without maintaining multiple orchestration platforms.
+
+### The Virtualization Stack Developer (Backend Provider)
+
+- User Story: "As a developer of a new virtualization backend, I want to integrate my VMM into KubeVirt without having to modify the KubeVirt core codebase or upstream my VMM-specific logic to the main repository."
+
+- Benefit: Accelerated development cycles and independent release cadences for backend plugins.
+
+### The Infrastructure Developer (KubeVirt Core Maintainer)
+
+- User Story: "As a KubeVirt maintainer, I want to reduce the complexity of the core codebase by offloading VMM-specific implementation details to external plugins, allowing the core to focus on Kubernetes-native orchestration."
+
+- Benefit: Reduced technical debt and a more stable, maintainable core API that is not tightly coupled to libvirt/QEMU lifecycle quirks.
+
+## Repos
+
+- Core KubeVirt repo: [kubevirt/kubevirt](https://github.com/kubevirt/kubevirt)
+
+- Additional repositories containing implementation of plugin components (e.g., virt-launcher and admission webhooks) for alternative virtualization stacks.
+
+## Proposed Design
+
+This VEP defines the top-level design direction for introducing a plugin-based virtualization stack model in KubeVirt. Because this effort requires a broad refactoring of tightly coupled areas in the KubeVirt codebase, it is not practical to capture all detailed design changes in a single document.
+
+Therefore, this VEP serves as a tracking VEP for a set of smaller, focused VEPs. Each of those VEPs will propose and document the detailed design for one specific area of tight coupling in KubeVirt (for example, virt-launcher pod rendering, privileged operations against the VM, discovering node capabilities for label generation.).
+
+The intent is to keep this document focused on overall architecture and coordination, while delegating implementation-level design details to targeted follow-up VEPs.
+
+This proposed design does not alter the KubeVirt v1 API to remove its embedded Libvirt/QEMU semantics. Alternative virtualization stacks must interpret the existing fields where possible and define their behavior for unsupported or inapplicable values. Making the API virtualization-stack-neutral, or adding stack-specific API extensions, is deferred to future design work.
+
+This section will walk through each key component of KubeVirt that performs virtualization stack related functions - listing the areas of tight-coupling with the traditional stack and proposing plugin API for extension.
+
+### Architecture Overview
+
+Several KubeVirt components are tightly coupled to the default Libvirt/QEMU/KVM virtualization stack. This proposal moves stack-specific logic behind plugins used by `virt-controller` and `virt-handler`, and makes `virt-launcher` a stack-specific component. The controller plugin is declared in the `VirtualizationStackPlugin` CR as either a CEL expression executed within `virt-controller` or a Kubernetes Service backed by a Deployment. In both cases, `virt-controller` first renders the default Libvirt/QEMU/KVM launcher pod, then invokes the plugin to obtain the final launcher pod. The node-local `virt-runtime` plugin is deployed as a DaemonSet, providing an instance on each node for `virt-handler` to invoke.
+
+```mermaid
+flowchart LR
+  VSP[VirtualizationStackPlugin CR]
+  DS[virt-runtime DaemonSet]
+
+  subgraph ControlPlane[Control plane]
+    VC[virt-controller]
+    DISPATCH{Controller plugin type?}
+    CEL[Execute CEL expression internally]
+    SVC[Controller plugin Service]
+    DEP[Controller plugin Deployment]
+
+    VC --> |Render virt-launcher| DISPATCH
+    DISPATCH -->|CEL| CEL
+    DISPATCH -->|Cluster service: RPC query| SVC
+    SVC --> DEP
+  end
+
+  subgraph Node[Each compute node]
+    VH[virt-handler]
+    VR[virt-runtime plugin]
+    VL[Stack-specific virt-launcher pod]
+
+    VH -->|UNIX socket RPC| VR
+    VH <-->|Command and Notify APIs| VL
+  end
+
+  DS -.->|Deploys| VR
+  VSP -.->|Declares socket name| VH
+  VSP -.->|Declares Controller Plugin| VC
+
+  classDef core fill:#dbeafe,stroke:#2563eb,color:#172554
+  classDef plugin fill:#dcfce7,stroke:#16a34a,color:#052e16
+  classDef registration fill:#fef3c7,stroke:#d97706,color:#451a03
+
+  class VC,VH,DISPATCH,CEL,FINAL core
+  class SVC,DEP,DS,VR,VL plugin
+  class VSP registration
+```
+
+| Style | Meaning |
+| --- | --- |
+| Blue | Core KubeVirt component |
+| Green | Stack-specific component supplied by the plugin provider |
+| Yellow | Virtualization stack registration |
+
+### Virt-Controller
+
+This section presents an overview of this VEP's proposed design for the `virt-controller` component. For more details, please refer to the dedicated VEP for making launcher pod rendering pluggable in virt-controller: [VEP 487: Pluggable virt-launcher Pod rendering in virt-controller](https://github.com/kubevirt/enhancements/pull/488/).
+
+#### Virt-Controller Plugin API
+
+Before invoking the controller plugin, `virt-controller` renders the launcher pod using its existing logic for the default Libvirt/QEMU/KVM stack. It then invokes a common pod-rendering plugin contract:
+
+- **Input:** the VMI, the launcher pod constructed for the default stack, and the renderer context.
+- **Output:** the final launcher pod.
+
+The plugin adapts the default pod for its virtualization stack, including replacing the launcher image, command and arguments, resource overhead, volumes and mounts, security context, capabilities, and node selectors as needed. `virt-controller` creates the pod returned by the plugin. The detailed virt-controller VEP will define the renderer context and concrete API schema shared by both deployment models.
+
+#### Virt-Controller Plugin Deployment Model
+
+Two deployment models are supported, with exactly one declared under `spec.controller` in the `VirtualizationStackPlugin` CR:
+
+1. **CEL:** the CR declares a CEL expression. `virt-controller` executes it internally with the VMI, default launcher pod, and renderer context as inputs, and uses the resulting final launcher pod. No controller plugin Service or Deployment is required.
+2. **Cluster service:** the CR references a Kubernetes Service backed by an independently deployed controller plugin. `virt-controller` sends an RPC request containing the same inputs and receives the final launcher pod in the response.
+
+The detailed VEP for the virt-controller plugin will describe CEL evaluation limits and error handling, as well as RPC timeout and retry behavior and caching for the cluster-service model.
+
+### Virt-Handler
+
+This section summarizes [VEP 515: Virt-Handler Runtime Plugin](https://github.com/harshitgupta1337/kubevirt-enhancements/blob/fb98e8d336cccaaea2a36fe2f891251da9557342/veps/sig-compute/515-virt-handler-runtime-plugin/vep.md), which defines the detailed runtime contract.
+
+#### Virt-Runtime Plugin API
+
+The `virt-runtime` plugin exposes the following gRPC calls over a node-local UNIX socket:
+
+| RPC | Purpose |
+| --- | --- |
+| `GetInfo` | Return the virtualization-stack identity, supported runtime API versions, and required hypervisor device. |
+| `AdjustVMIResources` | Apply backend-specific VM resource adjustments, such as memory-lock limits. |
+| `HandleHousekeepingResources` | Configure supporting VM processes and threads. |
+| `GetNodeLabels` | Return opaque node-label key/value pairs for the stack's local capabilities. |
+
+
+#### Hypervisor Device Plugin Ownership
+
+Kubernetes device-plugin registration for shared, non-exclusive hypervisor devices such as `/dev/kvm` and `/dev/mshv` remains owned by `virt-handler` core. The runtime reports its required hypervisor device through `GetInfo`; it never registers directly with kubelet. Every runtime must report a hypervisor device; device-less plugins are not supported.
+
+`virt-handler` starts and registers the device plugin for the reported device. Node scheduling readiness is advertised only after the runtime handshake and API negotiation succeed, plugin labels are applied, and the device plugin registers with kubelet. Kubelet publishes device capacity; core does not wait for an exact capacity value before advertising readiness. Sharing and deduplicating device registrations across multiple stacks is future work.
+
+Exclusive or per-instance devices, such as VFIO passthrough devices, are outside this mechanism. They continue to use the standard Kubernetes or SR-IOV device-plugin path and are requested through pod specifications generated by the `virt-controller` plugin.
+
+#### Live Migration
+
+Migration retains the existing sequence and launcher Command API RPC names: `SyncMigrationTarget`, `MigrateVirtualMachine`, `CancelVirtualMachineMigration`, and `FinalizeVirtualMachineMigration`. The runtime performs any required privileged node preparation; it does not expose a migration endpoint-discovery RPC.
+
+The target launcher creates and serves its backend migration UNIX sockets and returns them through an optional `migrationEndpoints` array in the shared protobuf `Response` used by `SyncMigrationTarget`. Each entry contains an opaque, filename-safe `name` and a `path` in the target launcher's filesystem accessible to `virt-handler`. Success means all reported sockets accept migration connections; preparation still in progress returns a retryable result.
+
+Core owns TLS listeners, certificates, and forwarding between nodes. The target handler creates a TLS listener per endpoint and publishes the target address and socket-name-to-TCP-port mapping in VMI migration status. The source handler creates corresponding local UNIX proxies before invoking `MigrateVirtualMachine`. Source and target launchers agree on endpoint names; source proxy paths follow:
+
+```text
+<virtShareDir>/migration-sockets/<migration-UID>/<socket-name>.sock
+```
+
+Older handlers ignore the additive response field. New handlers retain the existing hardcoded endpoint convention only for older built-in launchers, and custom launchers must report endpoints.
+
+#### Deployment Model for `Virt Runtime`
+
+The runtime is deployed as a privileged DaemonSet, with one pod on each node. The administrator grants the host PID visibility and host mounts required by its implementation, including access to the kubelet pods directory (mounted at `/pods` by the existing handler).
+
+The proposed host socket directory is `/var/run/kubevirt/virt-runtime/`, mounted through `hostPath` by both runtime and handler. The `VirtualizationStackPlugin` resource declares `spec.runtime.socketName`; the handler connects to that socket and retries missing sockets with backoff. This deployment model is similar to that of the Node Hook structured plugin.
+
+
+### Pluggable Node Labeler
+
+We propose moving virtualization-stack-specific capability discovery and node label generation out of the `virt-handler` core and into the `virt-runtime` plugin introduced above. Labels returned by `GetNodeLabels` are opaque to core, allowing a plugin to expose capabilities, stack versions, and preview features without extending an in-tree interface for each new label. Core validates Kubernetes label syntax, tracks ownership, and removes stale plugin-owned labels without overwriting labels owned by another component. The runtime does not write Kubernetes node labels or provide core's host topology.
+
+Each plugin's labels use its virtualization-stack name (e.g., `libvirt-qemu-kvm`) as a prefix to avoid collisions if multiple stacks are supported on the same node in the future. Core applies the returned labels without interpreting their stack-specific meaning.
+
+The runtime and controller launcher-rendering plugins agree on the labels and matching node selectors assigned to launcher pods.
+
+#### Node Labeler Plugin API
+
+There is no distinct node labeler plugin. The runtime's `GetNodeLabels` RPC receives local node identity and relevant label-generation configuration and returns opaque node-label key/value pairs.
+
+### Refactoring Virt-Launcher to make it pluggable
+
+We propose making the entire `virt-launcher` component pluggable. Each virtualization stack would provide its own `virt-launcher` implementation and container image, allowing stack-specific VM lifecycle and VMM integration code to be developed and released outside the core KubeVirt repository.
+
+`virt-handler` would continue to interact with a plugin `virt-launcher` through the existing Command and Notify APIs. Within the plugin, the `CmdServer` implementation acts as a shim over that plugin's `DomainManager` implementation, translating Command API calls into stack-specific domain operations. Furthermore, the `virt-launcher` would contain a `NotifyClient` that would send `DomainEvents` and `K8sEvents` to the `virt-handler`.
+
+The Command API and the Notify API are the communication boundary used by `virt-handler`, while `DomainManager` and `NotifyClient` implementations are provided by the plugin.
+
+It is important to note that in this design proposal, we propose to continue using Libvirt-oriented data structure `api.Domain` for representing a running virtual machine.
+
+
+#### Virt-Launcher Plugin API
+
+The `virt-launcher` plugin will run the Command API server listening on a UNIX socket (also visible to the `virt-handler`). It will also run the Notify Client and connect to the Notify UNIX socket. Both these APIs will be part of the `virt-launcher` plugin SDK.
+
+### Pluggable Admission Webhooks
+
+Admission webhooks are fully pluggable per CRD. A cluster administrator supplies the mutating and validating admission webhooks or Kubernetes admission policies required by the custom virtualization stack for specific CRDs.
+
+#### Admission Ownership
+
+With `PluggableVirtualizationStack` disabled, KubeVirt installs its existing admission webhooks unchanged. With the feature gate enabled, `virt-operator` omits the installation of admission webhooks for the following CRDs/subresources, because the implementation of those webhooks assumes Libvirt/QEMU as the underlying virtualization components.
+
+1. VirtualMachineInstance
+2. VirtualMachine
+3. VirtualMachine.Status
+4. VirtualMachineInstanceReplicaSet
+5. VirtualMachinePool
+6. VirtualMachineInstancePreset
+
+CRDs whose webhook logic is agnostic of virtualization stack would continue to be installed by `virt-operator`.
+
+When `PluggableVirtualizationStack` FG is enabled, the cluster admin deploys and manages replacement admission resources for the above CRDs/subresources through the standard Kubernetes APIs - using either Admission Webhooks or Policies.
+
+#### Installation and Administrative Responsibility
+
+The operator installation provides the `KubeVirt` and `VirtualizationStackPlugin` CRDs during bootstrap, before a `KubeVirt` CR is created. Workload CRDs such as VM and VMI are installed when `virt-operator` reconciles a `KubeVirt` CR. Administrators may install custom admission webhooks and policies after KubeVirt is up; their readiness is not a prerequisite for KubeVirt core readiness.
+
+The administrator is responsible for installing and verifying all required admission components before allowing VM/VMI workloads, and for maintaining that protection during upgrades. KubeVirt documentation must make clear that its readiness does not imply that a custom stack's admission is installed or ready.
+
+
+## VirtualizationStackPlugin CRD
+
+This section will define the cluster-scoped `VirtualizationStackPlugin` CRD that registers each virtualization stack and provides KubeVirt core components with the information needed to select and invoke its plugins.
+
+```yaml
+apiVersion: virstackplugin.kubevirt.io/v1alpha1
+kind: VirtualizationStackPlugin
+metadata:
+  # The resource name is the stable stack ID referenced by VMIs.
+  name: cloud-hypervisor-mshv
+spec:
+  controller:
+    type: ClusterService
+    service:
+      namespace: cloud-hypervisor-system
+      name: cloud-hypervisor-controller-plugin
+      port: 9443
+  runtime:
+    # Resolved below a KubeVirt-owned runtime directory on each node.
+    socketName: cloud-hypervisor-mshv.sock
+
+```
+
+Alternatively, the controller declaration can use CEL:
+
+```yaml
+spec:
+  controller:
+    type: CEL
+    cel:
+      expression: "pod"
+  runtime:
+    socketName: cloud-hypervisor-mshv.sock
+```
+
+The CEL example illustrates an identity expression returning the input default launcher pod, exposed as `pod`; an alternative stack would supply an expression that adapts it. The concrete CEL input bindings and pod-construction syntax will be defined in the detailed virt-controller VEP. The CRD must require exactly one controller model: `cel` for `type: CEL` or `service` for `type: ClusterService`.
+
+A cluster administrator creates the `VirtualizationStackPlugin` resource to register the controller plugin and node-local runtime socket with KubeVirt; it does not deploy or manage plugin components. The launcher image is selected by the controller plugin in its returned pod. In the initial design, consuming KubeVirt components (such as `virt-controller` and `virt-handler`) independently load the CEL expression or resolve the plugin endpoints and report invocation or availability failures through events and/or conditions on the affected resources (e.g., VMI).
+
+### Deployment and Readiness Lifecycle
+
+During the alpha stage, this architecture is enabled through the `PluggableVirtualizationStack` feature gate. With the gate disabled, KubeVirt uses the existing default stack. With it enabled, a custom stack is required and there is no default-stack fallback. A typical deployment proceeds as follows:
+
+1. The cluster administrator installs `virt-operator` without creating a `KubeVirt` CR and waits for the bootstrap-installed `VirtualizationStackPlugin` CRD to become `Established=True`.
+2. The administrator deploys the stack-provided components: the controller plugin Deployment and Service only for the cluster-service model and the privileged `virt-runtime` DaemonSet, and makes the stack's launcher image available.
+3. The administrator creates a `VirtualizationStackPlugin` resource declaring either the controller CEL expression or cluster Service, and the node-local runtime socket name. Plugin workloads and the registration may be created in either order because discovery is retried.
+4. The administrator creates the `KubeVirt` CR with the feature gate enabled. The operator installs core, grants handler registration read/watch access and the shared socket mount, and installs workload CRDs while omitting the designated default-stack admission entries. Core components remain ready even if registration or runtime discovery is incomplete, but workload execution does not fall back to the default stack.
+5. `virt-controller` watches the registration. For CEL, it loads and checks the expression for internal execution. For a cluster service, it repeatedly resolves the referenced Service and negotiates a compatible plugin API. For each VMI, it first renders the default launcher pod and then invokes the selected plugin model with the VMI, default (Libvirt/QEMU-based) pod, and renderer context. If registration is missing, the plugin is unavailable, or invocation fails, `virt-controller` remains ready, but pod creation is blocked with an event or condition reported on the VMI. Reconciliation is retried; the default pod is never used as a fallback.
+6. Each `virt-handler` connects to the registered UNIX socket and calls `GetInfo` to verify stack identity and negotiate a compatible API. It calls `GetNodeLabels`, applies the returned labels, starts and registers the reported hypervisor device plugin with kubelet, and discovers host topology directly. The existing `kubevirt.io/schedulable` label remains `false` until the handshake, label application, and device-plugin registration succeed; discovery alone does not make the node schedulable.
+7. Before allowing VM/VMI workloads, the administrator installs and verifies the required admission webhooks or policies and verifies stack components and registration readiness. This is an administrative responsibility, not a KubeVirt readiness check.
+8. During VMI reconciliation, the handler invokes runtime resource and housekeeping RPCs. VM lifecycle commands continue to go directly to the selected launcher through the Command API.
+
+```mermaid
+sequenceDiagram
+  actor Admin as Cluster administrator
+  participant Operator as virt-operator
+  participant Controller as virt-controller
+  participant API as Kubernetes API
+  participant Runtime as virt-runtime
+  participant Handler as virt-handler
+
+  Admin->>Operator: Install operator without KubeVirt CR
+  Operator->>API: Install registration CRD during bootstrap
+  Admin->>API: Wait for registration CRD Established=True
+
+  Admin->>API: Deploy privileged runtime DaemonSet and optional controller Service/Deployment
+  Runtime->>Runtime: Publish node-local UNIX socket
+
+  Admin->>API: Create VirtualizationStackPlugin
+  Admin->>API: Create KubeVirt CR with feature gate
+  API-->>Operator: Observe KubeVirt CR creation
+  Operator->>API: Create core with handler registration access and socket mount
+
+  Admin->>API: Install custom admission webhooks or policies
+  Note over Admin,Operator: Administrator verifies admission readiness; core does not wait for it
+
+  API-->>Controller: Observe plugin registration
+  alt CEL controller plugin
+    Controller->>Controller: Load and check CEL expression
+  else Cluster-service controller plugin
+    Controller->>API: Resolve controller Service
+    Controller->>Controller: Retry discovery until reachable
+  end
+
+  API-->>Handler: Observe plugin registration
+  Handler->>Runtime: Connect through UNIX socket
+  Handler->>Runtime: GetInfo()
+  Runtime-->>Handler: Return stack identity, API versions, and hypervisor device
+  Handler->>Handler: Verify identity and negotiate API version
+  Handler->>Runtime: GetNodeLabels()
+  Runtime-->>Handler: Return stack capability labels
+  Handler->>API: Apply plugin-owned labels
+  Handler->>Handler: Register hypervisor device plugin with kubelet
+  Handler->>Handler: Discover host topology from sysfs
+  Handler->>API: Set kubevirt.io/schedulable=true
+
+  Note over Admin,Handler: Administrator allows workloads after verifying admission and stack readiness
+```
+
+When multiple stacks can be independently available on the same node, stack-specific availability labels will supplement `kubevirt.io/schedulable`. Failure of one runtime will then prevent scheduling only VMIs that select that stack, rather than making the node unavailable to every stack.
+
+## Alternate Design Choices Considered
+
+### Virt-Controller Plugin Deployment Alternatives
+
+CEL execution within `virt-controller` and an external cluster service are supported deployment models. A sidecar was also considered as an alternative to the cluster service.
+
+#### Design 1: Cluster Service
+
+The plugin runs in an independent Deployment and is exposed through the Kubernetes Service referenced by the `VirtualizationStackPlugin` resource. This allows the plugin to be installed, scaled, and upgraded independently of `virt-controller`.
+
+#### Design 2: Virt-Controller Sidecar
+
+The plugin runs as a sidecar container in each `virt-controller` pod. This avoids network calls through a cluster Service, but couples the plugin's lifecycle, scaling, and failure domain to `virt-controller` and requires changing the `virt-controller` pod whenever a plugin is installed or upgraded.
+
+#### Virt-Controller Deployment Decision
+
+We support CEL and Design 1 rather than the sidecar model. CEL allows pod adaptation without deploying a controller plugin service. For plugins requiring an external implementation, Cluster API (CAPI) demonstrates that external RPC servers can be used successfully as extension hooks. The Service-based model preserves the independent lifecycle of stack plugins and avoids modifying the core `virt-controller` deployment for each installed stack.
+
+### Virt-Launcher Virtualization Stack Boundary
+
+Two designs were considered for introducing pluggable virtualization stacks into `virt-launcher`.
+
+#### Design 1: Make the Entire Virt-Launcher Pluggable
+
+In this design, each virtualization stack supplies a complete `virt-launcher` implementation. The plugin implements the existing command RPC API used by `virt-handler` and translates those operations directly into the interfaces of its virtualization stack. No particular intermediate management layer or VM representation is required inside the plugin.
+
+For example, a QEMU-, Cloud Hypervisor-, or OpenVMM-based plugin could convert the VMI directly into the command line, configuration, or API representation expected by its VMM. A plugin may still choose to use Libvirt internally when that is beneficial, but Libvirt is an implementation choice rather than part of the KubeVirt plugin contract. The command RPC API remains the stable integration boundary between KubeVirt and the plugin.
+
+#### Design 2: Retain Libvirt as the Common Management Layer
+
+An alternative is to retain the existing Libvirt-based `virt-launcher` and make only the stack-dependent portions within it pluggable. The VMI converter, Libvirt domain representation, event notification pathway, and much of the current lifecycle implementation could remain shared. Stack-specific extensions would customize the generated Libvirt domain XML and related behavior for the selected Libvirt driver, for example the QEMU or Cloud Hypervisor driver.
+
+This design follows Libvirt's original purpose: providing one management API and domain representation across multiple virtualization technologies. It would preserve a substantial amount of the current `virt-launcher` implementation and could reduce the initial work required for stacks already supported by Libvirt. Operations such as live migration could also be delegated to Libvirt instead of being implemented independently by each plugin.
+
+However, the common interface would also make Libvirt, rather than the Command and Notify RPC APIs, the effective compatibility boundary for every virtualization stack. A stack could only participate if it had a sufficiently complete Libvirt driver, and KubeVirt features would depend on how quickly that LibVirt driver exposed new stack capabilities.
+
+#### Decision
+
+We choose Design 1, making the entire `virt-launcher` pluggable. The principal reasons are:
+
+- **Support for stacks without Libvirt drivers:** OpenVMM and Firecracker do not have Libvirt drivers, and future virtualization stacks may make the same choice. Requiring Libvirt would exclude such stacks or require their maintainers to first build and maintain a Libvirt driver, significantly raising the cost of integrating with KubeVirt.
+
+- **Independent feature delivery:** Even when a Libvirt driver exists, new VMM capabilities must first be represented in Libvirt's API and domain XML before a KubeVirt plugin can use them. Direct integration allows plugin maintainers to expose stack features and fixes on their own release cadence, without waiting for changes to propagate through an additional project and abstraction layer.
+
+- **Mismatch with KubeVirt's process model:** Libvirt is designed to manage multiple domains on a host, whereas each KubeVirt `virt-launcher` pod runs a dedicated Libvirt instance that manages a single VMI. KubeVirt therefore pays for a general-purpose, multi-domain management daemon without using one of its primary architectural benefits.
+
+- **Resource overhead:** A Libvirt daemon and its supporting processes consume memory in every `virt-launcher` pod. Removing this mandatory layer lets lightweight VMM plugins preserve their resource-density advantages and makes the per-VMI overhead proportional to the selected stack.
+
+- **Reduced mandatory trusted code:** Libvirt is implemented primarily in C and adds a large, memory-unsafe codebase to every launcher pod. Design 1 does not guarantee that plugins are memory-safe, but it avoids requiring this particular component and allows a plugin to minimize its runtime dependencies and attack surface.
+
+- **Stack-specific images are required in either design:** Launcher images must contain only the VMM binaries, libraries, configuration, and supporting tools required by their target stack. The build and release system must therefore learn to combine shared KubeVirt interfaces with stack-specific artifacts regardless of whether Libvirt is retained. Once that packaging and build refactoring is required, keeping Libvirt provides less of an implementation advantage than it initially appears to.
+
+- **Clear ownership and abstraction boundary:** Making the command RPC API the contract allows core KubeVirt to own orchestration semantics while each plugin owns its complete VM lifecycle implementation. This avoids leaking Libvirt XML, driver capabilities, and version-specific behavior into a nominally stack-neutral interface.
+
+The main cost of Design 1 is that functionality currently supplied by Libvirt, most notably lifecycle event handling and live migration execution, cannot automatically be reused by every stack. Each plugin must implement those semantics using the facilities of its VMM, and conformance tests will be needed to ensure consistent behavior at the command API boundary. This is considered an acceptable tradeoff: stacks differ in migration capabilities and operational models, so a common KubeVirt contract should define the required behavior while allowing each plugin to implement it natively. The existing Libvirt/QEMU launcher can continue to use Libvirt internally and reuse its current migration path, preserving backward compatibility without imposing Libvirt on other plugins.
+
+## Testing Strategy
+
+### Conformance Test Suite
+
+A standalone conformance test suite will validate a plugin's gRPC surface and the CEL controller contract directly without requiring a live KubeVirt cluster. It will verify schema compliance, error reporting for invalid input, operation idempotency, and behavioral invariants. For example, calling `AdjustVMIResources` twice for the same VMI must be safe, and `GetNodeLabels()` must return key-value pairs in the expected format.
+
+Following precedents such as CSI Sanity and CNI conformance testing, this suite will allow third-party plugin authors to self-certify implementations before integrating with a cluster, without requiring KubeVirt core team involvement or CI access.
+
+### End-to-End and Functional CI
+
+The main KubeVirt functional and end-to-end regression suite will continue to run against the default Libvirt/QEMU stack with `PluggableVirtualizationStack` disabled. KubeVirt will continue to treat Libvirt/QEMU/KVM as the primary virtualization stack and upstream releases will contain components that work with it. Feature-gate-enabled coverage will use a registered custom stack and its admission components.
+
+### Mock Plugin
+
+Unit and controller-level tests will verify that `virt-controller` first renders the default launcher pod and then invokes either CEL or a mock controller plugin service with the VMI, default pod, and renderer context, using the returned final pod for creation. Mock runtime tests will verify that `virt-handler` invokes the expected RPC, such as `AdjustVMIResources`, at the correct point and with the correct arguments. These tests verify dispatch, not realistic alternate behavior or behavioral divergence between stacks.
+
+## Backward Compatibility
+
+The design must preserve two invariants:
+
+1. With the `PluggableVirtualizationStack` feature gate disabled, KubeVirt behavior must be identical to pre-VEP KubeVirt.
+2. Upgrades must not disrupt already-running VMs.
+
+`virt-operator` upgrades the `virt-handler` DaemonSet and `virt-controller` Deployment but does not recreate existing `virt-launcher` pods. A VM started before an upgrade may therefore continue running its original, pre-plugin-architecture `virt-launcher` until it stops, restarts, or migrates. A new `virt-handler` must continue to manage such launchers. This is an existing KubeVirt version-skew concern, but the plugin refactor must explicitly preserve it.
+
+The Command and Notify APIs remain the stable wire boundary between `virt-handler` and `virt-launcher`, whether the launcher is the pre-plugin implementation or a stack-specific image. Runtime-related launcher changes are additive: migration endpoints extend the existing response, guest-agent status uses Command API version negotiation, and `GetVmmVersion` retains legacy RPC fallback. New handlers preserve existing behavior for older built-in launchers; custom launchers must implement the required extended contracts. Plugin dispatch does not require restarting already-running launcher pods.
+
+When the feature gate is enabled, a node may receive a new `virt-handler` before its required `virt-runtime` is ready. Plugin-dependent operations must wait or report an availability error; they must never fall back to the default Libvirt/QEMU implementation. Missing plugin registration is an administrator configuration error, while temporary unavailability is retried.
+
+During upgrades, `virt-operator` must preserve the admission ownership selected by the feature gate: omitted default-stack webhook entries must not be recreated by reconciliation or certificate rotation, and administrator-managed admission resources must not be modified or removed. Administrators are responsible for upgrading their admission components to preserve the KubeVirt API contract. This separation avoids operator ownership conflicts, but does not by itself guarantee compatibility with every KubeVirt release or make switching operating modes safe.
+
+Required compatibility coverage includes:
+
+- A mixed-version test in which a new `virt-handler` manages a pre-plugin-refactor `virt-launcher`, verifying unchanged Command and Notify API behavior.
+- A migration test in which a VM with a pre-plugin `virt-launcher` migrates to a node running the new `virt-handler`, verifying that the target uses the same stack and image as the source.
+- A rolling-upgrade test that upgrades the `virt-handler` DaemonSet while live VMs run on old and new nodes, verifying that no VM is disrupted.
+- An operator upgrade and reconciliation test verifying that custom-stack mode continues to omit the designated default-stack webhook entries, retains stack-independent entries, and leaves administrator-managed admission resources unchanged.
+
+## Graduation Requirements
+
+### Alpha
+
+- [ ] Preserve the existing default Libvirt/QEMU/KVM pod renderer in `virt-controller` as the input-producing step for the controller plugin. Refactor the default stack logic in `virt-handler` into self-contained internal functions, one per capability that will become a plugin RPC, without changing behavior. Existing end-to-end tests must pass unmodified before introducing dispatch.
+- [ ] Introduce the `PluggableVirtualizationStack` feature gate and guard all plugin-dispatch paths with it.
+- [ ] Install the `VirtualizationStackPlugin` CRD during operator bootstrap, before creation of the `KubeVirt` CR.
+- [ ] Implement conditional dispatch in `virt-controller`: with the feature gate disabled, use the default launcher pod unchanged; with it enabled, render the default pod only as input to the registered plugin and create the pod returned by its declared CEL or cluster-service model. Missing registration or plugin failures must block pod creation without default-stack fallback. In `virt-handler`, use the internal default functions only when the gate is disabled, and otherwise route plugin-dependent operations to the runtime plugin.
+- [ ] Implement the four runtime RPCs, `GetInfo` negotiation, plugin-owned launcher/process discovery, deadline and retry-safe semantics, and VMI/Domain snapshot arguments. Provide the privileged runtime socket and host-access manifests.
+- [ ] Gate node scheduling readiness on the runtime handshake, plugin-label application, and hypervisor device-plugin registration; retain core-owned sysfs topology discovery.
+- [ ] Implement the launcher migration-endpoint response, guest-agent status fields, and `GetVmmVersion` compatibility behavior described in VEP 515, preserving legacy built-in launcher behavior.
+- [ ] Verify through an explicit regression test that disabling the feature gate preserves pre-VEP behavior.
+- [ ] Verify that enabling the feature gate without registering a plugin reports a configuration error and prevents workload execution without default-stack fallback, while core components remain ready.
+- [ ] Define the retained and omitted admission entries, including operations and subresources, and verify that the operator reconciles the correct set for the feature gate.
+- [ ] Document that administrators may install custom admission after KubeVirt becomes ready and are responsible for admission readiness before allowing VM/VMI workloads. Verify that core readiness does not depend on custom admission readiness.
+- [ ] Implement a second virtualization stack plugin, such as Cloud Hypervisor, including its controller plugin, `virt-runtime`, and stack-specific `virt-launcher`. Verify end-to-end functionality.
+- [ ] Add mock-plugin call-verification tests for `virt-controller` and `virt-handler` as described in the Testing Strategy.
+- [ ] Provide a conformance test suite and ensure the new plugin passes it.
+- [ ] Continue running end-to-end CI against the default virtualization stack with the feature gate disabled, and against the custom stack and its admission components with the gate enabled.
+
+### Beta
+
+To be defined in a follow-up revision.
+
+### GA
+
+To be defined in a follow-up revision.
+
+## Open Questions
+
+- How should KubeVirt evolve API fields whose definitions encode Libvirt/QEMU semantics, such as machine types, CPU models and feature policies, disk I/O modes, and firmware or emulated-machine configuration? Should these fields gain stack-neutral semantics, be translated by each plugin, or be supplemented by stack-specific API extensions, and how should unsupported values be reported?
+
+- How will we enable users of alternate virt-stacks to create VMs with custom features not offered by KubeVirt API today? For example, OpenVMM (Rust-based VMM from MSFT) supports `vmbus` para-virtualized transport. How will users of that stack instruct KubeVirt to create an OpenVMM/MSHV VM with devices using `vmbus` transport?
+
+- How should registration be authenticated or restricted so that only plugins deployed by authorized cluster administrators can advertise labels for a virtualization-stack ID?
+
+- Should we remove LibVirt/QEMU functionality from KubeVirt core and make it a default plugin built and released by KubeVirt upstream? Or should we keep that functionality in-tree, while refactoring KubeVirt to allow invoking an alternate virtualization stack?
+
+- What should happen if `virt-handler` is rolled back to a pre-plugin-architecture version after VMs have been created using a plugin-based virtualization stack? The rolled-back `virt-handler` has no knowledge of plugin dispatch and cannot manage those VMs.
+
+- Should the VMI-level stack-selection field, such as `spec.virtualizationStack`, be introduced by this VEP or deferred to a follow-up VEP covering multiple virtualizations stacks in the same cluster or node?
+
+- How should we deal with the possibility of increasing the number of RPC calls in the Plugin APIs - which is expected to happen with new features?
+
+- Are `api.Domain` and `DomainStats` data structures really general enough to capture a VM's running state in many alternate virtualization stacks? This should be validated against multiple plugin implementations.
+
+- Should `GetInfo` eventually support multiple hypervisor devices or device-less runtimes? The current runtime contract requires one hypervisor device.
+
+- Which condition reasons and escalation-to-`Failed` policies should distinguish missing plugin registration from temporary plugin unreachability? Both prevent workload execution without default-stack fallback, but missing registration is a configuration error and temporary unreachability is retried.
