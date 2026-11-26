@@ -82,6 +82,7 @@ References:
 
 - [kubevirt/kubevirt](https://github.com/kubevirt/kubevirt)
 - [kubevirt/project-infra](https://github.com/kubevirt/project-infra) (prow job definitions need updating to use non-Bazel targets)
+- [kubevirt/kubevirt-no-bazel](https://github.com/kubevirt/kubevirt-no-bazel) (the development fork, see [Development approach](#development-approach))
 
 ## Design
 
@@ -96,16 +97,16 @@ During the v1.10.0 cycle, implementation happens in a fork of `kubevirt/kubevirt
 - Bespoke prow jobs can be set up in `project-infra` targeting the fork, giving full CI signal on the new build path without flooding `kubevirt/kubevirt` presubmits or breaking existing jobs
 - The two build systems are completely isolated during development rather than needing a switching mechanism within the same repo
 
-Once validated, the fork's changes are merged into main targeting v1.11.0 for Alpha. Alpha and Beta changes are upstreamed from the fork to main.
+For Alpha, the fork's changes are upstreamed to kubevirt/kubevirt main before the v1.11.0 code freeze, while the Bazel-based jobs keep running unchanged. The Beta changes are upstreamed from the fork the same way.
 
 ### Phase 1: Replace Bazel for builds and tests (Alpha)
 
-- **Base images**: Decouple RPM-dependent base images from the main build using Containerfiles — see [kubevirt#18286](https://github.com/kubevirt/kubevirt/pull/18286).
-- **Component images**: Each KubeVirt component image gets a multi-stage Containerfile that uses pre-built base images, copies in Go-compiled binaries, and configures the runtime environment.
-- **Binary compilation**: Replace Bazel `go_binary` targets with standard `go build` commands executed inside multi-stage Containerfiles.
+- **Base images**: Decouple RPM-dependent base images from the main build. They are built from Containerfiles, published separately (see [Publishing base images](#publishing-base-images)) and pinned by digest — see [kubevirt-no-bazel#8](https://github.com/kubevirt/kubevirt-no-bazel/pull/8).
+- **Component images**: Each KubeVirt component image gets a Containerfile that starts from its base image, copies in the compiled programs, and configures the runtime environment.
+- **Binary compilation**: Replace Bazel `go_binary` targets with standard `go build`. The programs of all images for one architecture are compiled in a single run in the builder container (`hack/dockerized`) before the image build, so they share the Go build cache, and the Containerfiles only copy them.
 - **Testing**: Replace `go_test` Bazel targets with standard `go test` invocations. Unit tests and functional tests run directly via Go tooling.
-- **Cross-compilation**: Go's built-in cross-compilation (`GOOS`/`GOARCH`) for pure Go binaries. C cross-compilation for `cmd/container-disk-v2alpha/main.c` (requires a C cross-compiler toolchain). CGO cross-compilation for `virt-launcher` (libvirt) and `pkg/virt-handler/node-labeller/kvm-caps-info-plugin_amd64.go` (KVM capability detection, amd64 only). Multi-arch container builds via `podman build --platform` or `buildx`.
-- **RPM dependency resolution**: RPM resolution uses bazeldnf invoked as a standalone CLI, without Bazel. `hack/rpm-deps.sh` runs `bazeldnf fetch` and `bazeldnf rpmtree` to resolve and pin RPM packages, while `hack/rpm-base-images/generate-rpm-tars.sh` downloads the pinned RPMs and produces rootfs tars via `bazeldnf rpm2tar`. See [kubevirt#18534](https://github.com/kubevirt/kubevirt/pull/18534).
+- **Cross-compilation**: Go's built-in cross-compilation (`GOOS`/`GOARCH`) for pure Go binaries. C cross-compilation for `cmd/container-disk-v2alpha/main.c` (requires a C cross-compiler toolchain). CGO cross-compilation for `virt-launcher` (libvirt) and `pkg/virt-handler/node-labeller/kvm-caps-info-plugin_amd64.go` (KVM capability detection, amd64 only). Multi-arch container builds via `podman build --platform` or `buildx`. For another architecture, the programs are cross-compiled in the builder-cross image, and virt-launcher and virt-handler link against the libvirt-devel base image of that architecture, so no emulation is needed.
+- **RPM dependency resolution**: RPM resolution uses bazeldnf invoked as a standalone CLI, without Bazel. `hack/rpm-deps.sh` runs `bazeldnf fetch` and `bazeldnf rpmtree` to resolve and pin RPM packages, while `hack/rpm-base-images/generate-rpm-tars.sh` downloads the pinned RPMs and produces rootfs tars via `bazeldnf rpm2tar`. See [kubevirt-no-bazel#4](https://github.com/kubevirt/kubevirt-no-bazel/pull/4). Since kubevirt/kubevirt moved to Bazel 9 and bzlmod ([kubevirt#19610](https://github.com/kubevirt/kubevirt/pull/19610)), the RPM pins live in `rpms.json`, a bazeldnf lockfile that the standalone bazeldnf reads as well.
 
 ### Dependency fetch resilience
 
@@ -113,9 +114,27 @@ Today, Bazel's remote HTTP cache (`bazel-cache.kubevirt-prow.svc.cluster.local`)
 
 **Go modules**: KubeVirt vendors all Go dependencies in the `vendor/` directory (checked into git). Builds use `-mod=vendor` and `GOPROXY=off`, so zero network access is needed to resolve or download Go modules at build time. This is unchanged by the Bazel removal and already matches the hermeticity Bazel provided for Go dependencies.
 
-**RPM packages**: RPM URLs and SHA checksums are pinned in `WORKSPACE` (checked into git), providing the same determinism as Bazel's `rpm()` rules. Each RPM entry in `WORKSPACE` already includes both an upstream CentOS mirror URL and a GCS mirror URL (`storage.googleapis.com/builddeps/<sha256>`). Base images are decoupled from the main build — regular CI pulls pre-built base images from the registry and never fetches RPMs directly. Only the "rebuild base images" workflow (triggered when RPM dependencies change) needs to download RPM packages. The `generate-rpm-tars.sh` script tries the GCS mirror first and falls back to upstream mirrors, providing the same resilience that Bazel's multi-URL fetching provided.
+**RPM packages**: RPM URLs and checksums are pinned in `rpms.json` (checked into git), providing the same determinism as Bazel's `rpm()` rules. Each RPM entry already includes both an upstream CentOS mirror URL and a GCS mirror URL (`storage.googleapis.com/builddeps/<sha256>`). Base images are decoupled from the main build — regular CI pulls pre-built base images from the registry and never fetches RPMs directly. Only the "rebuild base images" workflow (triggered when RPM dependencies change, see [Publishing base images](#publishing-base-images)) needs to download RPM packages. The `generate-rpm-tars.sh` script tries the GCS mirror first and falls back to upstream mirrors, providing the same resilience that Bazel's multi-URL fetching provided.
 
-**Container base images**: Base image references in Containerfiles will be pinned by digest (`@sha256:...`) rather than mutable tags. This ensures immutability and makes builds fail deterministically rather than silently pulling a changed image. The builder image is already pinned to a specific version.
+**Container base images**: Base images are pinned by digest (`@sha256:...`) in `hack/rpm-base-images/BASE_IMAGE_VERSIONS` rather than by mutable tags, and passed to the Containerfiles as build arguments. This ensures immutability and makes builds fail deterministically rather than silently pulling a changed image. The builder image is already pinned to a specific version.
+
+### Publishing base images
+
+Contributors cannot push to `quay.io/kubevirt`, yet the RPMs change every week through the RPM bump bot, through manual bumps, and through security backports to release branches. The base images are therefore published the way the builder image is today:
+
+| Builder image (today) | Base images |
+|---|---|
+| Pinned in `hack/dockerized` | Pinned by digest in `hack/rpm-base-images/BASE_IMAGE_VERSIONS` |
+| The `publish-kubevirt-builder` postsubmit pushes new images after a merge that changes `hack/builder/` | A `publish-kubevirt-base-images` postsubmit pushes new images after a merge that changes `rpm/` or `hack/rpm-base-images/` |
+| A PR then bumps the pinned version | The same job opens a PR that updates `BASE_IMAGE_VERSIONS` |
+
+1. Before merge, the e2e jobs of a PR that changes the RPM inputs rebuild the base images from its RPMs, for the architecture of the CI node, and test with them.
+2. After merge, the postsubmit builds the base images for amd64, arm64 and s390x on one amd64 node, which works because the base-image Containerfiles run nothing for the target architecture, and pushes them to `quay.io/kubevirt`. It runs on main and on the release branches that use the container build.
+3. The same job opens a PR, with `git-pr.sh` like the other bots, that updates `BASE_IMAGE_VERSIONS` with the new digests. Until that PR merges, builds keep using the previous base images, the same short delay as after a builder change.
+
+Base images on `quay.io/kubevirt` are never deleted, so releases stay reproducible. Three of them have a `-base` suffix (`libguestfs-tools-base`, `pr-helper-base`, `sidecar-shim-base`), because `quay.io/kubevirt` already has release repositories with those names.
+
+Later improvements: the weekly RPM bump bot can update `BASE_IMAGE_VERSIONS` in its own PR, which removes the delay for most RPM changes, and a CI check can verify that `BASE_IMAGE_VERSIONS` matches the RPM pins.
 
 ### Phase 2: Build caching and Bazel removal in fork (Beta)
 
@@ -163,6 +182,11 @@ Backporting to older release branches that still use Bazel is expected to work w
 - 2026-06-30: Initial draft PR to decouple base image build [#18286](https://github.com/kubevirt/kubevirt/pull/18286)
 - 2026-07-21: Exploring bazeldnf standalone (without Bazel) for RPM dependency management [kubevirt#18534](https://github.com/kubevirt/kubevirt/pull/18534)
 - 2026-07-30: GCS-backed Go test cache for unit tests [kubevirt#18645](https://github.com/kubevirt/kubevirt/pull/18645), [project-infra#5337](https://github.com/kubevirt/project-infra/pull/5337)
+- 2026-08-31: The [kubevirt/kubevirt-no-bazel](https://github.com/kubevirt/kubevirt-no-bazel) fork is created [project-infra#5404](https://github.com/kubevirt/project-infra/pull/5404), with its own presubmits from 2026-09-17 [project-infra#5405](https://github.com/kubevirt/project-infra/pull/5405)
+- 2026-09-30: `KUBEVIRT_NO_BAZEL` is replaced by `KUBEVIRT_USE_BAZEL`, which selects the Bazel build [kubevirt-no-bazel#2](https://github.com/kubevirt/kubevirt-no-bazel/pull/2)
+- 2026-10-13: RPM dependencies are resolved with bazeldnf standalone [kubevirt-no-bazel#4](https://github.com/kubevirt/kubevirt-no-bazel/pull/4), checked by presubmits [project-infra#5486](https://github.com/kubevirt/project-infra/pull/5486)
+- 2026-11-03: The fork's presubmits cover the storage, network, operator, monitoring, compute-serial and compute-migrations e2e lanes [project-infra#5556](https://github.com/kubevirt/project-infra/pull/5556)
+- 2026-11-13: The images are built with Containerfiles, and `make cluster-sync` uses the container build by default [kubevirt-no-bazel#8](https://github.com/kubevirt/kubevirt-no-bazel/pull/8). The proofs of concept [kubevirt#18286](https://github.com/kubevirt/kubevirt/pull/18286) and [kubevirt#18534](https://github.com/kubevirt/kubevirt/pull/18534) are closed.
 
 ## Graduation Requirements
 
@@ -174,15 +198,16 @@ Backporting to older release branches that still use Bazel is expected to work w
 - [ ] Non-Bazel path for unit tests demonstrated and validated
 - [ ] All existing e2e tests pass with Containerfile-built images
 - [ ] Multi-arch support (amd64, arm64, s390x) verified with new build path
+- [ ] Alpha changes upstreamed from the fork to main
 
 ### Beta
 - [ ] Build caching implemented and validated in CI (container layer caching, `GOCACHE`, GCS-backed test cache)
 - [ ] Dependency fetch resilience validated:
 - [ ] Go module vendoring verified (`-mod=vendor`, `GOPROXY=off` — no network fetch at build time)
 - [ ] RPM downloads use existing GCS mirror (`gs://builddeps`) with fallback to upstream mirrors
-- [ ] Base images pinned by digest in all Containerfiles
+- [ ] Base images pinned by digest in `BASE_IMAGE_VERSIONS`
 - [ ] Bazel files removed in fork for testing
-- [ ] Alpha and Beta changes upstreamed from fork to main
+- [ ] Beta changes upstreamed from fork to main
 - [ ] Documentation updated for contributors
 
 #### On-By-Default Readiness
