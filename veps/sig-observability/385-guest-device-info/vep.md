@@ -214,7 +214,7 @@ above and emits one sample per device.
 
 ### Metric Definition
 
-**Name:** `kubevirt_vmi_guest_device_driver_date_seconds`
+**Name:** `kubevirt_vmi_guest_device_driver_timestamp_seconds`
 
 **Type:** Gauge, one sample per device per VM, emitted by `kubevirt-observability-controller`
 alongside its other guest-agent-derived metrics. A VM reporting no device data produces no samples.
@@ -273,12 +273,12 @@ alone
 ### Recording Rule and Alert
 
 Both are registered in the controller, which VEP #143 makes the owner of `PrometheusRule` content.
-`vmi:kubevirt_vmi_guest_device_driver_outdated:info` yields one series per outdated (VMI, device)
-pair:
+`vmi:kubevirt_vmi_guest_device_driver_timestamp_seconds:max` yields one series per outdated
+(VMI, device) pair:
 
 ```promql
 max by (namespace, name, device_id, driver_name, driver_version, guest_os_version_id) (
-    kubevirt_vmi_guest_device_driver_date_seconds
+    kubevirt_vmi_guest_device_driver_timestamp_seconds
   and on (device_id, guest_os_version_id)
     kubevirt_guest_device_driver_latest_version_info
   unless on (device_id, guest_os_version_id, driver_version)
@@ -300,7 +300,7 @@ The alert is added to the controller's VM workload alerts:
 | Field | Value |
 |-------|-------|
 | Alert | `OutdatedGuestDeviceDrivers` |
-| Expr | `vmi:kubevirt_vmi_guest_device_driver_outdated:info{namespace!=''}` |
+| Expr | `vmi:kubevirt_vmi_guest_device_driver_timestamp_seconds:max{namespace!=''}` |
 | For | `1h` |
 | `severity` | `warning` |
 | `operator_health_impact` | `none` |
@@ -325,7 +325,7 @@ kubevirt/monitoring.
 ### Metric Output
 
 ```
-kubevirt_vmi_guest_device_driver_date_seconds{
+kubevirt_vmi_guest_device_driver_timestamp_seconds{
   node="worker-1", namespace="default", name="win-vm-1",
   driver_name="Red Hat VirtIO Ethernet Adapter",
   driver_version="100.95.104.26200",
@@ -337,12 +337,12 @@ kubevirt_vmi_guest_device_driver_date_seconds{
 
 Inventory, filtered by any label - here one device across the fleet:
 ```promql
-kubevirt_vmi_guest_device_driver_date_seconds{device_id="1041"}
+kubevirt_vmi_guest_device_driver_timestamp_seconds{device_id="1041"}
 ```
 
 Find VMs with drivers older than 1 year:
 ```promql
-(time() - kubevirt_vmi_guest_device_driver_date_seconds) > (365 * 24 * 3600)
+(time() - kubevirt_vmi_guest_device_driver_timestamp_seconds) > (365 * 24 * 3600)
 ```
 
 ### Reference ConfigMap
